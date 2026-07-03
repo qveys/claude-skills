@@ -1,2 +1,4 @@
 .DS_Store
 *.bak-read-default
+__pycache__/
+*.pyc
