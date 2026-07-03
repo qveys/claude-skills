@@ -243,13 +243,15 @@ def apply_patch(inp: dict) -> dict:
         # slipping an unsigned commit through.
         _git("config", "commit.gpgsign", "true", cwd=tmpdir)
 
-        # Write patch file
-        patch_path = os.path.join(tmpdir, "_pr_resolver.patch")
-        with open(patch_path, "w", encoding="utf-8") as f:
+        # Write the patch to a temp file OUTSIDE the working tree, so the later
+        # `git add -A` can never stage the patch file itself into the commit.
+        patch_fd, patch_path = tempfile.mkstemp(suffix=".patch", prefix="pr_resolver_")
+        with os.fdopen(patch_fd, "w", encoding="utf-8") as f:
             f.write(patch)
 
         # Apply patch
         apply_r = _git("apply", "--whitespace=fix", patch_path, cwd=tmpdir, check=False)
+        os.unlink(patch_path)
         if apply_r.returncode != 0:
             return {
                 "error": (
