@@ -389,6 +389,12 @@ is intentionally noisier, but it avoids relying on pane-side helper state.
 `scripts/wsh-live.sh selftest-sep`. It exercises the helper wrapper under bash
 and zsh without tmux.
 
+> **Mainteneur :** après toute retouche du cœur live (framing, `wait-done`,
+> `banner`, `stop`, fichiers d'état), lance `scripts/wsh-live.sh selftest-sep`
+> **et** `scripts/wsh-live.sh selftest-live` — ce dernier exerce la vraie boucle
+> tmux bout-en-bout (start/send/wait-done/read/banner/stop) sur une session
+> `cockpit-selftest-$$` jetable, sans jamais ouvrir de bloc Wave.
+
 ## Cleaning up — but not too fast
 
 Every `rexec` block is a visible pane in the user's Wave tab; leaving strays
