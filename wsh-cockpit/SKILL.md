@@ -94,6 +94,7 @@ scripts/wsh-live.sh keys  '<tmux-keys>' [session] # raw keys: C-c, Up, q, Enter.
 scripts/wsh-live.sh read  [session] [lines]    # snapshot the pane (default 30 lines)
 scripts/wsh-live.sh stop  [session]            # kill the session
 scripts/wsh-live.sh current                    # print last spawned session for this agent
+scripts/wsh-live.sh doctor                     # read-only diagnostic, 10 checks, rc 0/1
 scripts/wsh-live.sh status [prefix]            # is last session alive? matching sessions?
 scripts/wsh-live.sh banner {header|phase|step|done} ... [session]  # airy step banners (required)
 scripts/wsh-live.sh wait-done [session] [timeout_sec]              # wait for send exit footer
@@ -516,3 +517,13 @@ this by hand; just call `scripts/wsh-live.sh open <session>`. (Implementation:
 The one thing that's on **you**: when `open` reports the cockpit is on tab «T4»
 (it prints this when >1 tab exists, because no wsh command can move the UI focus),
 **relay that tab name to the user** — never just say "it's open."
+
+### doctor — diagnostiquer le cockpit
+
+`scripts/wsh-live.sh doctor` déroule 10 checks read-only (tmux, serveur, sessions
+`cockpit-*` vivantes, `wsh`/`sqlite3`, DB Wave/tab actif, state dir, helpers,
+logs d'audit, extras `ttyd`/`zellij`) et n'écrit jamais rien — sûr à lancer
+n'importe quand, même sans session. Utilise-le quand `open` échoue, qu'une
+session semble invisible côté utilisateur, ou que l'état parait périmé. Sortie
+une ligne par check (`ok|warn|fail — libellé — détail`), rc 0 si tout est `ok`/
+`warn`, rc 1 si au moins un `fail`.
