@@ -20,7 +20,7 @@
 #   read  [session] [lines]    print the current pane (default 30 lines back)
 #   stop  [session]            kill the session
 #   current                    print the last session created by `spawn` in this shell tree
-#   doctor                     read-only diagnostic of the whole cockpit chain (10 checks,
+#   doctor                     read-only diagnostic of the whole cockpit chain (11 checks,
 #                              rc 0/1, never writes anything — safe to run anytime)
 #   web   {start|stop|status} [session]
 #                              browser view of the cockpit pane via ttyd, loopback-only
@@ -36,8 +36,9 @@
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
-#                                open/status/spawn); keys, audit log and web
-#                                stay tmux-only and refuse explicitly
+#                                open/status/spawn); keys/web refuse explicitly
+#                                under zellij; the audit log is disabled with a
+#                                warning instead (pipe-pane is tmux-only)
 #      WSH_LIVE_LOG=1 (default)  enable audit logging; WSH_LIVE_LOG=0 disables
 #      WSH_LIVE_LOG_DIR           custom log directory (default ~/Library/Logs/wsh-cockpit)
 #      WSH_COCKPIT_AGENT          key for state file (agent name, used in last-session-*)
@@ -70,8 +71,10 @@ SEP_HELPER_VERSION="4"
 STEP_HELPER_VERSION="1"
 # WSH_MUX selects the multiplexer backend. tmux is the reference (full feature
 # set); zellij covers the core loop only (start/send/read/wait-done/stop/open/
-# status/spawn). keys, the pipe-pane audit log and the ttyd web view are
-# tmux-only — each refuses explicitly under zellij, never silently.
+# status/spawn). keys and the ttyd web view are tmux-only — each refuses
+# explicitly under zellij, never silently. The pipe-pane audit log is also
+# tmux-only, but does NOT refuse: the session still starts, unlogged, with an
+# explicit stderr warning (see audit_log_start).
 MUX="${WSH_MUX:-tmux}"
 case "$MUX" in tmux|zellij) ;; *)
   echo "wsh-live: WSH_MUX must be 'tmux' or 'zellij' (got '$MUX')" >&2; exit 2 ;;
@@ -274,7 +277,10 @@ mux_attach_cmd() {  # the command a human types to join the session
 # (dir 700 / files 600) and purge after 30 days.
 audit_log_start() {
   [ "${WSH_LIVE_LOG:-1}" = "1" ] || return 0
-  [ "$MUX" = tmux ] || return 0   # pipe-pane is tmux-only; zellij runs unlogged
+  if [ "$MUX" != tmux ]; then
+    echo "note: audit log unavailable under $MUX (pipe-pane is tmux-only) — session runs UNLOGGED" >&2
+    return 0
+  fi
   local sess="$1" dir f slug
   dir="${WSH_LIVE_LOG_DIR:-$HOME/Library/Logs/wsh-cockpit}"
   mkdir -p "$dir" 2>/dev/null && chmod 700 "$dir" 2>/dev/null || return 0
@@ -332,6 +338,26 @@ seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Z
 
 # Per-session ttyd pidfile path — same slug-normalization model as seq_file().
 web_pid_file() { printf '%s/web-%s.pid\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# True when pid $1 is alive AND is a ttyd process. A bare PID alone isn't proof
+# after a reboot recycled it — shared by web_alive_pid (read-only check, used
+# by `web start`/`web status`) and web_teardown (kill, used by `stop` and
+# `web stop`), so the alive-and-ttyd condition lives in exactly one place.
+web_pid_is_ttyd() { kill -0 "$1" 2>/dev/null && ps -p "$1" -o comm= 2>/dev/null | grep -q 'ttyd$'; }
+
+# Kill this session's ttyd web view if one is running; always drop the pidfile.
+# Called both by top-level `stop` (so killing a cockpit session always tears
+# down its web view too — a bare tmux/zellij kill used to leak the ttyd
+# process) and by `web stop`.
+web_teardown() {
+  local pf p; pf=$(web_pid_file "$1")
+  [ -f "$pf" ] || return 0
+  p=$(tr -d '[:space:]' <"$pf")
+  if [ -n "$p" ] && web_pid_is_ttyd "$p"; then
+    kill "$p" 2>/dev/null || true
+  fi
+  rm -f "$pf" 2>/dev/null || true
+}
 
 # Next sequence number for a session (reads+writes state file). Echoes it.
 sep_next_seq() {
@@ -702,7 +728,7 @@ current)
   fi
   ;;
 doctor)
-  # Read-only diagnostic of the whole cockpit chain: 10 checks, no mkdir/touch/
+  # Read-only diagnostic of the whole cockpit chain: 11 checks, no mkdir/touch/
   # remember_session, no need_session (must run on a machine with nothing spawned
   # yet). Every check that CAN fail is wrapped in `if` or ends `|| true` so a
   # missing tmux/wsh/sqlite3/tmux-server never kills the script under set -e.
@@ -883,18 +909,21 @@ web)
     start|stop|status) ;;
     *) echo "usage: $0 web {start|stop|status} [session]" >&2; exit 2 ;;
   esac
-  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  # Only `start` needs the session alive (it attaches tmux to it). `stop` and
+  # `status` must work against a dead/gone session too — e.g. tearing down a
+  # web view left over after the cockpit session itself already died.
+  SESS=$(resolve_session "${1:-}")
+  [ "$ACTION" = start ] && need_session "$SESS"
   PORT="${WSH_WEB_PORT:-7681}"
   case "$PORT" in ''|*[!0-9]*) echo "web: WSH_WEB_PORT must be a positive integer (got '$PORT')" >&2; exit 2 ;; esac
   URL="http://127.0.0.1:${PORT}"
   PIDF=$(web_pid_file "$SESS")
 
-  web_alive_pid() {  # echoes the pid if the pidfile points at a live process
+  web_alive_pid() {  # echoes the pid if the pidfile points at a live ttyd process
     [ -f "$PIDF" ] || return 1
     local p; p=$(tr -d '[:space:]' <"$PIDF")
     [ -n "$p" ] || return 1
-    # PID alone isn't proof after a reboot — the pid may be recycled; require a ttyd command match.
-    if kill -0 "$p" 2>/dev/null && ps -p "$p" -o comm= 2>/dev/null | grep -q 'ttyd$'; then
+    if web_pid_is_ttyd "$p"; then
       printf '%s\n' "$p"
       return 0
     else
@@ -946,6 +975,21 @@ web)
       echo "web view failed to start on ${URL} (ttyd pid ${PID} not answering after 3s)" >&2
       exit 1
     fi
+    # curl 200 alone isn't proof OUR ttyd came up: if the port was already taken
+    # by another process (e.g. a different session's ttyd), our ttyd fails to
+    # bind and dies, while curl still gets 200 from the OTHER process — a false
+    # success that would leave the caller thinking THIS session has a working
+    # web view when it doesn't. When the port collision is what made curl
+    # succeed, it typically does so on the very first attempt (hitting the
+    # OTHER process instantly), before our own losing ttyd has even reached its
+    # bind() call — empirically ttyd takes ~70-100ms to discover EADDRINUSE and
+    # exit. Give it that grace window before trusting `kill -0`.
+    sleep 0.3
+    if ! kill -0 "$PID" 2>/dev/null; then
+      rm -f "$PIDF" 2>/dev/null || true
+      echo "web: ttyd died at startup — port ${PORT} already in use? (set WSH_WEB_PORT)" >&2
+      exit 1
+    fi
 
     echo "web view started: ${URL} (pid $PID, session '$SESS')"
     if [ "$WRITE" = "1" ]; then
@@ -957,11 +1001,10 @@ web)
     ;;
   stop)
     if PID=$(web_alive_pid); then
-      kill "$PID" 2>/dev/null || true
-      rm -f "$PIDF" 2>/dev/null || true
+      web_teardown "$SESS"
       echo "web view stopped (pid $PID)"
     elif [ -f "$PIDF" ]; then
-      rm -f "$PIDF" 2>/dev/null || true
+      web_teardown "$SESS"
       echo "nothing to stop (stale pidfile removed)"
     else
       echo "nothing to stop (no web view running for '$SESS')"
@@ -1371,6 +1414,7 @@ stop)
     tmux set-option -u -t "$SESS" "$(sep_helper_option "$SESS")" >/dev/null 2>&1 || true
     tmux set-option -u -t "$SESS" "$(step_helper_option "$SESS")" >/dev/null 2>&1 || true
   fi
+  web_teardown "$SESS"
   if mux_kill "$SESS"; then
     echo "killed session '$SESS'"
   else

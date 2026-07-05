@@ -94,7 +94,7 @@ scripts/wsh-live.sh keys  '<tmux-keys>' [session] # raw keys: C-c, Up, q, Enter.
 scripts/wsh-live.sh read  [session] [lines]    # snapshot the pane (default 30 lines)
 scripts/wsh-live.sh stop  [session]            # kill the session
 scripts/wsh-live.sh current                    # print last spawned session for this agent
-scripts/wsh-live.sh doctor                     # read-only diagnostic, 10 checks, rc 0/1
+scripts/wsh-live.sh doctor                     # read-only diagnostic, 11 checks, rc 0/1
 scripts/wsh-live.sh web {start|stop|status} [session]  # browser view via ttyd, read-only by default
 scripts/wsh-live.sh status [prefix]            # is last session alive? matching sessions?
 scripts/wsh-live.sh banner {header|phase|step|done} ... [session]  # airy step banners (required)
@@ -434,9 +434,11 @@ tmux, avec le même cœur de boucle : `spawn`/`start`/`send`/`read`/`wait-done`/
 - Une session Zellij background n'a **pas de pane** tant qu'un `run` n'en crée
   pas un ; le script le fait et mémorise le pane-id (`~/.cache/wsh-cockpit/pane-*`),
   car les actions Zellij headless doivent cibler le pane explicitement.
-- Restent **tmux-only** (refus explicite, jamais silencieux) : `keys` (noms de
-  touches tmux), le journal d'audit (`pipe-pane`) et `web` (ttyd a besoin de
-  l'attach lecture seule ; Zellij a son propre `zellij web`).
+- Restent **tmux-only** avec refus explicite : `keys` (noms de touches tmux) et
+  `web` (ttyd a besoin de l'attach lecture seule ; Zellij a son propre
+  `zellij web`). Le journal d'audit (`pipe-pane`) est aussi tmux-only, mais ne
+  bloque pas la session : elle démarre quand même, non journalisée, avec un
+  avertissement explicite sur stderr (`UNLOGGED`) plutôt qu'un refus silencieux.
 - Le framing `send` re-source le helper à chaque appel (pas de store d'options
   par session côté Zellij) : ligne visible un peu plus longue, comportement sûr.
 - Gate de non-régression : `WSH_MUX=zellij scripts/wsh-live.sh selftest-live`
@@ -546,7 +548,7 @@ The one thing that's on **you**: when `open` reports the cockpit is on tab «T4�
 
 ### doctor — diagnostiquer le cockpit
 
-`scripts/wsh-live.sh doctor` déroule 10 checks read-only (tmux, serveur, sessions
+`scripts/wsh-live.sh doctor` déroule 11 checks read-only (tmux, serveur, sessions
 `cockpit-*` vivantes, `wsh`/`sqlite3`, DB Wave/tab actif, state dir, helpers,
 logs d'audit, extras `ttyd`/`zellij`) et n'écrit jamais rien — sûr à lancer
 n'importe quand, même sans session. Utilise-le quand `open` échoue, qu'une
