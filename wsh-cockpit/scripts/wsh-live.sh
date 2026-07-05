@@ -22,6 +22,10 @@
 #   current                    print the last session created by `spawn` in this shell tree
 #   doctor                     read-only diagnostic of the whole cockpit chain (10 checks,
 #                              rc 0/1, never writes anything — safe to run anytime)
+#   web   {start|stop|status} [session]
+#                              browser view of the cockpit pane via ttyd, loopback-only
+#                              (brew install ttyd); read-only by default (WSH_WEB_WRITE=1
+#                              for a writable view) — see SKILL.md for tailnet exposure
 #   banner {header|phase|step|done} ... [session]
 #                              airy step announcement (no send framing — see wsh-step.sh)
 #   wait-done [session] [timeout_sec] [seq]
@@ -36,6 +40,8 @@
 #      WSH_COCKPIT_PREFIX         default prefix for auto-unique session names
 #      WSH_COCKPIT_STATE_DIR      state directory (default ~/.cache/wsh-cockpit)
 #      WSH_LIVE_SEP=1 (default)   enable send/recv visual framing; =0 for raw shell
+#      WSH_WEB_PORT (default 7681)  loopback TCP port for `web` (ttyd)
+#      WSH_WEB_WRITE=1              `web start` becomes writable (default: read-only)
 #
 # `open` solves the "the user shouldn't have to type `tmux attach` themselves"
 # problem: it spawns a visible Wave block running `tmux attach -t <session>`, so
@@ -227,6 +233,9 @@ tty_only() { [ -t 1 ] && printf '%s\n' "$@" || true; }
 
 # Per-session sequence counter file path: normalized slug of session name.
 seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# Per-session ttyd pidfile path — same slug-normalization model as seq_file().
+web_pid_file() { printf '%s/web-%s.pid\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
 
 # Next sequence number for a session (reads+writes state file). Echoes it.
 sep_next_seq() {
@@ -731,9 +740,9 @@ doctor)
 
   # 10. Optional extras — never fail on absence, just note it.
   if command -v ttyd >/dev/null 2>&1; then
-    doc_line ok "ttyd" "présent ($(command -v ttyd))"
+    doc_line ok "ttyd" "présent ($(command -v ttyd)) — utilisé par la sous-commande 'web'"
   else
-    doc_line warn "ttyd" "absent (optionnel, requis pour la sous-commande 'web')"
+    doc_line warn "ttyd" "absent (optionnel, requis pour la sous-commande 'web' : brew install ttyd)"
   fi
   if command -v zellij >/dev/null 2>&1; then
     doc_line ok "zellij" "présent ($(command -v zellij))"
@@ -747,6 +756,115 @@ doctor)
     exit 1
   fi
   echo "doctor: ok"
+  ;;
+web)
+  # Browser view of the cockpit pane via ttyd (`brew install ttyd`). LOOPBACK
+  # ONLY (-i 127.0.0.1) — ttyd never binds anything but localhost; reaching it
+  # from the tailnet is the user's call via `tailscale serve` (see SKILL.md),
+  # never `tailscale funnel` (that would expose the pane to the public internet).
+  # Read-only by default: no `-W` on ttyd (keyboard input from the browser is
+  # ignored) and the tmux client attaches with `-r` (read-only client) so a
+  # random visitor with the URL can watch but not type. WSH_WEB_WRITE=1 flips
+  # both: adds `-W` to ttyd and drops `-r` from the attach.
+  have_tmux
+  ACTION="${1:?usage: $0 web start|stop|status [session]}"
+  shift || true
+  case "$ACTION" in
+    start|stop|status) ;;
+    *) echo "usage: $0 web {start|stop|status} [session]" >&2; exit 2 ;;
+  esac
+  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  PORT="${WSH_WEB_PORT:-7681}"
+  case "$PORT" in ''|*[!0-9]*) echo "web: WSH_WEB_PORT must be a positive integer (got '$PORT')" >&2; exit 2 ;; esac
+  URL="http://127.0.0.1:${PORT}"
+  PIDF=$(web_pid_file "$SESS")
+
+  web_alive_pid() {  # echoes the pid if the pidfile points at a live process
+    [ -f "$PIDF" ] || return 1
+    local p; p=$(tr -d '[:space:]' <"$PIDF")
+    [ -n "$p" ] || return 1
+    # PID alone isn't proof after a reboot — the pid may be recycled; require a ttyd command match.
+    if kill -0 "$p" 2>/dev/null && ps -p "$p" -o comm= 2>/dev/null | grep -q 'ttyd$'; then
+      printf '%s\n' "$p"
+      return 0
+    else
+      # PID exists but isn't ttyd (recycled or wrong process) — treat as dead and clean up
+      rm -f "$PIDF" 2>/dev/null || true
+      return 1
+    fi
+  }
+
+  case "$ACTION" in
+  start)
+    command -v ttyd >/dev/null 2>&1 || {
+      echo "ttyd not found — install it on the Mac: brew install ttyd" >&2; exit 3; }
+    command -v curl >/dev/null 2>&1 || {
+      echo "curl not found — cannot verify the web view came up" >&2; exit 3; }
+    if PID=$(web_alive_pid); then
+      echo "web view already running for '$SESS' (pid $PID) — $URL"
+      exit 0
+    fi
+    rm -f "$PIDF" 2>/dev/null || true
+
+    TMUX_BIN=$(command -v tmux)
+    WRITE="${WSH_WEB_WRITE:-0}"
+    ttyd_args=(-p "$PORT" -i 127.0.0.1)
+    attach_args=(attach)
+    if [ "$WRITE" = "1" ]; then
+      ttyd_args+=(-W)
+    else
+      attach_args+=(-r)
+    fi
+    attach_args+=(-t "$SESS")
+
+    mkdir -p "$STATE_DIR"
+    nohup ttyd "${ttyd_args[@]}" "$TMUX_BIN" "${attach_args[@]}" >/dev/null 2>&1 &
+    PID=$!
+    disown 2>/dev/null || true
+    printf '%s\n' "$PID" >"$PIDF"
+    chmod 600 "$PIDF" 2>/dev/null || true
+
+    UP=0
+    for _ in 1 2 3 4 5 6; do
+      CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL" 2>/dev/null || true)
+      [ "$CODE" = "200" ] && { UP=1; break; }
+      sleep 0.5
+    done
+    if [ "$UP" -ne 1 ]; then
+      kill "$PID" 2>/dev/null || true
+      rm -f "$PIDF" 2>/dev/null || true
+      echo "web view failed to start on ${URL} (ttyd pid ${PID} not answering after 3s)" >&2
+      exit 1
+    fi
+
+    echo "web view started: ${URL} (pid $PID, session '$SESS')"
+    if [ "$WRITE" = "1" ]; then
+      echo "mode: READ-WRITE (WSH_WEB_WRITE=1) — anyone reaching this URL can type into the pane"
+    else
+      echo "mode: read-only (default) — set WSH_WEB_WRITE=1 for a writable view"
+    fi
+    echo "loopback only ; from the tailnet: tailscale serve --bg ${PORT} (never 'funnel' — see SKILL.md)"
+    ;;
+  stop)
+    if PID=$(web_alive_pid); then
+      kill "$PID" 2>/dev/null || true
+      rm -f "$PIDF" 2>/dev/null || true
+      echo "web view stopped (pid $PID)"
+    elif [ -f "$PIDF" ]; then
+      rm -f "$PIDF" 2>/dev/null || true
+      echo "nothing to stop (stale pidfile removed)"
+    else
+      echo "nothing to stop (no web view running for '$SESS')"
+    fi
+    ;;
+  status)
+    if PID=$(web_alive_pid); then
+      echo "web view: running (pid $PID, port $PORT) — $URL"
+    else
+      echo "web view: stopped"
+    fi
+    ;;
+  esac
   ;;
 banner)
   # Airy visual step announcement — sources wsh-step.sh's __wsh_banner once, then
@@ -1146,5 +1264,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|status|banner|wait-done|selftest-sep|selftest-live} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|status|web|banner|wait-done|selftest-sep|selftest-live} [args]" >&2; exit 2 ;;
 esac
