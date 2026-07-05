@@ -106,7 +106,8 @@ normalize_prefix() {
 
 # Newest alive tmux session matching cockpit-<prefix>-* (lex sort ≈ time suffix).
 newest_session_for_prefix() {
-  local prefix="$1" pattern="cockpit-${prefix}-" best=""
+  local prefix="$1" best=""
+  local pattern="cockpit-${prefix}-"
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     if [ -z "$best" ] || [[ "$s" > "$best" ]]; then

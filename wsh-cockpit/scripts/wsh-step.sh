@@ -269,18 +269,18 @@ run_step_selftest() {
   }
 
   local long="OVERLONG-TITLE-THAT-EXCEEDS-SEVENTY-COLUMNS-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-  cmp_case "done normal"        done   "Phase 4 OK — paperclip_mcp live sur Hermes macbook-openclaw"
+  cmp_case "done normal"        'done'   "Phase 4 OK — paperclip_mcp live sur Hermes macbook-openclaw"
   cmp_case "phase normal"       phase  2 6 "Identité Théo Marceau"
   cmp_case "step normal"        step   2.1 "TOOLS.md déployé"
   cmp_case "header full"        header "Cockpit Grok" "cockpit-live-x"
   cmp_case "header no-session"  header "Titre seul"
   cmp_case "phase no-title"     phase  1 6
-  cmp_case "done empty-msg"     done   ""
-  cmp_case "accents+emdash"     done   "é è ê — ç à œ «»"
-  cmp_case "overlong done"      done   "$long"
+  cmp_case "done empty-msg"     'done'   ""
+  cmp_case "accents+emdash"     'done'   "é è ê — ç à œ «»"
+  cmp_case "overlong done"      'done'   "$long"
   cmp_case "overlong phase"     phase  1 6 "$long"
   export WSH_STEP_WIDTH=20
-  cmp_case "small-width done"   done   "hi"
+  cmp_case "small-width done"   'done'   "hi"
   cmp_case "small-width phase"  phase  3 9 "abc"
   unset WSH_STEP_WIDTH
 
