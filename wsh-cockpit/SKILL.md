@@ -542,6 +542,13 @@ attach-landed check with a manual-`tmux attach` fallback. You don't run any of
 this by hand; just call `scripts/wsh-live.sh open <session>`. (Implementation:
 `resolve_live_tab` / `tab_describe` in the script — touch those if Wave changes.)
 
+**Le bloc s'ouvre sur l'onglet du shell INITIATEUR** (celui où tourne le Claude
+Code qui a lancé `spawn`/`open`), pas sur l'onglet « actif » de la DB : la
+résolution privilégie les signaux vivants — nom de session tmux `wave-<tab8>`
+du wrapping wave-init, puis onglet contenant `WAVETERM_BLOCKID` — car l'env
+`WAVETERM_TABID` peut être périmé tout en existant encore en DB (fenêtre tmux
+qui survit au bloc qui l'a créée).
+
 The one thing that's on **you**: when `open` reports the cockpit is on tab «T4»
 (it prints this when >1 tab exists, because no wsh command can move the UI focus),
 **relay that tab name to the user** — never just say "it's open."
