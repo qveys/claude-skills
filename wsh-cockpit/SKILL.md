@@ -131,7 +131,7 @@ $COCKPIT banner step   2.1 "TOOLS.md"
 ```
 
 `banner` **source la fonction `__wsh_banner` une seule fois par session** (helper
-`/tmp/wsh-live-step-*.sh`, suivi via une option tmux — même mécanisme que le framing
+`~/.cache/wsh-cockpit/helpers/wsh-live-step-vN.sh`, suivi via une option tmux — même mécanisme que le framing
 `send`), puis chaque bannière suivante n'est qu'un **appel court et lisible** :
 `__wsh_banner done 'msg'`. Fini le pavé `printf` de ~700 caractères tapé dans le
 pane à chaque fois — l'utilisateur voit défiler la commande courte, pas le splat.
@@ -361,15 +361,15 @@ ls: /nonexistent-xyz: No such file or directory   ← real output
   `$` **jaune vif**, commande **blanc intense**, footer **vert néon** (exit 0) /
   **rouge vif** (échec). 256 couleurs saturées — dégradé en texte plain hors TTY.
 - The framing stores small helper functions in a versioned short-path helper
-  like `/tmp/wsh-live-sep-<uid>-v4.sh`. The first framed `send` for a tmux
+  like `~/.cache/wsh-cockpit/helpers/wsh-live-sep-vN.sh`. The first framed `send` for a tmux
   session sources it; later sends use one compact `__wsh <seq> <cmd>` call. The
   helper displays the command, runs it with the pane shell, captures `$?`, then
   prints the footer. The footer still only prints after the command returns. An
   interactive command (a `sudo` waiting for a password, a pager, `read`) runs
   normally and the closing banner appears only once it actually finishes; feed
   its input with `keys` in the meantime.
-- A per-session counter lives in a tmux user option (`@wsh_seq_<session>`), so
-  the `#N` sequence persists across `send` calls with no temp files; `stop`
+- A per-session counter lives in a state file under `~/.cache/wsh-cockpit/`,
+  so the `#N` sequence persists across `send` calls with no temp files; `stop`
   clears it.
 - The banners never use the tokens `START`/`END`, so they don't collide with
   `rexec`'s markers, and `read` is just a human-readable `capture-pane` — the

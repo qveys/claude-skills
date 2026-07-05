@@ -212,21 +212,25 @@ tty_only() { [ -t 1 ] && printf '%s\n' "$@" || true; }
 #     capture-pane, so these extra lines never interfere with any parsing.
 #   * Toggle with WSH_LIVE_SEP: default on (=1). Set WSH_LIVE_SEP=0 to send the
 #     raw command with no framing (e.g. when feeding a TUI that hates noise).
-#   * Per-session incremental counter lives in a tmux user option (@wsh_seq) so it
-#     persists across `send` calls without any temp files.
+#   * Per-session incremental counter lives in a state file so it
+#     persists across `send` calls without any tmux options.
 #
 # A header/footer rule is sized to the pane width (capped) and colored when the
 # pane is a TTY: 256-color vivid framing (turquoise rules, electric-cyan seq,
 # orange $ prompt, white command, neon green/red footer). Plain text when not TTY.
 # over a dumb pipe.
 
-# Next sequence number for a session (reads+writes tmux @wsh_seq). Echoes it.
+# Per-session sequence counter file path: normalized slug of session name.
+seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# Next sequence number for a session (reads+writes state file). Echoes it.
 sep_next_seq() {
-  local sess="$1" n
-  n=$(tmux show-option -gqv "@wsh_seq_${sess}" 2>/dev/null)
+  local sess="$1" f n
+  f=$(seq_file "$sess"); mkdir -p "$STATE_DIR"
+  n=$(cat "$f" 2>/dev/null || true)
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   n=$((n + 1))
-  tmux set-option -g "@wsh_seq_${sess}" "$n" >/dev/null 2>&1 || true
+  printf '%s\n' "$n" >"$f"
   printf '%s\n' "$n"
 }
 
@@ -236,7 +240,7 @@ sep_next_seq() {
 # defs (kind=step) differ ONLY in (kind, version, defs-producer) — everything else is
 # this shared code. The thin sep_*/step_* wrappers below bind those three params, so
 # every call site keeps its readable name while the logic lives in exactly one place.
-helper_path()   { printf '/tmp/wsh-live-%s-%s-v%s.sh\n' "$1" "${UID:-$(id -u)}" "$2"; }  # kind version
+helper_path()   { printf '%s/helpers/wsh-live-%s-v%s.sh\n' "$STATE_DIR" "$1" "$2"; }  # kind version
 helper_marker() { printf '# wsh-live-%s-helper-version=%s' "$1" "$2"; }                   # kind version
 helper_option() { printf '@wsh_%s_helpers_%s\n' "$1" "$(printf '%s' "$2" | tr -cs 'A-Za-z0-9_' '_')"; }  # kind sess
 # Write the helper if missing/stale; echo its path. $1 kind $2 version $3 defs-fn
@@ -246,12 +250,13 @@ helper_ensure() {
   helper=$(helper_path "$1" "$2")
   first=""; [ -f "$helper" ] && IFS= read -r first <"$helper" || true
   if [ "$first" != "$(helper_marker "$1" "$2")" ]; then
+    mkdir -p "$STATE_DIR/helpers"
     tmp="${helper}.$$"; "$3" >"$tmp"; mv "$tmp" "$helper"; chmod 600 "$helper" 2>/dev/null || true
   fi
   printf '%s\n' "$helper"
 }
 # $1 kind $2 version $3 sess — "loaded" requires BOTH the tmux flag AND the file: a
-# tmpreaper purge mid-session must force a re-source, else a bare call hits an
+# purge of the state dir mid-session must force a re-source, else a bare call hits an
 # undefined function and the framed command/banner fails silently in the pane.
 helper_loaded() {
   [ "$(tmux show-option -qv -t "$3" "$(helper_option "$1" "$3")" 2>/dev/null || true)" = "$2" ] \
@@ -634,23 +639,21 @@ wait-done)
   done
   SESS=$(resolve_session "${local_sess:-}"); need_session "$SESS"
   TIMEOUT="${timeout_sec:-${WSH_WAIT_TIMEOUT:-300}}"
-  INTERVAL=2
-  ELAPSED=0
   if [ -z "$target_seq" ]; then
-    target_seq=$(tmux show-option -gqv "@wsh_seq_${SESS}" 2>/dev/null || echo "")
+    target_seq=$(cat "$(seq_file "$SESS")" 2>/dev/null || true)
   fi
   [ -n "$target_seq" ] || { echo "no pending send seq for '$SESS' (run send first)" >&2; exit 12; }
   echo "waiting for send #[${target_seq}] in '${SESS}' (timeout ${TIMEOUT}s)..."
-  while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-    # Strip ANSI so footer grep works regardless of vivid colors in the pane.
+  SECONDS=0
+  set -- 0.2 0.3 0.5 1
+  while [ "$SECONDS" -lt "$TIMEOUT" ]; do
     pane=$(tmux capture-pane -pt "$SESS" -S -120 2>/dev/null | sed $'s/\x1b\\[[0-9;]*m//g')
     if printf '%s\n' "$pane" | grep -qE "└─\\[#${target_seq}\\] exit [0-9]+"; then
       rc=$(printf '%s\n' "$pane" | grep -oE "└─\\[#${target_seq}\\] exit [0-9]+" | tail -1 | grep -oE '[0-9]+$')
-      echo "done: #[${target_seq}] exit ${rc} (${ELAPSED}s)"
+      echo "done: #[${target_seq}] exit ${rc} (${SECONDS}s)"
       [ "${rc:-1}" -eq 0 ] && exit 0 || exit "${rc:-1}"
     fi
-    sleep "$INTERVAL"
-    ELAPSED=$((ELAPSED + INTERVAL))
+    if [ $# -gt 0 ]; then sleep "$1"; shift; else sleep 2; fi
   done
   echo "timeout: #[${target_seq}] footer not seen after ${TIMEOUT}s" >&2
   exit 124
@@ -840,7 +843,7 @@ stop)
     SESS=""; [ -f "$SF" ] && SESS=$(tr -d '[:space:]' <"$SF")
     [ -n "$SESS" ] || SESS="$SESS_DEFAULT"
   fi
-  tmux set-option -gu "@wsh_seq_${SESS}" >/dev/null 2>&1 || true   # drop the global counter
+  rm -f "$(seq_file "$SESS")" 2>/dev/null || true
   tmux set-option -u -t "$SESS" "$(sep_helper_option "$SESS")" >/dev/null 2>&1 || true
   tmux set-option -u -t "$SESS" "$(step_helper_option "$SESS")" >/dev/null 2>&1 || true
   if tmux kill-session -t "$SESS" 2>/dev/null; then
