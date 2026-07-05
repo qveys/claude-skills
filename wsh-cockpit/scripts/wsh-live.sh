@@ -25,6 +25,13 @@
 #   wait-done [session] [timeout_sec] [seq]
 #                              block until last `send` footer shows exit (before next send)
 #
+# Env: WSH_LIVE_LOG=1 (default)  enable audit logging; WSH_LIVE_LOG=0 disables
+#      WSH_LIVE_LOG_DIR           custom log directory (default ~/Library/Logs/wsh-cockpit)
+#      WSH_COCKPIT_AGENT          key for state file (agent name, used in last-session-*)
+#      WSH_COCKPIT_PREFIX         default prefix for auto-unique session names
+#      WSH_COCKPIT_STATE_DIR      state directory (default ~/.cache/wsh-cockpit)
+#      WSH_LIVE_SEP=1 (default)   enable send/recv visual framing; =0 for raw shell
+#
 # `open` solves the "the user shouldn't have to type `tmux attach` themselves"
 # problem: it spawns a visible Wave block running `tmux attach -t <session>`, so
 # the shared cockpit appears on the user's screen automatically. Two pitfalls it
@@ -151,6 +158,31 @@ have_tmux() {
 need_session() {
   tmux has-session -t "$1" 2>/dev/null || {
     echo "no tmux session '$1' — run: $0 start $1" >&2; exit 4; }
+}
+
+# Audit trail: pipe the pane's rendered output to a per-session log file.
+# WSH_LIVE_LOG=0 disables. Best-effort by design (`|| return 0` everywhere):
+# a cockpit must open even if the log dir is unwritable. pipe-pane -o is
+# idempotent (only opens a pipe when none exists), so calling this on reuse
+# is safe. Logs can contain whatever the pane shows — treat them as sensitive
+# (dir 700 / files 600) and purge after 30 days.
+audit_log_start() {
+  [ "${WSH_LIVE_LOG:-1}" = "1" ] || return 0
+  local sess="$1" dir f slug
+  dir="${WSH_LIVE_LOG_DIR:-$HOME/Library/Logs/wsh-cockpit}"
+  mkdir -p "$dir" 2>/dev/null && chmod 700 "$dir" 2>/dev/null || return 0
+  # The file is named after a sanitized slug of the session name: the path is
+  # interpolated into pipe-pane's shell command, so it must stay quote-free.
+  slug=$(printf '%s' "$sess" | tr -cs 'A-Za-z0-9_.-' '_')
+  f="$dir/${slug}.log"
+  ( umask 077; : >>"$f" ) 2>/dev/null || return 0
+  find "$dir" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true
+  tmux pipe-pane -o -t "$sess" "cat >> '$f'" 2>/dev/null || true
+}
+
+create_session() {
+  tmux new-session -d -s "$1" \; set-option -t "$1" history-limit 50000 >/dev/null
+  audit_log_start "$1"
 }
 
 # Human-only narration. The cockpit is driven by Claude through a non-TTY Bash pipe,
@@ -430,6 +462,7 @@ spawn)
 
   if [ "$FORCE" -eq 0 ] && SESS=$(find_reusable_session "$PREFIX"); then
     remember_session "$SESS"
+    audit_log_start "$SESS"
     echo "reusing existing tmux session '$SESS' (still alive — not spawning a duplicate)"
     if tmux list-clients -t "$SESS" 2>/dev/null | grep -q .; then
       echo "clients already attached — cockpit should still be visible in Wave"
@@ -444,7 +477,7 @@ spawn)
   fi
 
   SESS=$(unique_session_name "$PREFIX")
-  tmux new-session -d -s "$SESS" \; set-option -t "$SESS" history-limit 50000 >/dev/null
+  create_session "$SESS"
   remember_session "$SESS"
   echo "created fresh tmux session '$SESS'"
   "$0" open "$SESS"
@@ -488,7 +521,7 @@ start)
   done
   if [ ${#ARGS[@]} -eq 0 ]; then
     SESS=$(unique_session_name "")
-    tmux new-session -d -s "$SESS" \; set-option -t "$SESS" history-limit 50000 >/dev/null
+    create_session "$SESS"
     remember_session "$SESS"
     echo "created fresh tmux session '$SESS' (no name given — auto-unique)"
   else
@@ -510,7 +543,7 @@ MSG
         exit 8
       fi
     else
-      tmux new-session -d -s "$SESS" \; set-option -t "$SESS" history-limit 50000 >/dev/null
+      create_session "$SESS"
       remember_session "$SESS"
       echo "created tmux session '$SESS'"
     fi

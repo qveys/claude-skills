@@ -407,6 +407,16 @@ wsh deleteblock -b <block-id>   # remove each confirmed orphan
 Only delete blocks **you** created. Leave the user's own panes — their long-lived
 terminal, their `tmux attach`, your own block — alone. When unsure, leave it.
 
+## Audit trail
+
+**`live` mode only.** Every tmux session auto-logs everything displayed in the pane
+to `~/Library/Logs/wsh-cockpit/<session-slug>.log`. The log file name is a sanitized slug of the session name (characters outside `[A-Za-z0-9_.-]` replaced with `_`), so the path remains safe for shell interpolation. Logs are **retained for 30 days**
+then auto-purged. Disable logging with `WSH_LIVE_LOG=0`; customize the log
+directory with `WSH_LIVE_LOG_DIR=/path`. **⚠️ Audit logs contain everything the
+pane displays — treat them as sensitive** (stored with `chmod 700` on the
+directory and `chmod 600` on each log file). Review periodically if the session
+runs sensitive commands; delete manually with `rm ~/Library/Logs/wsh-cockpit/<session-slug>.log`.
+
 ## Gotchas
 
 - **Never `start cockpit` blindly.** Another agent may already own that tmux
