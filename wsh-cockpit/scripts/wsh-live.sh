@@ -34,7 +34,11 @@
 #                              session (start/send/wait-done/read/banner/stop, NO Wave
 #                              block — never calls spawn/open); rc 0/1
 #
-# Env: WSH_LIVE_LOG=1 (default)  enable audit logging; WSH_LIVE_LOG=0 disables
+# Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
+#                                core loop only (start/send/read/wait-done/stop/
+#                                open/status/spawn); keys, audit log and web
+#                                stay tmux-only and refuse explicitly
+#      WSH_LIVE_LOG=1 (default)  enable audit logging; WSH_LIVE_LOG=0 disables
 #      WSH_LIVE_LOG_DIR           custom log directory (default ~/Library/Logs/wsh-cockpit)
 #      WSH_COCKPIT_AGENT          key for state file (agent name, used in last-session-*)
 #      WSH_COCKPIT_PREFIX         default prefix for auto-unique session names
@@ -64,6 +68,14 @@ SESS_DEFAULT="cockpit"
 STATE_DIR="${WSH_COCKPIT_STATE_DIR:-$HOME/.cache/wsh-cockpit}"
 SEP_HELPER_VERSION="4"
 STEP_HELPER_VERSION="1"
+# WSH_MUX selects the multiplexer backend. tmux is the reference (full feature
+# set); zellij covers the core loop only (start/send/read/wait-done/stop/open/
+# status/spawn). keys, the pipe-pane audit log and the ttyd web view are
+# tmux-only — each refuses explicitly under zellij, never silently.
+MUX="${WSH_MUX:-tmux}"
+case "$MUX" in tmux|zellij) ;; *)
+  echo "wsh-live: WSH_MUX must be 'tmux' or 'zellij' (got '$MUX')" >&2; exit 2 ;;
+esac
 sub="${1:-}"; shift || true
 
 # Unique session name: cockpit-<prefix>-<HHMMSS>. Prefix defaults to WSH_COCKPIT_PREFIX
@@ -74,7 +86,7 @@ unique_session_name() {
   ts=$(date '+%H%M%S')
   local name="cockpit-${prefix}-${ts}"
   local n=0
-  while tmux has-session -t "$name" 2>/dev/null; do
+  while mux_has "$name"; do
     n=$((n + 1))
     name="cockpit-${prefix}-${ts}-${n}"
   done
@@ -103,7 +115,7 @@ last_session() {
   [ -f "$f" ] || return 1
   local s
   s=$(tr -d '[:space:]' <"$f")
-  [ -n "$s" ] && tmux has-session -t "$s" 2>/dev/null || return 1
+  [ -n "$s" ] && mux_has "$s" || return 1
   printf '%s\n' "$s"
 }
 
@@ -131,8 +143,8 @@ newest_session_for_prefix() {
     if [ -z "$best" ] || [[ "$s" > "$best" ]]; then
       best="$s"
     fi
-  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${pattern}" || true)
-  [ -n "$best" ] && tmux has-session -t "$best" 2>/dev/null || return 1
+  done < <(mux_list_sessions | grep "^${pattern}" || true)
+  [ -n "$best" ] && mux_has "$best" || return 1
   printf '%s\n' "$best"
 }
 
@@ -162,13 +174,96 @@ resolve_session() {
   printf '%s\n' "$SESS_DEFAULT"
 }
 
-have_tmux() {
-  command -v tmux >/dev/null 2>&1 || {
-    echo "tmux not found — install it on the Mac: brew install tmux" >&2; exit 3; }
+have_mux() {
+  command -v "$MUX" >/dev/null 2>&1 || {
+    echo "$MUX not found — install it on the Mac: brew install $MUX" >&2; exit 3; }
 }
 need_session() {
-  tmux has-session -t "$1" 2>/dev/null || {
-    echo "no tmux session '$1' — run: $0 start $1" >&2; exit 4; }
+  mux_has "$1" || {
+    echo "no $MUX session '$1' — run: $0 start $1" >&2; exit 4; }
+}
+
+# --- Mux backend dispatch ----------------------------------------------------
+# Every core operation the live loop needs, dispatched on $MUX. The tmux arms
+# are the historical code, byte-for-byte. The zellij arms drive a background
+# session through its CLI actions; a background zellij session has NO pane
+# until one is created with `run`, and actions must target that pane id
+# explicitly (a headless session has no focused pane) — so mux_create stores
+# the pane id in a state file that send/read look up.
+zellij_bin() { command -v zellij 2>/dev/null || echo /opt/homebrew/bin/zellij; }
+pane_file()  { printf '%s/pane-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+zellij_pane() { cat "$(pane_file "$1")" 2>/dev/null || true; }
+
+mux_has() {
+  if [ "$MUX" = tmux ]; then tmux has-session -t "$1" 2>/dev/null
+  else mux_list_sessions | grep -qx "$1"; fi
+}
+mux_list_sessions() {
+  if [ "$MUX" = tmux ]; then tmux list-sessions -F '#{session_name}' 2>/dev/null
+  else "$(zellij_bin)" list-sessions -s 2>/dev/null; fi
+}
+mux_create() {
+  if [ "$MUX" = tmux ]; then
+    tmux new-session -d -s "$1" \; set-option -t "$1" history-limit 50000 >/dev/null
+  else
+    local zb pane
+    zb=$(zellij_bin)
+    "$zb" attach --create-background "$1" >/dev/null 2>&1 || true
+    # The background session starts pane-less; `run` returns "terminal_<id>".
+    pane=$("$zb" --session "$1" run -- "${SHELL:-/bin/zsh}" 2>/dev/null || true)
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$pane" >"$(pane_file "$1")"
+    sleep 1   # let the pane's shell come up before the first write-chars
+  fi
+}
+mux_send_line() {  # $1 sess  $2 text — type text, then Enter
+  if [ "$MUX" = tmux ]; then
+    # -l sends the text literally (so a command that happens to read like a
+    # tmux key name isn't interpreted); Enter is a separate keypress.
+    tmux send-keys -t "$1" -l "$2"
+    tmux send-keys -t "$1" Enter
+  else
+    local zb pane; zb=$(zellij_bin); pane=$(zellij_pane "$1")
+    if [ -n "$pane" ]; then
+      "$zb" --session "$1" action write-chars -p "$pane" "$2"
+      "$zb" --session "$1" action write -p "$pane" 13
+    else
+      "$zb" --session "$1" action write-chars "$2"
+      "$zb" --session "$1" action write 13
+    fi
+  fi
+}
+mux_capture() {  # $1 sess  $2 lines of scrollback to look back
+  if [ "$MUX" = tmux ]; then
+    tmux capture-pane -pt "$1" -S "-$2" 2>/dev/null
+  else
+    local zb pane; zb=$(zellij_bin); pane=$(zellij_pane "$1")
+    if [ -n "$pane" ]; then
+      "$zb" --session "$1" action dump-screen --full -p "$pane" 2>/dev/null | tail -n "$2"
+    else
+      "$zb" --session "$1" action dump-screen --full 2>/dev/null | tail -n "$2"
+    fi
+  fi
+}
+mux_clients() {  # attached client lines (empty output = nobody watching)
+  if [ "$MUX" = tmux ]; then tmux list-clients -t "$1" 2>/dev/null
+  else "$(zellij_bin)" --session "$1" action list-clients 2>/dev/null | tail -n +2; fi
+}
+mux_kill() {
+  if [ "$MUX" = tmux ]; then tmux kill-session -t "$1" 2>/dev/null
+  else
+    local zb rc; zb=$(zellij_bin)
+    "$zb" kill-session "$1" >/dev/null 2>&1; rc=$?
+    # A killed zellij session lingers as EXITED (resurrectable) — delete it,
+    # or the GC/list logic would keep seeing a ghost.
+    "$zb" delete-session --force "$1" >/dev/null 2>&1 || true
+    rm -f "$(pane_file "$1")" 2>/dev/null || true
+    return "$rc"
+  fi
+}
+mux_attach_cmd() {  # the command a human types to join the session
+  if [ "$MUX" = tmux ]; then printf 'tmux attach -t %s\n' "$1"
+  else printf 'zellij attach %s\n' "$1"; fi
 }
 
 # Audit trail: pipe the pane's rendered output to a per-session log file.
@@ -179,6 +274,7 @@ need_session() {
 # (dir 700 / files 600) and purge after 30 days.
 audit_log_start() {
   [ "${WSH_LIVE_LOG:-1}" = "1" ] || return 0
+  [ "$MUX" = tmux ] || return 0   # pipe-pane is tmux-only; zellij runs unlogged
   local sess="$1" dir f slug
   dir="${WSH_LIVE_LOG_DIR:-$HOME/Library/Logs/wsh-cockpit}"
   mkdir -p "$dir" 2>/dev/null && chmod 700 "$dir" 2>/dev/null || return 0
@@ -192,7 +288,7 @@ audit_log_start() {
 }
 
 create_session() {
-  tmux new-session -d -s "$1" \; set-option -t "$1" history-limit 50000 >/dev/null
+  mux_create "$1"
   audit_log_start "$1"
 }
 
@@ -273,10 +369,15 @@ helper_ensure() {
 # purge of the state dir mid-session must force a re-source, else a bare call hits an
 # undefined function and the framed command/banner fails silently in the pane.
 helper_loaded() {
+  # Under zellij there is no per-session option store, so "loaded" is never
+  # remembered: every framed send re-sources the helper (a slightly longer
+  # visible line, but correct by construction).
+  [ "$MUX" = tmux ] || return 1
   [ "$(tmux show-option -qv -t "$3" "$(helper_option "$1" "$3")" 2>/dev/null || true)" = "$2" ] \
     && [ -f "$(helper_path "$1" "$2")" ]
 }
 helper_mark_loaded() {  # $1 kind $2 version $3 sess
+  [ "$MUX" = tmux ] || return 0
   tmux set-option -t "$3" "$(helper_option "$1" "$3")" "$2" >/dev/null 2>&1 || true
 }
 
@@ -468,7 +569,7 @@ case "$sub" in
 spawn)
   # Preferred entry point. Reuses the last alive cockpit for this agent/prefix unless
   # --force/--fresh is passed. Never hijacks the generic "cockpit" name (use unique names).
-  have_tmux
+  have_mux
   FORCE=0
   PREFIX=""
   for arg in "$@"; do
@@ -482,8 +583,8 @@ spawn)
   if [ "$FORCE" -eq 0 ] && SESS=$(find_reusable_session "$PREFIX"); then
     remember_session "$SESS"
     audit_log_start "$SESS"
-    echo "reusing existing tmux session '$SESS' (still alive — not spawning a duplicate)"
-    if tmux list-clients -t "$SESS" 2>/dev/null | grep -q .; then
+    echo "reusing existing $MUX session '$SESS' (still alive — not spawning a duplicate)"
+    if mux_clients "$SESS" | grep -q .; then
       echo "clients already attached — cockpit should still be visible in Wave"
     else
       echo "no client attached — re-opening Wave block"
@@ -498,29 +599,29 @@ spawn)
   SESS=$(unique_session_name "$PREFIX")
   create_session "$SESS"
   remember_session "$SESS"
-  echo "created fresh tmux session '$SESS'"
+  echo "created fresh $MUX session '$SESS'"
   "$0" open "$SESS"
   echo "SESSION=$SESS"
   tty_only "Use this session for all subsequent send/read calls in this workflow."
   ;;
 status)
-  have_tmux
+  have_mux
   PREFIX="${1:-}"
   norm=$(normalize_prefix "$PREFIX")
   echo "agent/prefix key: ${WSH_COCKPIT_AGENT:-${WSH_COCKPIT_PREFIX:-default}}"
   if remembered=$(last_session 2>/dev/null); then
-    clients=$(tmux list-clients -t "$remembered" 2>/dev/null | wc -l | tr -d ' ')
+    clients=$(mux_clients "$remembered" | wc -l | tr -d ' ')
     echo "last session: $remembered (alive, ${clients} client(s))"
   else
     f=$(state_file)
     if [ -f "$f" ]; then
       dead=$(tr -d '[:space:]' <"$f")
-      echo "last session: ${dead:-?} (dead — tmux session gone)"
+      echo "last session: ${dead:-?} (dead — $MUX session gone)"
     else
       echo "last session: (none recorded)"
     fi
   fi
-  matches=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^cockpit-${norm}-" || true)
+  matches=$(mux_list_sessions | grep "^cockpit-${norm}-" || true)
   if [ -n "$matches" ]; then
     echo "matching cockpit-${norm}-* sessions:"
     printf '  %s\n' $matches
@@ -529,7 +630,7 @@ status)
   fi
   ;;
 start)
-  have_tmux
+  have_mux
   REUSE=0
   ARGS=()
   for arg in "$@"; do
@@ -542,10 +643,10 @@ start)
     SESS=$(unique_session_name "")
     create_session "$SESS"
     remember_session "$SESS"
-    echo "created fresh tmux session '$SESS' (no name given — auto-unique)"
+    echo "created fresh $MUX session '$SESS' (no name given — auto-unique)"
   else
     SESS="${ARGS[0]}"
-    if tmux has-session -t "$SESS" 2>/dev/null; then
+    if mux_has "$SESS"; then
       if [ "$REUSE" -eq 1 ]; then
         echo "session '$SESS' already exists — reusing it (--reuse)"
         remember_session "$SESS"
@@ -564,7 +665,7 @@ MSG
     else
       create_session "$SESS"
       remember_session "$SESS"
-      echo "created tmux session '$SESS'"
+      echo "created $MUX session '$SESS'"
     fi
   fi
   # Rich attach/drive help for a human at a TTY; just the machine line for Claude.
@@ -573,7 +674,7 @@ MSG
 
 Attach in your terminal (or in a Wave block) to watch & type alongside me:
 
-  tmux attach -t ${SESS}
+  $(mux_attach_cmd "${SESS}")
 
 I drive it with:
   $0 send '<command>' ${SESS}
@@ -624,6 +725,13 @@ doctor)
 
   HAVE_TMUX=0
   command -v tmux >/dev/null 2>&1 && HAVE_TMUX=1
+
+  # 0. Which mux backend this invocation drives (WSH_MUX).
+  if [ "$MUX" = tmux ]; then
+    doc_line ok "backend (WSH_MUX)" "tmux (référence, toutes fonctionnalités)"
+  else
+    doc_line warn "backend (WSH_MUX)" "zellij (expérimental — keys/audit-log/web indisponibles)"
+  fi
 
   # 1. tmux present + version.
   if [ "$HAVE_TMUX" -eq 1 ]; then
@@ -766,7 +874,9 @@ web)
   # ignored) and the tmux client attaches with `-r` (read-only client) so a
   # random visitor with the URL can watch but not type. WSH_WEB_WRITE=1 flips
   # both: adds `-W` to ttyd and drops `-r` from the attach.
-  have_tmux
+  have_mux
+  [ "$MUX" = tmux ] || {
+    echo "web: tmux-only (needs tmux's read-only attach; zellij ships its own: 'zellij web')" >&2; exit 13; }
   ACTION="${1:?usage: $0 web start|stop|status [session]}"
   shift || true
   case "$ACTION" in
@@ -870,7 +980,7 @@ banner)
   # Airy visual step announcement — sources wsh-step.sh's __wsh_banner once, then
   # sends a short call. NOT the default send framing. WSH_STEP_INLINE=1 forces the
   # self-contained one-liner (for an ssh-hopped pane without the helper file).
-  have_tmux
+  have_mux
   TYPE="${1:?usage: wsh-live.sh banner <header|phase|step|done> [args...] [session]}"
   shift || true
   case "$TYPE" in header|phase|step|done) ;; *)
@@ -878,7 +988,7 @@ banner)
   esac
   SESS=""
   # Optional session is only recognized when it is the sole remaining argument.
-  if [ $# -gt 1 ] && tmux has-session -t "${!#}" 2>/dev/null; then
+  if [ $# -gt 1 ] && mux_has "${!#}"; then
     SESS="${!#}"
     set -- "${@:1:$#-1}"
   fi
@@ -898,18 +1008,17 @@ banner)
       step_mark_helpers_loaded "$SESS"
     fi
   fi
-  tmux send-keys -t "$SESS" -l "$CMD"
-  tmux send-keys -t "$SESS" Enter
+  mux_send_line "$SESS" "$CMD"
   if [ -t 1 ]; then echo "banner -> ${SESS}: ${TYPE} $*"; else echo "banner ${TYPE} -> ${SESS}"; fi
   ;;
 wait-done)
   # Block until the framed footer for a `send` appears in the pane — never race the next send.
-  have_tmux
+  have_mux
   local_sess=""
   timeout_sec=""
   target_seq=""
   for arg in "$@"; do
-    if [ -z "$local_sess" ] && tmux has-session -t "$arg" 2>/dev/null; then
+    if [ -z "$local_sess" ] && mux_has "$arg"; then
       local_sess="$arg"
     elif [ -z "$timeout_sec" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       timeout_sec="$arg"
@@ -927,7 +1036,7 @@ wait-done)
   SECONDS=0
   set -- 0.2 0.3 0.5 1
   while [ "$SECONDS" -lt "$TIMEOUT" ]; do
-    pane=$(tmux capture-pane -pt "$SESS" -S -120 2>/dev/null | sed $'s/\x1b\\[[0-9;]*m//g')
+    pane=$(mux_capture "$SESS" 120 | sed $'s/\x1b\\[[0-9;]*m//g')
     if printf '%s\n' "$pane" | grep -qE "└─\\[#${target_seq}\\] exit [0-9]+"; then
       rc=$(printf '%s\n' "$pane" | grep -oE "└─\\[#${target_seq}\\] exit [0-9]+" | tail -1 | grep -oE '[0-9]+$')
       echo "done: #[${target_seq}] exit ${rc} (${SECONDS}s)"
@@ -941,26 +1050,29 @@ wait-done)
 open)
   # Auto-open a VISIBLE Wave block attached to the shared cockpit, so the user
   # doesn't have to type `tmux attach` themselves. Robust to a stale Wave env.
-  have_tmux
+  have_mux
   SESS=$(resolve_session "${1:-}"); need_session "$SESS"
-  TMUX_BIN=$(command -v tmux)
+  if [ "$MUX" = tmux ]; then MUX_BIN=$(command -v tmux); else MUX_BIN=$(zellij_bin); fi
+  ATTACH=$(mux_attach_cmd "$SESS")
   command -v wsh >/dev/null 2>&1 || {
     echo "wsh not found — can't auto-open a Wave block. Attach by hand:" >&2
-    echo "  tmux attach -t ${SESS}" >&2; exit 5; }
+    echo "  ${ATTACH}" >&2; exit 5; }
 
   if ! TAB=$(resolve_live_tab); then
     cat >&2 <<MSG
 could not find a live Wave tab to anchor the block on (stale/empty Wave state).
 Ask the user to attach manually in any terminal or Wave block:
 
-  tmux attach -t ${SESS}
+  ${ATTACH}
 MSG
     exit 6
   fi
 
-  # Anchor on the LIVE tab (overriding any stale WAVETERM_TABID), and exec tmux
-  # by ABSOLUTE path because the Wave block's shell lacks the homebrew PATH.
-  OUT=$(WAVETERM_TABID="$TAB" wsh run -c "exec '$TMUX_BIN' attach -t '$SESS'" 2>&1) || true
+  # Anchor on the LIVE tab (overriding any stale WAVETERM_TABID), and exec the
+  # mux by ABSOLUTE path because the Wave block's shell lacks the homebrew PATH.
+  if [ "$MUX" = tmux ]; then EXEC_CMD="exec '$MUX_BIN' attach -t '$SESS'"
+  else EXEC_CMD="exec '$MUX_BIN' attach '$SESS'"; fi
+  OUT=$(WAVETERM_TABID="$TAB" wsh run -c "$EXEC_CMD" 2>&1) || true
   NEWID=$(printf '%s' "$OUT" | grep -oE 'block:[0-9a-f-]+' | head -1 | cut -d: -f2)
   if [ -z "$NEWID" ]; then
     cat >&2 <<MSG
@@ -968,7 +1080,7 @@ wsh run failed to open the attach block:
 $OUT
 Fallback — ask the user to attach manually:
 
-  tmux attach -t ${SESS}
+  ${ATTACH}
 MSG
     exit 7
   fi
@@ -976,10 +1088,10 @@ MSG
   # Verify a client actually joined (the attach can fail silently inside the
   # block, e.g. wrong tmux/path); give it a moment, then confirm.
   for _ in 1 2 3 4 5; do
-    tmux list-clients -t "$SESS" 2>/dev/null | grep -q . && break
+    mux_clients "$SESS" | grep -q . && break
     sleep 1
   done
-  if tmux list-clients -t "$SESS" 2>/dev/null | grep -q .; then
+  if mux_clients "$SESS" | grep -q .; then
     # Resolve the tab's human NAME + total tab count. Wave doesn't persist the
     # active-tab switch and exposes no focus command, so the block can land on a
     # tab the user isn't looking at ("I don't see it"). When more than one tab
@@ -992,7 +1104,7 @@ MSG
     fi
   else
     echo "block ${NEWID} created on tab ${TAB}, but no client attached to '${SESS}' yet" >&2
-    echo "if it stays empty, ask the user to attach manually: tmux attach -t ${SESS}" >&2
+    echo "if it stays empty, ask the user to attach manually: ${ATTACH}" >&2
   fi
   ;;
 selftest-sep)
@@ -1059,7 +1171,7 @@ selftest-live)
   # Wave block ever opened (never calls spawn/open). WSH_COCKPIT_AGENT=selftest
   # isolates the last-session state file from whatever agent/prefix is normally
   # driving this cockpit, so this test never clobbers a real workflow's session.
-  have_tmux
+  have_mux
   export WSH_COCKPIT_AGENT=selftest
   SESS="cockpit-selftest-$$"
   SF="$(state_file)"
@@ -1144,13 +1256,16 @@ selftest-live)
   out=$("$0" read "$SESS" 30 2>&1)
   run_live_case "5 banner" "$out" '[9.9]'
 
-  # 6. audit log — only when logging is enabled (WSH_LIVE_LOG default 1)
-  if [ "${WSH_LIVE_LOG:-1}" = "1" ]; then
+  # 6. audit log — only when logging is enabled (WSH_LIVE_LOG default 1) and
+  # the backend is tmux (pipe-pane is tmux-only; zellij runs unlogged).
+  if [ "${WSH_LIVE_LOG:-1}" = "1" ] && [ "$MUX" = tmux ]; then
     if [ -f "$LIVE_LOG_FILE" ] && grep -Fq "LIVE_OK_42" "$LIVE_LOG_FILE"; then
       report_live_case "6 audit log" 0
     else
       report_live_case "6 audit log" 1 "$LIVE_LOG_FILE missing or lacks LIVE_OK_42"
     fi
+  elif [ "$MUX" != tmux ]; then
+    echo "skip 6 audit log (backend $MUX — pipe-pane is tmux-only)"
   else
     echo "skip 6 audit log (WSH_LIVE_LOG=0)"
   fi
@@ -1166,7 +1281,7 @@ selftest-live)
 
   # 8. stop kills the session and removes its seq file
   "$0" stop "$SESS" >/dev/null 2>&1 || true
-  if tmux has-session -t "$SESS" 2>/dev/null; then
+  if mux_has "$SESS"; then
     report_live_case "8 stop" 1 "session '$SESS' still alive"
   elif [ -f "$SEQF" ]; then
     report_live_case "8 stop" 1 "seq file still present: $SEQF"
@@ -1181,7 +1296,7 @@ selftest-live)
   echo "selftest-live: ok"
   ;;
 send)
-  have_tmux
+  have_mux
   CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
   SESS=$(resolve_session "${2:-}"); need_session "$SESS"
   # WSH_LIVE_SEP (default 1): frame the command with header/footer banners so the
@@ -1203,24 +1318,25 @@ send)
   fi
   # -l sends the text literally (so a command that happens to read like a tmux
   # key name isn't interpreted); Enter is a separate keypress.
-  tmux send-keys -t "$SESS" -l "$LINE"
-  tmux send-keys -t "$SESS" Enter
+  mux_send_line "$SESS" "$LINE"
   # Terse for Claude (it wrote $CMD, knows it); the seq is what `wait-done` chains on.
   # Echo the full command back only for a human watching the script's own stdout.
   if [ -t 1 ]; then echo "sent${SEQ:+ #$SEQ} -> ${SESS}: $CMD"
   else echo "sent${SEQ:+ #$SEQ} -> ${SESS}"; fi
   ;;
 keys)
-  have_tmux
+  have_mux
   K="${1:?usage: wsh-live.sh keys '<tmux-keys>' [session]}"
   SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  [ "$MUX" = tmux ] || {
+    echo "keys: tmux-only (raw tmux key names have no zellij equivalent; use send)" >&2; exit 13; }
   # No -l here: tmux key names are meant to be interpreted (C-c, Up, PageUp...).
   # shellcheck disable=SC2086
   tmux send-keys -t "$SESS" $K
   echo "keys -> ${SESS}: $K"
   ;;
 read)
-  have_tmux
+  have_mux
   if [ -n "${1:-}" ] && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
     SESS=$(resolve_session "")
     LINES="$1"
@@ -1231,12 +1347,12 @@ read)
   need_session "$SESS"
   # capture-pane pads the bottom of the screen with blank lines; trim the
   # trailing blanks so output ends at the last real line (the live prompt).
-  tmux capture-pane -pt "$SESS" -S "-${LINES}" | awk '
+  mux_capture "$SESS" "${LINES}" | awk '
     { l[NR]=$0 }
     END { e=NR; while (e>0 && l[e] ~ /^[[:space:]]*$/) e--; for (i=1;i<=e;i++) print l[i] }'
   ;;
 stop)
-  have_tmux
+  have_mux
   # Resolve WITHOUT requiring the session to be alive: resolve_session falls back to
   # the generic "cockpit" once the session is dead (last_session needs has-session),
   # so a no-arg `stop` after a crash would target the wrong name. Prefer the explicit
@@ -1251,9 +1367,11 @@ stop)
     [ -n "$SESS" ] || SESS="$SESS_DEFAULT"
   fi
   rm -f "$(seq_file "$SESS")" 2>/dev/null || true
-  tmux set-option -u -t "$SESS" "$(sep_helper_option "$SESS")" >/dev/null 2>&1 || true
-  tmux set-option -u -t "$SESS" "$(step_helper_option "$SESS")" >/dev/null 2>&1 || true
-  if tmux kill-session -t "$SESS" 2>/dev/null; then
+  if [ "$MUX" = tmux ]; then
+    tmux set-option -u -t "$SESS" "$(sep_helper_option "$SESS")" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$SESS" "$(step_helper_option "$SESS")" >/dev/null 2>&1 || true
+  fi
+  if mux_kill "$SESS"; then
     echo "killed session '$SESS'"
   else
     echo "no session '$SESS' to kill"
