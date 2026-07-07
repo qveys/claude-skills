@@ -40,12 +40,15 @@ resolve_live_tab() {
   #   a. under the wave-init tmux wrapping, the session group is named
   #      wave-<tab8> (1 tab = 1 group, Wave UUIDs are stable) — the freshest
   #      binding there is; resolve tab8 back to the full oid;
-  #   b. else look the spawning block (WAVETERM_BLOCKID) up in db_tab.blockids
-  #      to find the tab that CURRENTLY contains it (survives block moves).
+  #   b. else find the tab whose data JSON (its blockids list) contains
+  #      WAVETERM_BLOCKID — a LIKE match on db_tab.data, since blockids is a
+  #      key inside that blob, not a column (survives block moves).
   if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     sessname=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null || true)
     case "$sessname" in
-      wave-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+      # Exactly wave-<8hex> or wave-<8hex>-… : anything else (e.g. a 9th hex
+      # char or stray punctuation) must NOT reach the SQL interpolation below.
+      wave-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]|wave-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-*)
         tab8=${sessname#wave-}; tab8=${tab8%%-*}
         tab=$(sqlite3 "$ro" "SELECT oid FROM db_tab WHERE oid LIKE '${tab8}%';" 2>/dev/null)
         case "$tab" in *$'\n'*) tab="" ;; esac   # ambiguous prefix — fall through

@@ -147,7 +147,7 @@ HELPERS
 # pattern as the send framing) and each later banner is just a short, readable
 # `__wsh_banner done 'msg'`. Set WSH_STEP_INLINE=1 to fall back to the self-contained
 # one-liner (e.g. for a pane that has ssh-hopped to a host without the helper file).
-step_script_path() { printf '%s\n' "$(cd "$(dirname "$0")" && pwd)/wsh-step.sh"; }
+step_script_path() { printf '%s\n' "$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-step.sh"; }
 
 step_helper_defs() {
   printf '# wsh-live-step-helper-version=%s\n' "$STEP_HELPER_VERSION"

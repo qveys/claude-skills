@@ -21,7 +21,7 @@ zellij_pane() { cat "$(pane_file "$1")" 2>/dev/null || true; }
 
 mux_has() {
   if [ "$MUX" = tmux ]; then tmux has-session -t "$1" 2>/dev/null
-  else mux_list_sessions | grep -qx "$1"; fi
+  else mux_list_sessions | grep -Fqx -- "$1"; fi
 }
 mux_list_sessions() {
   if [ "$MUX" = tmux ]; then tmux list-sessions -F '#{session_name}' 2>/dev/null
@@ -111,6 +111,7 @@ audit_log_start() {
   slug=$(printf '%s' "$sess" | tr -cs 'A-Za-z0-9_.-' '_')
   f="$dir/${slug}.log"
   ( umask 077; : >>"$f" ) 2>/dev/null || return 0
+  chmod 600 "$f" 2>/dev/null || true   # umask only governs creation — tighten a pre-existing file too
   find "$dir" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true
   tmux pipe-pane -o -t "$sess" "cat >> '$f'" 2>/dev/null || true
 }
