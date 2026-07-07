@@ -522,7 +522,11 @@ WRAP
 }
 
 # Resolve a LIVE Wave tab id to anchor a new block on, robust to a stale env.
-# Strategy, best-first:
+# Strategy, best-first (the goal is the INITIATING shell's tab, so the cockpit
+# opens next to the Claude Code that spawned it):
+#   0. Live signals over env — (a) the wave-init tmux session-group name
+#      (wave-<tab8>, 1 tab = 1 group) resolved back to a full tab oid, else
+#      (b) the tab whose blockids contain WAVETERM_BLOCKID.
 #   1. If WAVETERM_TABID is set AND still present in Wave's state DB, trust it.
 #   2. Otherwise read db_workspace.activetabid for the env's workspace (or, if
 #      that workspace is gone too, the single/first workspace) from the state
@@ -545,8 +549,37 @@ wave_db_ro() {
 }
 
 resolve_live_tab() {
-  local ro tab ws
+  local ro tab ws sessname tab8
   ro=$(wave_db_ro) || return 1
+
+  # 0. The tab hosting the INITIATING shell — best signal first. The env
+  # WAVETERM_TABID/BLOCKID can be STALE while still existing in the DB (a tmux
+  # window outlives the block that created it and gets re-viewed from another
+  # tab), so prefer live signals over the env:
+  #   a. under the wave-init tmux wrapping, the session group is named
+  #      wave-<tab8> (1 tab = 1 group, Wave UUIDs are stable) — the freshest
+  #      binding there is; resolve tab8 back to the full oid;
+  #   b. else look the spawning block (WAVETERM_BLOCKID) up in db_tab.blockids
+  #      to find the tab that CURRENTLY contains it (survives block moves).
+  if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    sessname=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null || true)
+    case "$sessname" in
+      wave-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+        tab8=${sessname#wave-}; tab8=${tab8%%-*}
+        tab=$(sqlite3 "$ro" "SELECT oid FROM db_tab WHERE oid LIKE '${tab8}%';" 2>/dev/null)
+        case "$tab" in *$'\n'*) tab="" ;; esac   # ambiguous prefix — fall through
+        ;;
+    esac
+  fi
+  if [ -z "${tab:-}" ] && [ -n "${WAVETERM_BLOCKID:-}" ]; then
+    tab=$(sqlite3 "$ro" \
+      "SELECT oid FROM db_tab WHERE data LIKE '%${WAVETERM_BLOCKID//\'/}%' LIMIT 1;" 2>/dev/null)
+  fi
+  if [ -n "${tab:-}" ] && [ "$(sqlite3 "$ro" \
+        "SELECT count(*) FROM db_tab WHERE oid='${tab//\'/}';" 2>/dev/null)" = "1" ]; then
+    printf '%s\n' "$tab"; return 0
+  fi
+  tab=""
 
   # 1. Trust the env tab only if it actually exists in the DB.
   if [ -n "${WAVETERM_TABID:-}" ]; then
