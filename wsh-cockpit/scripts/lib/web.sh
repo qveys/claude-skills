@@ -51,7 +51,10 @@ cmd_web() {
   SESS=$(resolve_session "${1:-}")
   [ "$ACTION" = start ] && need_session "$SESS"
   PORT="${WSH_WEB_PORT:-7681}"
-  case "$PORT" in ''|*[!0-9]*) echo "web: WSH_WEB_PORT must be a positive integer (got '$PORT')" >&2; exit 2 ;; esac
+  case "$PORT" in ''|*[!0-9]*) echo "web: WSH_WEB_PORT must be an integer in 1-65535 (got '$PORT')" >&2; exit 2 ;; esac
+  if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "web: WSH_WEB_PORT must be an integer in 1-65535 (got '$PORT')" >&2; exit 2
+  fi
   URL="http://127.0.0.1:${PORT}"
   PIDF=$(web_pid_file "$SESS")
 

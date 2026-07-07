@@ -19,7 +19,7 @@ set -euo pipefail
 # script (`"$SELF_PATH" cmd …` / `defs`), and it must resolve in bash AND zsh: inside
 # a function zsh rebinds $0 to the function name (FUNCTION_ARGZERO), so a function-
 # local `$0` would point at `run_step_selftest` and break `zsh wsh-step.sh selftest-step`.
-SELF_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+SELF_PATH="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 W="${WSH_STEP_WIDTH:-72}"
 

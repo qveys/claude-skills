@@ -80,7 +80,9 @@ case "$MUX" in tmux|zellij) ;; *)
   echo "wsh-live: WSH_MUX must be 'tmux' or 'zellij' (got '$MUX')" >&2; exit 2 ;;
 esac
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# CDPATH= : a matching CDPATH entry makes `cd` PRINT the directory, which would
+# be captured into the variable and break the lib/*.sh sourcing below.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
 # shellcheck source=./lib/mux.sh
 . "$SCRIPT_DIR/lib/mux.sh"
 # shellcheck source=./lib/framing.sh
@@ -256,7 +258,7 @@ banner)
     SESS="${!#}"
     set -- "${@:1:$#-1}"
   fi
-  STEP_SCRIPT="$(cd "$(dirname "$0")" && pwd)/wsh-step.sh"
+  STEP_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-step.sh"
   [ -f "$STEP_SCRIPT" ] || { echo "missing $STEP_SCRIPT" >&2; exit 10; }
   SESS=$(resolve_session "$SESS"); need_session "$SESS"
   if [ "${WSH_STEP_INLINE:-0}" = "1" ]; then
