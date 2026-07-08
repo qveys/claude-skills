@@ -112,3 +112,6 @@ tty_only() { [ -t 1 ] && printf '%s\n' "$@" || true; }
 
 # Per-session sequence counter file path: normalized slug of session name.
 seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+# Per-session Wave block id file: lets `stop` delete the block `open` created, so
+# killing the cockpit doesn't leave an orphaned dead-terminal pane in Wave.
+block_file() { printf '%s/block-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }

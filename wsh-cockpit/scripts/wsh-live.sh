@@ -351,6 +351,11 @@ MSG
     exit 7
   fi
 
+  # Remember the block id so `stop` can delete the Wave block too (not just the
+  # tmux session) — otherwise killing the cockpit leaves an orphaned dead-terminal
+  # pane. Persisted here because `spawn` reaches the block via this same path.
+  printf '%s' "$NEWID" > "$(block_file "$SESS")" 2>/dev/null || true
+
   # Verify a client actually joined (the attach can fail silently inside the
   # block, e.g. wrong tmux/path); give it a moment, then confirm.
   for _ in 1 2 3 4 5; do
@@ -460,6 +465,16 @@ stop)
     echo "killed session '$SESS'"
   else
     echo "no session '$SESS' to kill"
+  fi
+  # Also delete the Wave block `open` created for this session — killing tmux
+  # alone leaves the block behind as an orphaned dead-terminal pane. Best-effort:
+  # the block id was persisted at open time; skip cleanly if it's absent or the
+  # user already closed the block.
+  BF=$(block_file "$SESS")
+  if [ -f "$BF" ]; then
+    BID=$(tr -d '[:space:]' <"$BF")
+    if [ -n "$BID" ]; then wave_delete_block "$BID"; echo "cleaned Wave block $BID"; fi
+    rm -f "$BF" 2>/dev/null || true
   fi
   # Forget the remembered session if it pointed at the one we just stopped.
   if [ -f "$SF" ] && [ "$(tr -d '[:space:]' <"$SF")" = "$SESS" ]; then
