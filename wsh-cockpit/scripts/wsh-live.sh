@@ -28,11 +28,20 @@
 #                              for a writable view) — see SKILL.md for tailnet exposure
 #   banner {header|phase|step|done} ... [session]
 #                              airy step announcement (no send framing — see wsh-step.sh)
+#   remote-init [session] [host]
+#                              call once after an ssh hop lands the pane on a remote host.
+#                              With [host]: pushes the sep/step helper files there (via
+#                              wsh-push.sh) so send/banner keep using the short sourcing
+#                              form, now against the REMOTE path — falls back to inline
+#                              framing if the push fails. Without [host]: sticky inline-
+#                              only mode (send/banner default to the self-contained blob).
+#   local-init  [session]      revert remote-init — back to local helper-file framing
 #   wait-done [session] [timeout_sec] [seq]
 #                              block until last `send` footer shows exit (before next send)
 #   selftest-live              end-to-end smoke test on a throwaway cockpit-selftest-$$
-#                              session (start/send/wait-done/read/banner/stop, NO Wave
-#                              block — never calls spawn/open); rc 0/1
+#                              session (start/send/wait-done/read/banner/remote-init/
+#                              local-init/stop, NO Wave block — never calls spawn/open);
+#                              rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -261,8 +270,25 @@ banner)
   STEP_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-step.sh"
   [ -f "$STEP_SCRIPT" ] || { echo "missing $STEP_SCRIPT" >&2; exit 10; }
   SESS=$(resolve_session "$SESS"); need_session "$SESS"
-  if [ "${WSH_STEP_INLINE:-0}" = "1" ]; then
+  # Explicit WSH_STEP_INLINE always wins (one-off override); otherwise fall
+  # back to the session's sticky remote-mode flag (see remote-init).
+  REMOTE_STEP_PATH=""
+  if [ -n "${WSH_STEP_INLINE+x}" ]; then
+    USE_INLINE="$WSH_STEP_INLINE"
+  elif remote_mode_get "$SESS"; then
+    REMOTE_STEP_PATH=$(remote_helper_path_get "$SESS" step)
+    if [ -n "$REMOTE_STEP_PATH" ]; then USE_INLINE=0; else USE_INLINE=1; fi
+  else
+    USE_INLINE=0
+  fi
+  if [ "$USE_INLINE" = "1" ]; then
     CMD=$("$STEP_SCRIPT" cmd "$TYPE" "$@") || { echo "banner build failed for: $TYPE $*" >&2; exit 11; }
+  elif [ -n "$REMOTE_STEP_PATH" ]; then
+    # Remote mode with a helper pushed by `remote-init <sess> <host>`: source
+    # the REMOTE copy every call — same no-tracking rationale as send/sep above.
+    CALL=$(step_build_call "$TYPE" "$@")
+    REMOTE_STEP_Q=${REMOTE_STEP_PATH//\'/\'\\\'\'}
+    CMD=". '${REMOTE_STEP_Q}' && ${CALL}"
   else
     CALL=$(step_build_call "$TYPE" "$@")
     if step_helpers_loaded "$SESS"; then
@@ -373,6 +399,98 @@ MSG
     echo "if it stays empty, ask the user to attach manually: ${ATTACH}" >&2
   fi
   ;;
+remote-init)
+  # Call once, right after confirming (via the mandatory situate probe) that
+  # the pane has ssh-hopped to a remote host.
+  #
+  # No [host] given: sticky inline-only mode — send/banner default to the
+  # self-contained inline framing for THIS session from then on, no need to
+  # repeat WSH_LIVE_SEP_REINIT=1/WSH_STEP_INLINE=1 on every subsequent call.
+  #
+  # [host] given: try to PUSH the local sep/step helper files to that host
+  # (via wsh-push.sh, same connection string `tailscale ssh`/`scp` would
+  # accept) so send/banner can use the SAME short sourcing form there too —
+  # inline framing becomes the fallback (push unavailable/failed), not the
+  # only option. One hop only: hopping again from the remote host to a THIRD
+  # host isn't tracked — falls back to inline there, still correct.
+  have_mux
+  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  HOST="${2:-}"
+  if [ -z "$HOST" ]; then
+    remote_mode_set "$SESS" 1
+    echo "remote mode ON for '$SESS' — send/banner now default to inline framing (local-init to revert)"
+  else
+    PUSH_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-push.sh"
+    PUSHED=0
+    if [ ! -f "$PUSH_SCRIPT" ]; then
+      echo "warn: missing $PUSH_SCRIPT — falling back to inline-only remote mode" >&2
+    else
+      # Resolve the remote $HOME through the pane itself (visibly framed, like
+      # every other cockpit command) rather than assume a path shape — the
+      # remote path is later embedded in single-quoted contexts inside
+      # wsh-push.sh's scp/tailscale-ssh fallbacks, where a literal '~' is NOT
+      # guaranteed to expand.
+      set +e
+      WSH_LIVE_SEP_REINIT=1 "$0" send 'printf "WSH_REMOTE_HOME=%s\n" "$HOME"' "$SESS" >/dev/null 2>&1
+      "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+      HRC=$?
+      set -e
+      RHOME=""
+      if [ "$HRC" -eq 0 ]; then
+        RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o 'WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
+      fi
+      if [ -z "$RHOME" ]; then
+        echo "warn: could not resolve \$HOME on '$HOST' — falling back to inline-only remote mode" >&2
+      else
+        REMOTE_DIR="${RHOME}/.cache/wsh-cockpit/helpers"
+        set +e
+        WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR}'" "$SESS" >/dev/null 2>&1
+        "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+        MKRC=$?
+        set -e
+        if [ "$MKRC" -ne 0 ]; then
+          echo "warn: could not create $REMOTE_DIR on '$HOST' (rc=$MKRC) — falling back to inline-only remote mode" >&2
+        else
+          LOCAL_SEP=$(sep_ensure_helpers)
+          LOCAL_STEP=$(step_ensure_helpers)
+          REMOTE_SEP="${REMOTE_DIR}/$(basename "$LOCAL_SEP")"
+          REMOTE_STEP="${REMOTE_DIR}/$(basename "$LOCAL_STEP")"
+          set +e
+          "$PUSH_SCRIPT" "$LOCAL_SEP" "$REMOTE_SEP" "$HOST" >/dev/null 2>&1
+          PRC1=$?
+          "$PUSH_SCRIPT" "$LOCAL_STEP" "$REMOTE_STEP" "$HOST" >/dev/null 2>&1
+          PRC2=$?
+          set -e
+          if [ "$PRC1" -eq 0 ] && [ "$PRC2" -eq 0 ]; then
+            remote_helper_path_set "$SESS" sep "$REMOTE_SEP"
+            remote_helper_path_set "$SESS" step "$REMOTE_STEP"
+            PUSHED=1
+          else
+            echo "warn: wsh-push.sh failed to push helpers to '$HOST' (sep rc=$PRC1 step rc=$PRC2) — falling back to inline-only remote mode" >&2
+          fi
+        fi
+      fi
+    fi
+    remote_mode_set "$SESS" 1
+    if [ "$PUSHED" = "1" ]; then
+      echo "remote mode ON for '$SESS' — helpers pushed to '$HOST':$REMOTE_DIR; send/banner source them there (local-init to revert)"
+    else
+      echo "remote mode ON for '$SESS' — inline framing only (helper push to '$HOST' unavailable; local-init to revert)"
+    fi
+  fi
+  ;;
+local-init)
+  # Revert a session back to local (helper-file-sourcing) framing — e.g. after
+  # `exit`ing an ssh hop back to the Mac's own shell in the same pane. Clears
+  # the sticky flag AND any recorded remote helper paths from a hosted
+  # remote-init, so a later no-arg remote-init on the same session starts clean.
+  have_mux
+  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  remote_mode_set "$SESS" 0
+  remote_helper_path_clear "$SESS" sep
+  remote_helper_path_clear "$SESS" step
+  echo "remote mode OFF for '$SESS' — send/banner back to local helper-file framing"
+  ;;
 selftest-sep)
   cmd_selftest_sep
   ;;
@@ -390,8 +508,25 @@ send)
     LINE="$CMD"
   else
     SEQ=$(sep_next_seq "$SESS")
-    if [ "${WSH_LIVE_SEP_REINIT:-0}" = "1" ]; then
+    # Explicit WSH_LIVE_SEP_REINIT always wins (one-off override); otherwise
+    # fall back to the session's sticky remote-mode flag (see remote-init).
+    REMOTE_SEP_PATH=""
+    if [ -n "${WSH_LIVE_SEP_REINIT+x}" ]; then
+      USE_INLINE="$WSH_LIVE_SEP_REINIT"
+    elif remote_mode_get "$SESS"; then
+      REMOTE_SEP_PATH=$(remote_helper_path_get "$SESS" sep)
+      if [ -n "$REMOTE_SEP_PATH" ]; then USE_INLINE=0; else USE_INLINE=1; fi
+    else
+      USE_INLINE=0
+    fi
+    if [ "$USE_INLINE" = "1" ]; then
       LINE=$(sep_wrap_inline "$SEQ" "$CMD")
+    elif [ -n "$REMOTE_SEP_PATH" ]; then
+      # Remote mode with a helper pushed by `remote-init <sess> <host>`:
+      # source the REMOTE copy every send — no "loaded once" tracking for
+      # this case (sourcing a small file is cheap; skipping that state saves
+      # a second bug surface for no real gain).
+      LINE=$(sep_wrap "$SEQ" "$CMD" "$REMOTE_SEP_PATH")
     elif sep_helpers_loaded "$SESS"; then
       LINE=$(sep_wrap "$SEQ" "$CMD")
     else
@@ -467,5 +602,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|status|web|banner|wait-done|selftest-sep|selftest-live} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|status|web|banner|remote-init|local-init|wait-done|selftest-sep|selftest-live} [args]" >&2; exit 2 ;;
 esac

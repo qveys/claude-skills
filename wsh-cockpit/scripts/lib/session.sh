@@ -103,6 +103,54 @@ need_session() {
     echo "no $MUX session '$1' — run: $0 start $1" >&2; exit 4; }
 }
 
+# --- Remote mode: sticky per-session inline-framing flag ---------------------
+# The local helper files (lib/framing.sh's sep/step helpers) live under
+# $STATE_DIR on the Mac. Once a pane `ssh`/`tailscale ssh`-hops to a remote
+# host, that path doesn't exist there, so sourcing it fails ("command not
+# found") — the existing fix is the self-contained inline framing
+# (WSH_LIVE_SEP_REINIT=1 / WSH_STEP_INLINE=1), but requiring the caller to
+# repeat those env vars on every single send/banner after the hop is exactly
+# the kind of thing that gets forgotten mid-workflow. `remote-init` sets a
+# tmux session option once; send/banner then default to inline framing for
+# that session until `local-init` clears it. Explicit env vars still win, for
+# one-off overrides. Zellij has no per-session option store (same limitation
+# as helper_loaded) — remote mode is env-var-only there; remote_mode_set is a
+# no-op with a stderr note rather than a silent failure.
+remote_mode_option() { printf '@wsh_remote_mode\n'; }
+remote_mode_get() {  # $1 sess -> "1" (on) or "" (off/unset)
+  [ "$MUX" = tmux ] || return 1
+  [ "$(tmux show-option -qv -t "$1" "$(remote_mode_option)" 2>/dev/null || true)" = "1" ]
+}
+remote_mode_set() {  # $1 sess  $2 (1|0)
+  if [ "$MUX" != tmux ]; then
+    echo "note: remote-init/local-init has no effect under $MUX (no per-session option store) — use WSH_LIVE_SEP_REINIT=1 / WSH_STEP_INLINE=1 explicitly instead" >&2
+    return 0
+  fi
+  tmux set-option -t "$1" "$(remote_mode_option)" "$2" >/dev/null 2>&1 || true
+}
+
+# --- Remote mode: pushed-helper paths (when remote-init was given a host) ---
+# When `remote-init <session> <host>` manages to push the sep/step helper
+# files to the remote host (see wsh-live.sh's remote-init case, which shells
+# out to wsh-push.sh), the REMOTE absolute path of each pushed file is
+# recorded here so send/banner can build the short `. '<remote-path>' && ...`
+# sourcing form instead of falling back to the ~700-char inline blob. Same
+# per-session tmux-option store as remote_mode_*, same Zellij limitation
+# (no-op — callers just never find a path, so they fall back to inline).
+remote_helper_option() { printf '@wsh_remote_helper_%s\n' "$1"; }  # $1 kind (sep|step)
+remote_helper_path_get() {  # $1 sess $2 kind -> remote path, or "" if none recorded
+  [ "$MUX" = tmux ] || { printf ''; return 0; }
+  tmux show-option -qv -t "$1" "$(remote_helper_option "$2")" 2>/dev/null || true
+}
+remote_helper_path_set() {  # $1 sess $2 kind $3 remote-path
+  [ "$MUX" = tmux ] || return 0
+  tmux set-option -t "$1" "$(remote_helper_option "$2")" "$3" >/dev/null 2>&1 || true
+}
+remote_helper_path_clear() {  # $1 sess $2 kind
+  [ "$MUX" = tmux ] || return 0
+  tmux set-option -u -t "$1" "$(remote_helper_option "$2")" >/dev/null 2>&1 || true
+}
+
 # Human-only narration. The cockpit is driven by Claude through a non-TTY Bash pipe,
 # where every line is re-read into the model's context on each call — so per-command
 # confirmations and multi-line "how to attach" help are pure token cost there. Print
