@@ -470,11 +470,18 @@ stop)
   # Also delete the Wave block `open` created for this session — killing tmux
   # alone leaves the block behind as an orphaned dead-terminal pane. Best-effort:
   # the block id was persisted at open time; skip cleanly if it's absent or the
-  # user already closed the block.
+  # user already closed the block. wave_delete_block reports whether the delete
+  # actually happened, so this doesn't claim a cleanup that silently no-op'd.
   BF=$(block_file "$SESS")
   if [ -f "$BF" ]; then
     BID=$(tr -d '[:space:]' <"$BF")
-    if [ -n "$BID" ]; then wave_delete_block "$BID"; echo "cleaned Wave block $BID"; fi
+    if [ -n "$BID" ]; then
+      if wave_delete_block "$BID"; then
+        echo "cleaned Wave block $BID"
+      else
+        echo "could not clean Wave block $BID (best-effort; wsh/sqlite3 missing, block already gone, or context unresolved)" >&2
+      fi
+    fi
     rm -f "$BF" 2>/dev/null || true
   fi
   # Forget the remembered session if it pointed at the one we just stopped.
