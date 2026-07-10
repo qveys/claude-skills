@@ -310,6 +310,9 @@ cmd_selftest_gc() {
   report_gc_case "3 idle unattached session is a candidate" "$rc"
 
   # 4-5. real session, real subcommand: --dry-run never kills; a real sweep does.
+  # --only-session narrows the sweep to THIS throwaway session — without it,
+  # `gc --idle=0` would sweep every unattached cockpit-* session on the
+  # machine, including a developer's own detached cockpits.
   live_selftest_gc_cleanup() {
     "$0" stop "$SESS" >/dev/null 2>&1 || true
   }
@@ -317,13 +320,13 @@ cmd_selftest_gc() {
   create_session "$SESS"   # detached by construction — never attached
 
   set +e
-  "$0" gc --dry-run --idle=0 >/dev/null 2>&1
+  "$0" gc --dry-run --idle=0 --only-session="$SESS" >/dev/null 2>&1
   set -e
   if mux_has "$SESS"; then report_gc_case "4 dry-run keeps session" 0
   else report_gc_case "4 dry-run keeps session" 1 "session was killed despite --dry-run"; fi
 
   set +e
-  "$0" gc --idle=0 >/dev/null 2>&1
+  "$0" gc --idle=0 --only-session="$SESS" >/dev/null 2>&1
   set -e
   if mux_has "$SESS"; then report_gc_case "5 real sweep kills idle session" 1 "session still alive after gc --idle=0"
   else report_gc_case "5 real sweep kills idle session" 0; fi

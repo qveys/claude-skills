@@ -28,16 +28,20 @@ gc_should_kill() {
   [ "$age" -ge "$idle" ]
 }
 
-# wsh-live.sh gc [--dry-run] [--idle=SECONDS]
-#   --idle=SECONDS   override WSH_LIVE_GC_IDLE (default 86400 = 24h)
-#   --dry-run        list what WOULD be killed; touches nothing
+# wsh-live.sh gc [--dry-run] [--idle=SECONDS] [--only-session=NAME]
+#   --idle=SECONDS        override WSH_LIVE_GC_IDLE (default 86400 = 24h)
+#   --dry-run             list what WOULD be killed; touches nothing
+#   --only-session=NAME   restrict the sweep to exactly this cockpit-* session
+#                         instead of all of them — used by selftest-gc so it
+#                         never touches unrelated sessions on a dev machine
 cmd_gc() {
-  local DRY_RUN=0 IDLE="${WSH_LIVE_GC_IDLE:-86400}"
+  local DRY_RUN=0 IDLE="${WSH_LIVE_GC_IDLE:-86400}" ONLY_SESSION=""
   for arg in "$@"; do
     case "$arg" in
       --dry-run) DRY_RUN=1 ;;
       --idle=*) IDLE="${arg#--idle=}" ;;
-      *) echo "gc: unknown arg '$arg' (usage: $0 gc [--dry-run] [--idle=SECONDS])" >&2; exit 2 ;;
+      --only-session=*) ONLY_SESSION="${arg#--only-session=}" ;;
+      *) echo "gc: unknown arg '$arg' (usage: $0 gc [--dry-run] [--idle=SECONDS] [--only-session=NAME])" >&2; exit 2 ;;
     esac
   done
   case "$IDLE" in ''|*[!0-9]*)
@@ -62,6 +66,9 @@ cmd_gc() {
     return 0
   fi
   sessions=$(printf '%s\n' "$sessions" | grep '^cockpit-' || true)
+  if [ -n "$ONLY_SESSION" ]; then
+    sessions=$(printf '%s\n' "$sessions" | awk -F'|' -v n="$ONLY_SESSION" '$1==n' || true)
+  fi
 
   local nm att act killed=0 kept=0 wouldkill=0
   while IFS='|' read -r nm att act; do
