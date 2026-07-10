@@ -121,10 +121,10 @@ remote_mode_get() {  # $1 sess -> "1" (on) or "" (off/unset)
   [ "$MUX" = tmux ] || return 1
   [ "$(tmux show-option -qv -t "$1" "$(remote_mode_option)" 2>/dev/null || true)" = "1" ]
 }
-remote_mode_set() {  # $1 sess  $2 (1|0)
+remote_mode_set() {  # $1 sess  $2 (1|0) -> 0 if actually set, 1 if a tmux-only no-op
   if [ "$MUX" != tmux ]; then
     echo "note: remote-init/local-init has no effect under $MUX (no per-session option store) — use WSH_LIVE_SEP_REINIT=1 / WSH_STEP_INLINE=1 explicitly instead" >&2
-    return 0
+    return 1
   fi
   tmux set-option -t "$1" "$(remote_mode_option)" "$2" >/dev/null 2>&1 || true
 }
@@ -174,6 +174,9 @@ teardown_session() {
   if [ "$MUX" = tmux ]; then
     tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
     tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
   fi
   web_teardown "$sess"
   if mux_kill "$sess"; then killed=0; fi

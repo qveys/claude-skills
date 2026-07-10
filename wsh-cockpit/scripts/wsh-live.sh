@@ -442,8 +442,13 @@ remote-init)
   SESS=$(resolve_session "${1:-}"); need_session "$SESS"
   HOST="${2:-}"
   if [ -z "$HOST" ]; then
-    remote_mode_set "$SESS" 1
-    echo "remote mode ON for '$SESS' — send/banner now default to inline framing (local-init to revert)"
+    # remote_mode_set only prints "remote mode ON" once it actually flipped the
+    # sticky tmux option; under zellij it's a no-op (its own stderr note
+    # explains why), so gate the success line on its exit status instead of
+    # claiming a behavior change that won't happen.
+    if remote_mode_set "$SESS" 1; then
+      echo "remote mode ON for '$SESS' — send/banner now default to inline framing (local-init to revert)"
+    fi
   else
     PUSH_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-push.sh"
     PUSHED=0
@@ -496,11 +501,12 @@ remote-init)
         fi
       fi
     fi
-    remote_mode_set "$SESS" 1
-    if [ "$PUSHED" = "1" ]; then
-      echo "remote mode ON for '$SESS' — helpers pushed to '$HOST':$REMOTE_DIR; send/banner source them there (local-init to revert)"
-    else
-      echo "remote mode ON for '$SESS' — inline framing only (helper push to '$HOST' unavailable; local-init to revert)"
+    if remote_mode_set "$SESS" 1; then
+      if [ "$PUSHED" = "1" ]; then
+        echo "remote mode ON for '$SESS' — helpers pushed to '$HOST':$REMOTE_DIR; send/banner source them there (local-init to revert)"
+      else
+        echo "remote mode ON for '$SESS' — inline framing only (helper push to '$HOST' unavailable; local-init to revert)"
+      fi
     fi
   fi
   ;;
@@ -511,10 +517,14 @@ local-init)
   # remote-init, so a later no-arg remote-init on the same session starts clean.
   have_mux
   SESS=$(resolve_session "${1:-}"); need_session "$SESS"
-  remote_mode_set "$SESS" 0
   remote_helper_path_clear "$SESS" sep
   remote_helper_path_clear "$SESS" step
-  echo "remote mode OFF for '$SESS' — send/banner back to local helper-file framing"
+  # Same as remote-init: only claim "remote mode OFF" when the sticky tmux
+  # option was actually cleared — under zellij this is a no-op (its own
+  # stderr note explains why) and the session was never in remote mode.
+  if remote_mode_set "$SESS" 0; then
+    echo "remote mode OFF for '$SESS' — send/banner back to local helper-file framing"
+  fi
   ;;
 selftest-sep)
   cmd_selftest_sep
