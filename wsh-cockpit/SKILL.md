@@ -92,7 +92,7 @@ scripts/wsh-live.sh open  [session]            # AUTO-OPEN a Wave block attached
 scripts/wsh-live.sh send  '<command>' [session]  # type a command + Enter
 scripts/wsh-live.sh keys  '<tmux-keys>' [session] # raw keys: C-c, Up, q, Enter...
 scripts/wsh-live.sh read  [session] [lines]    # snapshot the pane (default 30 lines)
-scripts/wsh-live.sh stop  [session]            # kill the session
+scripts/wsh-live.sh stop  [session]            # kill the session + delete its Wave block
 scripts/wsh-live.sh current                    # print last spawned session for this agent
 scripts/wsh-live.sh doctor                     # read-only diagnostic, 11 checks, rc 0/1
 scripts/wsh-live.sh web {start|stop|status} [session]  # browser view via ttyd, read-only by default
@@ -449,6 +449,13 @@ and zsh without tmux.
 Every `rexec` block is a visible pane in the user's Wave tab; leaving strays
 behind clutters their workspace and leaks shells. The script auto-cleans via a
 `trap`, so prefer it over hand-rolled `wsh run`/`setmeta`.
+
+**`live` cockpits self-clean on `stop`.** `stop` now deletes the Wave block that
+`open`/`spawn` created (block id persisted at open time under
+`~/.cache/wsh-cockpit/block-<session>`), not just the tmux session — so a stopped
+cockpit no longer leaves an orphaned dead-terminal pane. The `wsh blocks list` /
+`deleteblock` dance below is only for **strays from another source** (a block you
+opened by hand, or a cockpit from before this behavior existed).
 
 **Wait at least 60s before sweeping a block you think is an orphan.** A block
 that looks abandoned may be an `rexec` still mid-run or mid-linger — deleting it

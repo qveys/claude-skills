@@ -206,16 +206,24 @@ tty_only() { [ -t 1 ] && printf '%s\n' "$@" || true; }
 
 # Per-session sequence counter file path: normalized slug of session name.
 seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+# Per-session Wave block id file: lets `stop` delete the block `open` created, so
+# killing the cockpit doesn't leave an orphaned dead-terminal pane in Wave.
+block_file() { printf '%s/block-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
 
 # Kill a session and clean up everything that belongs to it: the seq-counter
 # file, the sep/step "helpers loaded" tmux options, its ttyd web view (if
 # any), and — only if it was the one remembered for the CURRENT agent/prefix
 # — the last-session pointer. Shared by `stop` (explicit, one session) and
 # `gc` (idle sweep, many sessions) so this cleanup logic lives in exactly one
-# place. Returns 0 if a session was actually killed, 1 if there was nothing
-# to kill (already gone).
+# place. Also deletes the Wave block `open` created for this session (if
+# any) — killing tmux alone would leave it behind as an orphaned
+# dead-terminal pane; wave_delete_block (lib/wave.sh) is best-effort and
+# reports whether the delete actually happened. Folding this in here (rather
+# than in `stop` alone) means `gc`'s idle sweep cleans up orphaned Wave
+# blocks too, not just an explicit `stop`. Returns 0 if a session was
+# actually killed, 1 if there was nothing to kill (already gone).
 teardown_session() {
-  local sess="$1" sf killed=1
+  local sess="$1" sf bf bid killed=1
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
   if [ "$MUX" = tmux ]; then
     tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
@@ -226,6 +234,18 @@ teardown_session() {
   fi
   web_teardown "$sess"
   if mux_kill "$sess"; then killed=0; fi
+  bf=$(block_file "$sess")
+  if [ -f "$bf" ]; then
+    bid=$(tr -d '[:space:]' <"$bf")
+    if [ -n "$bid" ]; then
+      if wave_delete_block "$bid"; then
+        echo "cleaned Wave block $bid"
+      else
+        echo "could not clean Wave block $bid (best-effort; wsh/sqlite3 missing, block already gone, or context unresolved)" >&2
+      fi
+    fi
+    rm -f "$bf" 2>/dev/null || true
+  fi
   sf=$(state_file)
   if [ -f "$sf" ] && [ "$(tr -d '[:space:]' <"$sf")" = "$sess" ]; then
     rm -f "$sf" 2>/dev/null || true

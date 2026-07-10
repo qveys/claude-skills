@@ -407,6 +407,12 @@ MSG
     exit 7
   fi
 
+  # Remember the block id so `stop` can delete the Wave block too (not just the
+  # tmux session) — otherwise killing the cockpit leaves an orphaned dead-terminal
+  # pane. Persisted here because `spawn` reaches the block via this same path.
+  mkdir -p "$STATE_DIR"
+  printf '%s' "$NEWID" > "$(block_file "$SESS")" 2>/dev/null || true
+
   # Verify a client actually joined (the attach can fail silently inside the
   # block, e.g. wrong tmux/path); give it a moment, then confirm.
   for _ in 1 2 3 4 5; do
@@ -641,9 +647,10 @@ stop)
     SESS=""; [ -f "$SF" ] && SESS=$(tr -d '[:space:]' <"$SF")
     [ -n "$SESS" ] || SESS="$SESS_DEFAULT"
   fi
-  # Actual kill + state cleanup (seq file, sep/step helper options, web view,
-  # last-session pointer) lives in teardown_session (lib/session.sh) — shared
-  # with `gc`, which needs the exact same per-session cleanup on a sweep.
+  # Actual kill + state cleanup (seq file, sep/step helper options, remote-mode
+  # options, Wave block, web view, last-session pointer) lives in
+  # teardown_session (lib/session.sh) — shared with `gc`, which needs the
+  # exact same per-session cleanup on a sweep.
   if teardown_session "$SESS"; then
     echo "killed session '$SESS'"
   else

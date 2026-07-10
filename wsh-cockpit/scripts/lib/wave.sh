@@ -107,3 +107,32 @@ tab_describe() {
   [ -n "$name" ] || return 1
   printf '%s|%s\n' "$name" "${count:-1}"
 }
+
+# Delete a Wave block by id (used by `stop` so killing the cockpit also removes
+# the visible block, not just the tmux session). `wsh` needs an RPC context: from
+# a non-Wave shell (the agent's tool shell) WAVETERM_* is unset and wsh errors
+# "no workspaces found", so we resolve the block's own tab + workspace from the
+# state DB (read-only) and pass them via env — mirroring how `open` runs `wsh run`.
+# Best-effort: silent no-op if wsh/sqlite3 is missing, the block is already gone,
+# or no context can be resolved (never blocks `stop`). Returns non-zero when the
+# block was NOT actually deleted, so callers can report an accurate status
+# instead of assuming success.
+wave_delete_block() {
+  local bid="$1" ro tab ws
+  [ -n "$bid" ] || return 1
+  # bid comes from a user-writable state file and is interpolated into a LIKE
+  # query below — reject anything that isn't a UUID-like hex/dash string before
+  # it ever reaches sqlite3.
+  case "$bid" in *[!0-9a-fA-F-]*) return 1 ;; esac
+  command -v wsh >/dev/null 2>&1 || return 1
+  ro=$(wave_db_ro) || ro=""
+  if [ -n "$ro" ]; then
+    tab=$(sqlite3 "$ro" "SELECT oid FROM db_tab WHERE data LIKE '%${bid//\'/}%' LIMIT 1;" 2>/dev/null)
+    [ -n "$tab" ] || tab=$(resolve_live_tab 2>/dev/null || true)
+    [ -n "$tab" ] && ws=$(sqlite3 "$ro" \
+      "SELECT oid FROM db_workspace WHERE data LIKE '%${tab//\'/}%' LIMIT 1;" 2>/dev/null)
+  fi
+  WAVETERM_TABID="${tab:-${WAVETERM_TABID:-}}" \
+  WAVETERM_WORKSPACEID="${ws:-${WAVETERM_WORKSPACEID:-}}" \
+    wsh deleteblock -b "$bid" >/dev/null 2>&1
+}
