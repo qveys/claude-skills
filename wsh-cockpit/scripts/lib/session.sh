@@ -160,3 +160,26 @@ tty_only() { [ -t 1 ] && printf '%s\n' "$@" || true; }
 
 # Per-session sequence counter file path: normalized slug of session name.
 seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# Kill a session and clean up everything that belongs to it: the seq-counter
+# file, the sep/step "helpers loaded" tmux options, its ttyd web view (if
+# any), and — only if it was the one remembered for the CURRENT agent/prefix
+# — the last-session pointer. Shared by `stop` (explicit, one session) and
+# `gc` (idle sweep, many sessions) so this cleanup logic lives in exactly one
+# place. Returns 0 if a session was actually killed, 1 if there was nothing
+# to kill (already gone).
+teardown_session() {
+  local sess="$1" sf killed=1
+  rm -f "$(seq_file "$sess")" 2>/dev/null || true
+  if [ "$MUX" = tmux ]; then
+    tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
+  fi
+  web_teardown "$sess"
+  if mux_kill "$sess"; then killed=0; fi
+  sf=$(state_file)
+  if [ -f "$sf" ] && [ "$(tr -d '[:space:]' <"$sf")" = "$sess" ]; then
+    rm -f "$sf" 2>/dev/null || true
+  fi
+  return "$killed"
+}

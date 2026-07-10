@@ -22,6 +22,13 @@
 #   current                    print the last session created by `spawn` in this shell tree
 #   doctor                     read-only diagnostic of the whole cockpit chain (11 checks,
 #                              rc 0/1, never writes anything — safe to run anytime)
+#   gc [--dry-run] [--idle=SECONDS]
+#                              kill idle, UNATTACHED cockpit-* sessions (orphans left behind
+#                              by a crash/forgotten `stop`); default idle threshold is
+#                              WSH_LIVE_GC_IDLE (86400s/24h); --dry-run lists only; an
+#                              attached session is NEVER a candidate, whatever its age.
+#                              Also runs best-effort (silent, non-fatal) at the top of
+#                              `spawn`/`start` so orphans self-clean over time.
 #   web   {start|stop|status} [session]
 #                              browser view of the cockpit pane via ttyd, loopback-only
 #                              (brew install ttyd); read-only by default (WSH_WEB_WRITE=1
@@ -42,6 +49,8 @@
 #                              session (start/send/wait-done/read/banner/remote-init/
 #                              local-init/stop, NO Wave block — never calls spawn/open);
 #                              rc 0/1
+#   selftest-gc                gc_should_kill pure-function cases (fresh/attached/idle) +
+#                              a real dry-run-then-real sweep on a throwaway session; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -53,6 +62,8 @@
 #      WSH_COCKPIT_AGENT          key for state file (agent name, used in last-session-*)
 #      WSH_COCKPIT_PREFIX         default prefix for auto-unique session names
 #      WSH_COCKPIT_STATE_DIR      state directory (default ~/.cache/wsh-cockpit)
+#      WSH_LIVE_GC_IDLE (default 86400)  `gc` idle threshold in seconds; overridden per-call
+#                                by --idle=SECONDS
 #      WSH_LIVE_SEP=1 (default)   enable send/recv visual framing; =0 for raw shell
 #      WSH_WEB_PORT (default 7681)  loopback TCP port for `web` (ttyd)
 #      WSH_WEB_WRITE=1              `web start` becomes writable (default: read-only)
@@ -104,6 +115,8 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/doctor.sh"
 # shellcheck source=./lib/web.sh
 . "$SCRIPT_DIR/lib/web.sh"
+# shellcheck source=./lib/gc.sh
+. "$SCRIPT_DIR/lib/gc.sh"
 # shellcheck source=./lib/selftests.sh
 . "$SCRIPT_DIR/lib/selftests.sh"
 
@@ -114,6 +127,10 @@ spawn)
   # Preferred entry point. Reuses the last alive cockpit for this agent/prefix unless
   # --force/--fresh is passed. Never hijacks the generic "cockpit" name (use unique names).
   have_mux
+  # Best-effort orphan sweep (default idle threshold) on every spawn — silent,
+  # non-fatal: run in a subshell so a stray `exit` inside cmd_gc can't abort
+  # THIS session's creation, and never let a slow/failing gc delay it either.
+  ( cmd_gc >/dev/null 2>&1 ) || true
   FORCE=0
   PREFIX=""
   for arg in "$@"; do
@@ -175,6 +192,8 @@ status)
   ;;
 start)
   have_mux
+  # Best-effort orphan sweep, same rationale as spawn's (see comment there).
+  ( cmd_gc >/dev/null 2>&1 ) || true
   REUSE=0
   ARGS=()
   for arg in "$@"; do
@@ -247,6 +266,9 @@ current)
   ;;
 doctor)
   cmd_doctor
+  ;;
+gc)
+  cmd_gc "$@"
   ;;
 web)
   cmd_web "$@"
@@ -497,6 +519,9 @@ selftest-sep)
 selftest-live)
   cmd_selftest_live
   ;;
+selftest-gc)
+  cmd_selftest_gc
+  ;;
 send)
   have_mux
   CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
@@ -585,22 +610,15 @@ stop)
     SESS=""; [ -f "$SF" ] && SESS=$(tr -d '[:space:]' <"$SF")
     [ -n "$SESS" ] || SESS="$SESS_DEFAULT"
   fi
-  rm -f "$(seq_file "$SESS")" 2>/dev/null || true
-  if [ "$MUX" = tmux ]; then
-    tmux set-option -u -t "$SESS" "$(sep_helper_option "$SESS")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$SESS" "$(step_helper_option "$SESS")" >/dev/null 2>&1 || true
-  fi
-  web_teardown "$SESS"
-  if mux_kill "$SESS"; then
+  # Actual kill + state cleanup (seq file, sep/step helper options, web view,
+  # last-session pointer) lives in teardown_session (lib/session.sh) — shared
+  # with `gc`, which needs the exact same per-session cleanup on a sweep.
+  if teardown_session "$SESS"; then
     echo "killed session '$SESS'"
   else
     echo "no session '$SESS' to kill"
   fi
-  # Forget the remembered session if it pointed at the one we just stopped.
-  if [ -f "$SF" ] && [ "$(tr -d '[:space:]' <"$SF")" = "$SESS" ]; then
-    rm -f "$SF" 2>/dev/null || true
-  fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|status|web|banner|remote-init|local-init|wait-done|selftest-sep|selftest-live} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc} [args]" >&2; exit 2 ;;
 esac
