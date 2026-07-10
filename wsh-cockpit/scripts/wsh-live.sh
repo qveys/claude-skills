@@ -454,7 +454,7 @@ remote-init)
   HOST="${2:-}"
   if [ -z "$HOST" ]; then
     # remote_mode_set only prints "remote mode ON" once it actually flipped the
-    # sticky tmux option; under zellij it's a no-op (its own stderr note
+    # sticky tmux option; under zellij it's a no-op (its own stderr note already
     # explains why), so gate the success line on its exit status instead of
     # claiming a behavior change that won't happen.
     if remote_mode_set "$SESS" 1; then
@@ -463,6 +463,11 @@ remote-init)
   else
     PUSH_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-push.sh"
     PUSHED=0
+    # Clear any remote helper paths recorded by a PRIOR successful remote-init
+    # before attempting this one — otherwise a push failure here would leave
+    # send/banner sourcing stale remote paths instead of falling back to inline.
+    remote_helper_path_clear "$SESS" sep
+    remote_helper_path_clear "$SESS" step
     if [ ! -f "$PUSH_SCRIPT" ]; then
       echo "warn: missing $PUSH_SCRIPT — falling back to inline-only remote mode" >&2
     else
@@ -478,14 +483,22 @@ remote-init)
       set -e
       RHOME=""
       if [ "$HRC" -eq 0 ]; then
-        RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o 'WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
+        # Anchor to the START of the line: without it, this can match the
+        # TYPED command itself (which contains the literal string
+        # "WSH_REMOTE_HOME=%s...") if the real output line scrolled past the
+        # last 40 captured lines, producing a bogus path.
+        RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o '^WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
       fi
       if [ -z "$RHOME" ]; then
         echo "warn: could not resolve \$HOME on '$HOST' — falling back to inline-only remote mode" >&2
       else
         REMOTE_DIR="${RHOME}/.cache/wsh-cockpit/helpers"
+        # Escape single quotes before embedding REMOTE_DIR inside the
+        # single-quoted `mkdir -p '...'` string typed into the remote pane —
+        # otherwise a $HOME containing a quote breaks the remote command.
+        REMOTE_DIR_Q=${REMOTE_DIR//\'/\'\\\'\'}
         set +e
-        WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR}'" "$SESS" >/dev/null 2>&1
+        WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR_Q}'" "$SESS" >/dev/null 2>&1
         "$0" wait-done "$SESS" 30 >/dev/null 2>&1
         MKRC=$?
         set -e
