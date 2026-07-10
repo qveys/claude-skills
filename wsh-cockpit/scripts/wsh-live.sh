@@ -354,6 +354,7 @@ MSG
   # Remember the block id so `stop` can delete the Wave block too (not just the
   # tmux session) — otherwise killing the cockpit leaves an orphaned dead-terminal
   # pane. Persisted here because `spawn` reaches the block via this same path.
+  mkdir -p "$STATE_DIR"
   printf '%s' "$NEWID" > "$(block_file "$SESS")" 2>/dev/null || true
 
   # Verify a client actually joined (the attach can fail silently inside the
