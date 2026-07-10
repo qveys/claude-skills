@@ -186,14 +186,68 @@ cmd_selftest_live() {
     report_live_case "7 seq file" 1 "seq=$seqval want=2"
   fi
 
-  # 8. stop kills the session and removes its seq file
+  # 8. default (no remote-init called yet, no env var): the very first send
+  # back in step 2 must have used the short helper-sourcing form — reread the
+  # scrollback (200 lines is well past steps 2-5's framing) and look for the
+  # literal `. '<helper-path>' && __wsh '1' ...` line it typed.
+  local helper_sep
+  helper_sep=$(helper_path sep "$SEP_HELPER_VERSION")
+  out=$("$0" read "$SESS" 200 2>&1 | tr -d '\r')
+  if printf '%s' "$out" | tr -d '\n' | grep -Fq ". '${helper_sep}' && __wsh '1' 'echo LIVE_OK_"; then
+    report_live_case "8 default sources helper" 0
+  else
+    report_live_case "8 default sources helper" 1 "expected sourcing form for #1 not found"
+  fi
+
+  # 9. remote-init (no host) flips send to inline framing for THIS session
+  # even with NO env var set — confirms the sticky tmux-option flag drives
+  # it, not the env var fallback path. Marker is a plain literal (no
+  # arithmetic): the TYPED line is unevaluated shell text, so an arithmetic
+  # expression like $((3*3)) would show up as literal "$((3*3))", not "9",
+  # until it actually runs — a plain string sidesteps that trap entirely.
+  unset WSH_LIVE_SEP_REINIT WSH_STEP_INLINE 2>/dev/null || true
+  set +e
+  "$0" remote-init "$SESS" >/dev/null 2>&1
+  "$0" send 'echo RI_INLINE_MARK' "$SESS" >/dev/null 2>&1
+  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+  rc=$?
+  set -e
+  out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
+  local flat9; flat9=$(printf '%s' "$out" | tr -d '\n')
+  if [ "$rc" -eq 0 ] \
+     && printf '%s' "$flat9" | grep -Fq '__wc=' \
+     && printf '%s' "$out" | grep -Fq 'RI_INLINE_MARK'; then
+    report_live_case "9 remote-init inline" 0
+  else
+    report_live_case "9 remote-init inline" 1 "rc=$rc missing inline __wc= marker and/or RI_INLINE_MARK"
+  fi
+
+  # 10. local-init reverts THIS session back to the short __wsh-call form —
+  # match the exact literal line sep_wrap emits for THIS send (a distinct
+  # marker text), so leftover inline text from step 9's scrollback can't
+  # produce a false pass.
+  set +e
+  "$0" local-init "$SESS" >/dev/null 2>&1
+  "$0" send 'echo RI_LOCAL_MARK' "$SESS" >/dev/null 2>&1
+  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+  rc=$?
+  set -e
+  out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
+  if [ "$rc" -eq 0 ] \
+     && printf '%s' "$out" | tr -d '\n' | grep -Eq "__wsh '[0-9]+' 'echo RI_LOCAL_MARK'"; then
+    report_live_case "10 local-init reverts" 0
+  else
+    report_live_case "10 local-init reverts" 1 "rc=$rc expected short-form __wsh call for RI_LOCAL_MARK not found"
+  fi
+
+  # 11. stop kills the session and removes its seq file
   "$0" stop "$SESS" >/dev/null 2>&1 || true
   if mux_has "$SESS"; then
-    report_live_case "8 stop" 1 "session '$SESS' still alive"
+    report_live_case "11 stop" 1 "session '$SESS' still alive"
   elif [ -f "$SEQF" ]; then
-    report_live_case "8 stop" 1 "seq file still present: $SEQF"
+    report_live_case "11 stop" 1 "seq file still present: $SEQF"
   else
-    report_live_case "8 stop" 0
+    report_live_case "11 stop" 0
   fi
 
   if [ "$failures" -ne 0 ]; then
@@ -201,4 +255,85 @@ cmd_selftest_live() {
     exit 1
   fi
   echo "selftest-live: ok"
+}
+
+# gc smoke test: exercises gc_should_kill (lib/gc.sh) directly with fabricated
+# timestamps — tmux gives no way to force session_created/session_activity
+# into the past, so the pure decision function is what makes cases 1-3
+# testable without a real aged session. Cases 4-5 then confirm the real `gc`
+# subcommand end-to-end (dry-run vs. real sweep) on one throwaway,
+# NEVER-attached tmux session — never calls spawn/open, matches selftest-live.
+cmd_selftest_gc() {
+  have_mux
+  if [ "$MUX" != tmux ]; then
+    echo "selftest-gc: skip (tmux-only backend — gc has no zellij equivalent)"
+    return 0
+  fi
+  # SESS is deliberately NOT local: live_selftest_gc_cleanup runs from the
+  # EXIT trap after this function has already returned — same rationale as
+  # cmd_selftest_live's SESS/SF/LIVE_LOG_FILE.
+  SESS="cockpit-selftest-gc-$$"
+  local now rc failures=0
+  now=$(date '+%s')
+
+  report_gc_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # 1. a freshly-created session (age ~0) is NOT a candidate at the default threshold.
+  set +e
+  gc_should_kill "$now" "$now" "0" "${WSH_LIVE_GC_IDLE:-86400}"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then report_gc_case "1 fresh session kept" 0
+  else report_gc_case "1 fresh session kept" 1 "gc_should_kill said kill for age~0"; fi
+
+  # 2. an ATTACHED session is never a candidate, even maximally idle with --idle=0
+  # — the non-negotiable safety guard.
+  set +e
+  gc_should_kill "$now" "$((now - 999999))" "1" "0"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then report_gc_case "2 attached session never killed" 0
+  else report_gc_case "2 attached session never killed" 1 "gc_should_kill said kill for an attached session"; fi
+
+  # 3. an unattached, sufficiently idle session IS a candidate.
+  set +e
+  gc_should_kill "$now" "$((now - 999999))" "0" "0"
+  rc=$?
+  set -e
+  report_gc_case "3 idle unattached session is a candidate" "$rc"
+
+  # 4-5. real session, real subcommand: --dry-run never kills; a real sweep does.
+  # --only-session narrows the sweep to THIS throwaway session — without it,
+  # `gc --idle=0` would sweep every unattached cockpit-* session on the
+  # machine, including a developer's own detached cockpits.
+  live_selftest_gc_cleanup() {
+    "$0" stop "$SESS" >/dev/null 2>&1 || true
+  }
+  trap live_selftest_gc_cleanup EXIT
+  create_session "$SESS"   # detached by construction — never attached
+
+  set +e
+  "$0" gc --dry-run --idle=0 --only-session="$SESS" >/dev/null 2>&1
+  set -e
+  if mux_has "$SESS"; then report_gc_case "4 dry-run keeps session" 0
+  else report_gc_case "4 dry-run keeps session" 1 "session was killed despite --dry-run"; fi
+
+  set +e
+  "$0" gc --idle=0 --only-session="$SESS" >/dev/null 2>&1
+  set -e
+  if mux_has "$SESS"; then report_gc_case "5 real sweep kills idle session" 1 "session still alive after gc --idle=0"
+  else report_gc_case "5 real sweep kills idle session" 0; fi
+
+  if [ "$failures" -ne 0 ]; then
+    echo "selftest-gc: $failures failure(s)" >&2
+    exit 1
+  fi
+  echo "selftest-gc: ok"
 }
