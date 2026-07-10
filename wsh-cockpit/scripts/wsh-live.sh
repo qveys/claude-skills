@@ -214,6 +214,11 @@ start)
     SESS="${ARGS[0]}"
     if mux_has "$SESS"; then
       if [ "$REUSE" -eq 1 ]; then
+        own=$(own_tmux_session 2>/dev/null) || own=""
+        if [ -n "$own" ] && [ "$SESS" = "$own" ]; then
+          echo "refusing: '$SESS' is the tmux session this call is running inside (your own controlling terminal) — pick a different name" >&2
+          exit 8
+        fi
         echo "session '$SESS' already exists — reusing it (--reuse)"
         remember_session "$SESS"
       else
