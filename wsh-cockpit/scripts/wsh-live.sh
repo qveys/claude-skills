@@ -128,9 +128,11 @@ spawn)
   # --force/--fresh is passed. Never hijacks the generic "cockpit" name (use unique names).
   have_mux
   # Best-effort orphan sweep (default idle threshold) on every spawn — silent,
-  # non-fatal: run in a subshell so a stray `exit` inside cmd_gc can't abort
-  # THIS session's creation, and never let a slow/failing gc delay it either.
-  ( cmd_gc >/dev/null 2>&1 ) || true
+  # non-fatal, and genuinely non-blocking: launched as a DETACHED background
+  # job inside a subshell (the subshell itself returns immediately once the
+  # job is started), so a stray `exit`/slow tmux call inside cmd_gc can
+  # neither abort THIS session's creation nor delay it.
+  ( cmd_gc >/dev/null 2>&1 & ) || true
   FORCE=0
   PREFIX=""
   for arg in "$@"; do
@@ -192,8 +194,9 @@ status)
   ;;
 start)
   have_mux
-  # Best-effort orphan sweep, same rationale as spawn's (see comment there).
-  ( cmd_gc >/dev/null 2>&1 ) || true
+  # Best-effort orphan sweep, same rationale as spawn's (see comment there) —
+  # also launched as a detached background job, never blocking `start`.
+  ( cmd_gc >/dev/null 2>&1 & ) || true
   REUSE=0
   ARGS=()
   for arg in "$@"; do
