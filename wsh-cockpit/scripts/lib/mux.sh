@@ -91,7 +91,10 @@ mux_attach_cmd() {  # the command a human types to join the session
   else printf 'zellij attach %s\n' "$1"; fi
 }
 mux_pane_command() {  # foreground process name in the pane's active pane, best-effort
-  if [ "$MUX" = tmux ]; then tmux list-panes -t "$1" -F '#{pane_current_command}' 2>/dev/null | head -1
+  # display-message resolves `-t` to the target's ACTIVE pane directly; the prior
+  # `list-panes | head -1` returned an arbitrary pane of the current window (not
+  # necessarily the active one), which could misjudge a session as reusable.
+  if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
   else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
 }
 
