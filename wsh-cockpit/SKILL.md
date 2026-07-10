@@ -496,6 +496,31 @@ tmux, avec le même cœur de boucle : `spawn`/`start`/`send`/`read`/`wait-done`/
 
 ## Gotchas
 
+- **A reused session can turn out to be your OWN Claude Code terminal —
+  `spawn` now guards against this automatically, but know the failure mode.**
+  `find_reusable_session` looks up the last-remembered session **for the
+  agent/prefix key**, not for the exact positional name you passed — if that
+  key was ever recorded against a tmux session that got repurposed later (e.g.
+  a human attached to it and started an interactive program, including another
+  `claude` CLI), a bare `spawn` would previously hand it back with zero
+  content check. `send`ing into that pane doesn't run a command — it types the
+  text into whatever's running there; against a live Claude Code REPL, that
+  means your "situate" probe (`hostname; pwd; whoami`) is submitted as a **new
+  chat message** instead of executing, and you only notice from a confused
+  reply. `session_safe_to_reuse()` (`lib/session.sh`) now guards on two checks
+  before any reuse: (1) an unconditional block on the exact tmux session the
+  caller is itself running inside (`$TMUX` + `tmux display-message -p '#S'`,
+  via `own_tmux_session`) — this is the check that actually catches the
+  incident above, since `pane_current_command` alone would report "bash" from
+  inside the check itself; and (2) a `pane_current_command` heuristic that
+  rejects any OTHER session whose foreground process isn't a bare shell
+  (`bash`/`zsh`/`sh`/`fish`). Either guard failing makes `spawn` fall back to
+  a fresh session instead of reusing them silently.
+  This is a code-level fix, not just a doc reminder — but it's still a
+  heuristic (a shell running inside `screen`/another mux layer can still slip
+  through), so keep doing the "situate" `read`-then-`send` dance below as
+  defense in depth, and treat any pane content that doesn't look like a bare
+  prompt as a hard stop.
 - **Never `start cockpit` blindly.** Another agent may already own that tmux
   session. Use `spawn` to open/continue your cockpit; it reuses an alive session
   automatically. Only `spawn --force` creates a duplicate window.

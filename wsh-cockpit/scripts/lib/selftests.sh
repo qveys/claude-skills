@@ -266,3 +266,84 @@ cmd_selftest_live() {
   fi
   echo "selftest-live: ok"
 }
+
+# gc smoke test: exercises gc_should_kill (lib/gc.sh) directly with fabricated
+# timestamps — tmux gives no way to force session_created/session_activity
+# into the past, so the pure decision function is what makes cases 1-3
+# testable without a real aged session. Cases 4-5 then confirm the real `gc`
+# subcommand end-to-end (dry-run vs. real sweep) on one throwaway,
+# NEVER-attached tmux session — never calls spawn/open, matches selftest-live.
+cmd_selftest_gc() {
+  have_mux
+  if [ "$MUX" != tmux ]; then
+    echo "selftest-gc: skip (tmux-only backend — gc has no zellij equivalent)"
+    return 0
+  fi
+  # SESS is deliberately NOT local: live_selftest_gc_cleanup runs from the
+  # EXIT trap after this function has already returned — same rationale as
+  # cmd_selftest_live's SESS/SF/LIVE_LOG_FILE.
+  SESS="cockpit-selftest-gc-$$"
+  local now rc failures=0
+  now=$(date '+%s')
+
+  report_gc_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # 1. a freshly-created session (age ~0) is NOT a candidate at the default threshold.
+  set +e
+  gc_should_kill "$now" "$now" "0" "${WSH_LIVE_GC_IDLE:-86400}"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then report_gc_case "1 fresh session kept" 0
+  else report_gc_case "1 fresh session kept" 1 "gc_should_kill said kill for age~0"; fi
+
+  # 2. an ATTACHED session is never a candidate, even maximally idle with --idle=0
+  # — the non-negotiable safety guard.
+  set +e
+  gc_should_kill "$now" "$((now - 999999))" "1" "0"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then report_gc_case "2 attached session never killed" 0
+  else report_gc_case "2 attached session never killed" 1 "gc_should_kill said kill for an attached session"; fi
+
+  # 3. an unattached, sufficiently idle session IS a candidate.
+  set +e
+  gc_should_kill "$now" "$((now - 999999))" "0" "0"
+  rc=$?
+  set -e
+  report_gc_case "3 idle unattached session is a candidate" "$rc"
+
+  # 4-5. real session, real subcommand: --dry-run never kills; a real sweep does.
+  # --only-session narrows the sweep to THIS throwaway session — without it,
+  # `gc --idle=0` would sweep every unattached cockpit-* session on the
+  # machine, including a developer's own detached cockpits.
+  live_selftest_gc_cleanup() {
+    "$0" stop "$SESS" >/dev/null 2>&1 || true
+  }
+  trap live_selftest_gc_cleanup EXIT
+  create_session "$SESS"   # detached by construction — never attached
+
+  set +e
+  "$0" gc --dry-run --idle=0 --only-session="$SESS" >/dev/null 2>&1
+  set -e
+  if mux_has "$SESS"; then report_gc_case "4 dry-run keeps session" 0
+  else report_gc_case "4 dry-run keeps session" 1 "session was killed despite --dry-run"; fi
+
+  set +e
+  "$0" gc --idle=0 --only-session="$SESS" >/dev/null 2>&1
+  set -e
+  if mux_has "$SESS"; then report_gc_case "5 real sweep kills idle session" 1 "session still alive after gc --idle=0"
+  else report_gc_case "5 real sweep kills idle session" 0; fi
+
+  if [ "$failures" -ne 0 ]; then
+    echo "selftest-gc: $failures failure(s)" >&2
+    exit 1
+  fi
+  echo "selftest-gc: ok"
+}
