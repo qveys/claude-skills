@@ -438,7 +438,11 @@ and zsh without tmux.
 > sur une session `cockpit-selftest-$$` jetable, sans jamais ouvrir de bloc Wave.
 > `remote-init` avec un `<host>` (le chemin qui pousse les helpers via
 > `wsh-push.sh`) n'est PAS couvert par le selftest — il dépend d'un hôte distant
-> réel — et a été vérifié manuellement à la place (voir la PR).
+> réel. Le chemin d'échec/repli (push qui échoue → retombée sur le framing
+> inline) a été vérifié manuellement ; le chemin de **succès** du push vers un
+> hôte réel n'a PAS encore été exercé manuellement — `wsh-push.sh` lui-même est
+> du code déjà éprouvé en prod ailleurs dans ce repo, mais vérifie ce chemin
+> avant de t'y fier en usage réel (voir la PR).
 
 ## Cleaning up — but not too fast
 
