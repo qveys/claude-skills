@@ -205,39 +205,49 @@ cmd_selftest_live() {
   # arithmetic): the TYPED line is unevaluated shell text, so an arithmetic
   # expression like $((3*3)) would show up as literal "$((3*3))", not "9",
   # until it actually runs — a plain string sidesteps that trap entirely.
-  unset WSH_LIVE_SEP_REINIT WSH_STEP_INLINE 2>/dev/null || true
-  set +e
-  "$0" remote-init "$SESS" >/dev/null 2>&1
-  "$0" send 'echo RI_INLINE_MARK' "$SESS" >/dev/null 2>&1
-  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
-  rc=$?
-  set -e
-  out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
-  local flat9; flat9=$(printf '%s' "$out" | tr -d '\n')
-  if [ "$rc" -eq 0 ] \
-     && printf '%s' "$flat9" | grep -Fq '__wc=' \
-     && printf '%s' "$out" | grep -Fq 'RI_INLINE_MARK'; then
-    report_live_case "9 remote-init inline" 0
+  # tmux-only: remote_mode_set is a no-op under zellij (no per-session option
+  # store), so this assertion doesn't apply there — skip it like check 6.
+  if [ "$MUX" != tmux ]; then
+    echo "skip 9 remote-init inline (backend $MUX — no per-session option store)"
   else
-    report_live_case "9 remote-init inline" 1 "rc=$rc missing inline __wc= marker and/or RI_INLINE_MARK"
+    unset WSH_LIVE_SEP_REINIT WSH_STEP_INLINE 2>/dev/null || true
+    set +e
+    "$0" remote-init "$SESS" >/dev/null 2>&1
+    "$0" send 'echo RI_INLINE_MARK' "$SESS" >/dev/null 2>&1
+    "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+    rc=$?
+    set -e
+    out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
+    local flat9; flat9=$(printf '%s' "$out" | tr -d '\n')
+    if [ "$rc" -eq 0 ] \
+       && printf '%s' "$flat9" | grep -Fq '__wc=' \
+       && printf '%s' "$out" | grep -Fq 'RI_INLINE_MARK'; then
+      report_live_case "9 remote-init inline" 0
+    else
+      report_live_case "9 remote-init inline" 1 "rc=$rc missing inline __wc= marker and/or RI_INLINE_MARK"
+    fi
   fi
 
   # 10. local-init reverts THIS session back to the short __wsh-call form —
   # match the exact literal line sep_wrap emits for THIS send (a distinct
   # marker text), so leftover inline text from step 9's scrollback can't
-  # produce a false pass.
-  set +e
-  "$0" local-init "$SESS" >/dev/null 2>&1
-  "$0" send 'echo RI_LOCAL_MARK' "$SESS" >/dev/null 2>&1
-  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
-  rc=$?
-  set -e
-  out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
-  if [ "$rc" -eq 0 ] \
-     && printf '%s' "$out" | tr -d '\n' | grep -Eq "__wsh '[0-9]+' 'echo RI_LOCAL_MARK'"; then
-    report_live_case "10 local-init reverts" 0
+  # produce a false pass. Same tmux-only limitation as check 9.
+  if [ "$MUX" != tmux ]; then
+    echo "skip 10 local-init reverts (backend $MUX — no per-session option store)"
   else
-    report_live_case "10 local-init reverts" 1 "rc=$rc expected short-form __wsh call for RI_LOCAL_MARK not found"
+    set +e
+    "$0" local-init "$SESS" >/dev/null 2>&1
+    "$0" send 'echo RI_LOCAL_MARK' "$SESS" >/dev/null 2>&1
+    "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+    rc=$?
+    set -e
+    out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
+    if [ "$rc" -eq 0 ] \
+       && printf '%s' "$out" | tr -d '\n' | grep -Eq "__wsh '[0-9]+' 'echo RI_LOCAL_MARK'"; then
+      report_live_case "10 local-init reverts" 0
+    else
+      report_live_case "10 local-init reverts" 1 "rc=$rc expected short-form __wsh call for RI_LOCAL_MARK not found"
+    fi
   fi
 
   # 11. stop kills the session and removes its seq file
