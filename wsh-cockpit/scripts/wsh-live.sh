@@ -22,17 +22,35 @@
 #   current                    print the last session created by `spawn` in this shell tree
 #   doctor                     read-only diagnostic of the whole cockpit chain (11 checks,
 #                              rc 0/1, never writes anything — safe to run anytime)
+#   gc [--dry-run] [--idle=SECONDS]
+#                              kill idle, UNATTACHED cockpit-* sessions (orphans left behind
+#                              by a crash/forgotten `stop`); default idle threshold is
+#                              WSH_LIVE_GC_IDLE (86400s/24h); --dry-run lists only; an
+#                              attached session is NEVER a candidate, whatever its age.
+#                              Also runs best-effort (silent, non-fatal) at the top of
+#                              `spawn`/`start` so orphans self-clean over time.
 #   web   {start|stop|status} [session]
 #                              browser view of the cockpit pane via ttyd, loopback-only
 #                              (brew install ttyd); read-only by default (WSH_WEB_WRITE=1
 #                              for a writable view) — see SKILL.md for tailnet exposure
 #   banner {header|phase|step|done} ... [session]
 #                              airy step announcement (no send framing — see wsh-step.sh)
+#   remote-init [session] [host]
+#                              call once after an ssh hop lands the pane on a remote host.
+#                              With [host]: pushes the sep/step helper files there (via
+#                              wsh-push.sh) so send/banner keep using the short sourcing
+#                              form, now against the REMOTE path — falls back to inline
+#                              framing if the push fails. Without [host]: sticky inline-
+#                              only mode (send/banner default to the self-contained blob).
+#   local-init  [session]      revert remote-init — back to local helper-file framing
 #   wait-done [session] [timeout_sec] [seq]
 #                              block until last `send` footer shows exit (before next send)
 #   selftest-live              end-to-end smoke test on a throwaway cockpit-selftest-$$
-#                              session (start/send/wait-done/read/banner/stop, NO Wave
-#                              block — never calls spawn/open); rc 0/1
+#                              session (start/send/wait-done/read/banner/remote-init/
+#                              local-init/stop, NO Wave block — never calls spawn/open);
+#                              rc 0/1
+#   selftest-gc                gc_should_kill pure-function cases (fresh/attached/idle) +
+#                              a real dry-run-then-real sweep on a throwaway session; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -44,6 +62,8 @@
 #      WSH_COCKPIT_AGENT          key for state file (agent name, used in last-session-*)
 #      WSH_COCKPIT_PREFIX         default prefix for auto-unique session names
 #      WSH_COCKPIT_STATE_DIR      state directory (default ~/.cache/wsh-cockpit)
+#      WSH_LIVE_GC_IDLE (default 86400)  `gc` idle threshold in seconds; overridden per-call
+#                                by --idle=SECONDS
 #      WSH_LIVE_SEP=1 (default)   enable send/recv visual framing; =0 for raw shell
 #      WSH_WEB_PORT (default 7681)  loopback TCP port for `web` (ttyd)
 #      WSH_WEB_WRITE=1              `web start` becomes writable (default: read-only)
@@ -95,6 +115,8 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/doctor.sh"
 # shellcheck source=./lib/web.sh
 . "$SCRIPT_DIR/lib/web.sh"
+# shellcheck source=./lib/gc.sh
+. "$SCRIPT_DIR/lib/gc.sh"
 # shellcheck source=./lib/selftests.sh
 . "$SCRIPT_DIR/lib/selftests.sh"
 
@@ -105,6 +127,12 @@ spawn)
   # Preferred entry point. Reuses the last alive cockpit for this agent/prefix unless
   # --force/--fresh is passed. Never hijacks the generic "cockpit" name (use unique names).
   have_mux
+  # Best-effort orphan sweep (default idle threshold) on every spawn — silent,
+  # non-fatal, and genuinely non-blocking: launched as a DETACHED background
+  # job inside a subshell (the subshell itself returns immediately once the
+  # job is started), so a stray `exit`/slow tmux call inside cmd_gc can
+  # neither abort THIS session's creation nor delay it.
+  ( cmd_gc >/dev/null 2>&1 & ) || true
   FORCE=0
   PREFIX=""
   for arg in "$@"; do
@@ -166,6 +194,9 @@ status)
   ;;
 start)
   have_mux
+  # Best-effort orphan sweep, same rationale as spawn's (see comment there) —
+  # also launched as a detached background job, never blocking `start`.
+  ( cmd_gc >/dev/null 2>&1 & ) || true
   REUSE=0
   ARGS=()
   for arg in "$@"; do
@@ -183,6 +214,11 @@ start)
     SESS="${ARGS[0]}"
     if mux_has "$SESS"; then
       if [ "$REUSE" -eq 1 ]; then
+        own=$(own_tmux_session 2>/dev/null) || own=""
+        if [ -n "$own" ] && [ "$SESS" = "$own" ]; then
+          echo "refusing: '$SESS' is the tmux session this call is running inside (your own controlling terminal) — pick a different name" >&2
+          exit 8
+        fi
         echo "session '$SESS' already exists — reusing it (--reuse)"
         remember_session "$SESS"
       else
@@ -239,6 +275,9 @@ current)
 doctor)
   cmd_doctor
   ;;
+gc)
+  cmd_gc "$@"
+  ;;
 web)
   cmd_web "$@"
   ;;
@@ -261,8 +300,25 @@ banner)
   STEP_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-step.sh"
   [ -f "$STEP_SCRIPT" ] || { echo "missing $STEP_SCRIPT" >&2; exit 10; }
   SESS=$(resolve_session "$SESS"); need_session "$SESS"
-  if [ "${WSH_STEP_INLINE:-0}" = "1" ]; then
+  # Explicit WSH_STEP_INLINE always wins (one-off override); otherwise fall
+  # back to the session's sticky remote-mode flag (see remote-init).
+  REMOTE_STEP_PATH=""
+  if [ -n "${WSH_STEP_INLINE+x}" ]; then
+    USE_INLINE="$WSH_STEP_INLINE"
+  elif remote_mode_get "$SESS"; then
+    REMOTE_STEP_PATH=$(remote_helper_path_get "$SESS" step)
+    if [ -n "$REMOTE_STEP_PATH" ]; then USE_INLINE=0; else USE_INLINE=1; fi
+  else
+    USE_INLINE=0
+  fi
+  if [ "$USE_INLINE" = "1" ]; then
     CMD=$("$STEP_SCRIPT" cmd "$TYPE" "$@") || { echo "banner build failed for: $TYPE $*" >&2; exit 11; }
+  elif [ -n "$REMOTE_STEP_PATH" ]; then
+    # Remote mode with a helper pushed by `remote-init <sess> <host>`: source
+    # the REMOTE copy every call — same no-tracking rationale as send/sep above.
+    CALL=$(step_build_call "$TYPE" "$@")
+    REMOTE_STEP_Q=${REMOTE_STEP_PATH//\'/\'\\\'\'}
+    CMD=". '${REMOTE_STEP_Q}' && ${CALL}"
   else
     CALL=$(step_build_call "$TYPE" "$@")
     if step_helpers_loaded "$SESS"; then
@@ -379,11 +435,116 @@ MSG
     echo "if it stays empty, ask the user to attach manually: ${ATTACH}" >&2
   fi
   ;;
+remote-init)
+  # Call once, right after confirming (via the mandatory situate probe) that
+  # the pane has ssh-hopped to a remote host.
+  #
+  # No [host] given: sticky inline-only mode — send/banner default to the
+  # self-contained inline framing for THIS session from then on, no need to
+  # repeat WSH_LIVE_SEP_REINIT=1/WSH_STEP_INLINE=1 on every subsequent call.
+  #
+  # [host] given: try to PUSH the local sep/step helper files to that host
+  # (via wsh-push.sh, same connection string `tailscale ssh`/`scp` would
+  # accept) so send/banner can use the SAME short sourcing form there too —
+  # inline framing becomes the fallback (push unavailable/failed), not the
+  # only option. One hop only: hopping again from the remote host to a THIRD
+  # host isn't tracked — falls back to inline there, still correct.
+  have_mux
+  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  HOST="${2:-}"
+  if [ -z "$HOST" ]; then
+    # remote_mode_set only prints "remote mode ON" once it actually flipped the
+    # sticky tmux option; under zellij it's a no-op (its own stderr note
+    # explains why), so gate the success line on its exit status instead of
+    # claiming a behavior change that won't happen.
+    if remote_mode_set "$SESS" 1; then
+      echo "remote mode ON for '$SESS' — send/banner now default to inline framing (local-init to revert)"
+    fi
+  else
+    PUSH_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-push.sh"
+    PUSHED=0
+    if [ ! -f "$PUSH_SCRIPT" ]; then
+      echo "warn: missing $PUSH_SCRIPT — falling back to inline-only remote mode" >&2
+    else
+      # Resolve the remote $HOME through the pane itself (visibly framed, like
+      # every other cockpit command) rather than assume a path shape — the
+      # remote path is later embedded in single-quoted contexts inside
+      # wsh-push.sh's scp/tailscale-ssh fallbacks, where a literal '~' is NOT
+      # guaranteed to expand.
+      set +e
+      WSH_LIVE_SEP_REINIT=1 "$0" send 'printf "WSH_REMOTE_HOME=%s\n" "$HOME"' "$SESS" >/dev/null 2>&1
+      "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+      HRC=$?
+      set -e
+      RHOME=""
+      if [ "$HRC" -eq 0 ]; then
+        RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o 'WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
+      fi
+      if [ -z "$RHOME" ]; then
+        echo "warn: could not resolve \$HOME on '$HOST' — falling back to inline-only remote mode" >&2
+      else
+        REMOTE_DIR="${RHOME}/.cache/wsh-cockpit/helpers"
+        set +e
+        WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR}'" "$SESS" >/dev/null 2>&1
+        "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+        MKRC=$?
+        set -e
+        if [ "$MKRC" -ne 0 ]; then
+          echo "warn: could not create $REMOTE_DIR on '$HOST' (rc=$MKRC) — falling back to inline-only remote mode" >&2
+        else
+          LOCAL_SEP=$(sep_ensure_helpers)
+          LOCAL_STEP=$(step_ensure_helpers)
+          REMOTE_SEP="${REMOTE_DIR}/$(basename "$LOCAL_SEP")"
+          REMOTE_STEP="${REMOTE_DIR}/$(basename "$LOCAL_STEP")"
+          set +e
+          "$PUSH_SCRIPT" "$LOCAL_SEP" "$REMOTE_SEP" "$HOST" >/dev/null 2>&1
+          PRC1=$?
+          "$PUSH_SCRIPT" "$LOCAL_STEP" "$REMOTE_STEP" "$HOST" >/dev/null 2>&1
+          PRC2=$?
+          set -e
+          if [ "$PRC1" -eq 0 ] && [ "$PRC2" -eq 0 ]; then
+            remote_helper_path_set "$SESS" sep "$REMOTE_SEP"
+            remote_helper_path_set "$SESS" step "$REMOTE_STEP"
+            PUSHED=1
+          else
+            echo "warn: wsh-push.sh failed to push helpers to '$HOST' (sep rc=$PRC1 step rc=$PRC2) — falling back to inline-only remote mode" >&2
+          fi
+        fi
+      fi
+    fi
+    if remote_mode_set "$SESS" 1; then
+      if [ "$PUSHED" = "1" ]; then
+        echo "remote mode ON for '$SESS' — helpers pushed to '$HOST':$REMOTE_DIR; send/banner source them there (local-init to revert)"
+      else
+        echo "remote mode ON for '$SESS' — inline framing only (helper push to '$HOST' unavailable; local-init to revert)"
+      fi
+    fi
+  fi
+  ;;
+local-init)
+  # Revert a session back to local (helper-file-sourcing) framing — e.g. after
+  # `exit`ing an ssh hop back to the Mac's own shell in the same pane. Clears
+  # the sticky flag AND any recorded remote helper paths from a hosted
+  # remote-init, so a later no-arg remote-init on the same session starts clean.
+  have_mux
+  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  remote_helper_path_clear "$SESS" sep
+  remote_helper_path_clear "$SESS" step
+  # Same as remote-init: only claim "remote mode OFF" when the sticky tmux
+  # option was actually cleared — under zellij this is a no-op (its own
+  # stderr note explains why) and the session was never in remote mode.
+  if remote_mode_set "$SESS" 0; then
+    echo "remote mode OFF for '$SESS' — send/banner back to local helper-file framing"
+  fi
+  ;;
 selftest-sep)
   cmd_selftest_sep
   ;;
 selftest-live)
   cmd_selftest_live
+  ;;
+selftest-gc)
+  cmd_selftest_gc
   ;;
 send)
   have_mux
@@ -396,8 +557,25 @@ send)
     LINE="$CMD"
   else
     SEQ=$(sep_next_seq "$SESS")
-    if [ "${WSH_LIVE_SEP_REINIT:-0}" = "1" ]; then
+    # Explicit WSH_LIVE_SEP_REINIT always wins (one-off override); otherwise
+    # fall back to the session's sticky remote-mode flag (see remote-init).
+    REMOTE_SEP_PATH=""
+    if [ -n "${WSH_LIVE_SEP_REINIT+x}" ]; then
+      USE_INLINE="$WSH_LIVE_SEP_REINIT"
+    elif remote_mode_get "$SESS"; then
+      REMOTE_SEP_PATH=$(remote_helper_path_get "$SESS" sep)
+      if [ -n "$REMOTE_SEP_PATH" ]; then USE_INLINE=0; else USE_INLINE=1; fi
+    else
+      USE_INLINE=0
+    fi
+    if [ "$USE_INLINE" = "1" ]; then
       LINE=$(sep_wrap_inline "$SEQ" "$CMD")
+    elif [ -n "$REMOTE_SEP_PATH" ]; then
+      # Remote mode with a helper pushed by `remote-init <sess> <host>`:
+      # source the REMOTE copy every send — no "loaded once" tracking for
+      # this case (sourcing a small file is cheap; skipping that state saves
+      # a second bug surface for no real gain).
+      LINE=$(sep_wrap "$SEQ" "$CMD" "$REMOTE_SEP_PATH")
     elif sep_helpers_loaded "$SESS"; then
       LINE=$(sep_wrap "$SEQ" "$CMD")
     else
@@ -456,39 +634,16 @@ stop)
     SESS=""; [ -f "$SF" ] && SESS=$(tr -d '[:space:]' <"$SF")
     [ -n "$SESS" ] || SESS="$SESS_DEFAULT"
   fi
-  rm -f "$(seq_file "$SESS")" 2>/dev/null || true
-  if [ "$MUX" = tmux ]; then
-    tmux set-option -u -t "$SESS" "$(sep_helper_option "$SESS")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$SESS" "$(step_helper_option "$SESS")" >/dev/null 2>&1 || true
-  fi
-  web_teardown "$SESS"
-  if mux_kill "$SESS"; then
+  # Actual kill + state cleanup (seq file, sep/step helper options, remote-mode
+  # options, Wave block, web view, last-session pointer) lives in
+  # teardown_session (lib/session.sh) — shared with `gc`, which needs the
+  # exact same per-session cleanup on a sweep.
+  if teardown_session "$SESS"; then
     echo "killed session '$SESS'"
   else
     echo "no session '$SESS' to kill"
   fi
-  # Also delete the Wave block `open` created for this session — killing tmux
-  # alone leaves the block behind as an orphaned dead-terminal pane. Best-effort:
-  # the block id was persisted at open time; skip cleanly if it's absent or the
-  # user already closed the block. wave_delete_block reports whether the delete
-  # actually happened, so this doesn't claim a cleanup that silently no-op'd.
-  BF=$(block_file "$SESS")
-  if [ -f "$BF" ]; then
-    BID=$(tr -d '[:space:]' <"$BF")
-    if [ -n "$BID" ]; then
-      if wave_delete_block "$BID"; then
-        echo "cleaned Wave block $BID"
-      else
-        echo "could not clean Wave block $BID (best-effort; wsh/sqlite3 missing, block already gone, or context unresolved)" >&2
-      fi
-    fi
-    rm -f "$BF" 2>/dev/null || true
-  fi
-  # Forget the remembered session if it pointed at the one we just stopped.
-  if [ -f "$SF" ] && [ "$(tr -d '[:space:]' <"$SF")" = "$SESS" ]; then
-    rm -f "$SF" 2>/dev/null || true
-  fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|status|web|banner|wait-done|selftest-sep|selftest-live} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc} [args]" >&2; exit 2 ;;
 esac

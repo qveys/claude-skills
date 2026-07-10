@@ -98,6 +98,8 @@ scripts/wsh-live.sh doctor                     # read-only diagnostic, 11 checks
 scripts/wsh-live.sh web {start|stop|status} [session]  # browser view via ttyd, read-only by default
 scripts/wsh-live.sh status [prefix]            # is last session alive? matching sessions?
 scripts/wsh-live.sh banner {header|phase|step|done} ... [session]  # airy step banners (required)
+scripts/wsh-live.sh remote-init [session] [host]  # after an ssh hop: push helpers to [host] (or sticky inline-only without it)
+scripts/wsh-live.sh local-init  [session]         # revert remote-init — back to local helper-file framing
 scripts/wsh-live.sh wait-done [session] [timeout_sec]              # wait for send exit footer
 scripts/wsh-step.sh {header|phase|step|done|cmd|defs}  # renderer / one-liner / pane-side fn defs
 ```
@@ -247,6 +249,11 @@ Adapte la suite selon le résultat : shell **local** (Mac) → `tailscale ssh` p
 atteindre un serveur ; shell **déjà sur le serveur** → Docker/psql/commands en
 direct, sans re-SHS. Ne présume jamais « je suis sur le Mac » par défaut.
 
+Si le résultat montre un hôte différent de celui attendu (le pane vient de
+`ssh`-hopper), appelle `$COCKPIT remote-init "$SESS"` (ou `remote-init "$SESS" <host>`
+si tu connais le nom/l'IP à passer à `tailscale ssh`/`scp`) **avant tout autre**
+`send`/`banner` — voir "Remote shell / lost helpers" plus bas.
+
 Set `WSH_COCKPIT_PREFIX` or `WSH_COCKPIT_AGENT` so parallel agents keep separate
 last-session state under `~/.cache/wsh-cockpit/`.
 
@@ -381,10 +388,44 @@ ls: /nonexistent-xyz: No such file or directory   ← real output
 the raw command with no framing — use it when driving a TUI/REPL that dislikes
 the extra echo noise. Default is on (`WSH_LIVE_SEP=1`).
 
-**Remote shell / lost helpers:** if the pane is inside a shell where the local
-helper file cannot be sourced, force a one-command self-contained wrapper with
-`WSH_LIVE_SEP_REINIT=1 scripts/wsh-live.sh send '<cmd>' [session]`. That command
-is intentionally noisier, but it avoids relying on pane-side helper state.
+**Remote shell / lost helpers:** once the pane `ssh`/`tailscale ssh`-hops to a
+remote host, the local helper file (`~/.cache/wsh-cockpit/helpers/...`) doesn't
+exist there, so sourcing it fails ("command not found"). Primary workflow —
+call `remote-init` **once**, right after the "situer le shell" probe confirms
+the pane landed on a different host, and it sticks for the rest of the session:
+
+```bash
+scripts/wsh-live.sh remote-init "$SESS" <host>   # <host> = whatever tailscale ssh/scp accepts
+```
+
+With `<host>`, `remote-init` pushes the sep/step helper files to
+`~/.cache/wsh-cockpit/helpers/` on that host (via `scripts/wsh-push.sh` — `wsh
+file cp` → `tailscale ssh` pipe → `scp`, same fallback chain as any other file
+push) and records the remote paths, so every later `send`/`banner` on this
+session keeps using the short `. '<remote-path>' && __wsh ...` sourcing form —
+just pointed at the remote copy instead of the local one. It re-sources on
+every call (no "loaded once" tracking for the remote case), so there's no
+stale-state risk if the pane reconnects. If the push fails for any reason (no
+route to `<host>`, `wsh-push.sh` missing, no `$HOME` reachable), `remote-init`
+warns on stderr and falls back to inline framing automatically — it never
+hard-fails the call. **One hop only:** hopping again from that host to a THIRD
+host isn't tracked; it falls back to inline there too, still correct, just not
+optimized.
+
+Without `<host>` (or when you don't know it up front), `scripts/wsh-live.sh
+remote-init "$SESS"` still works as a sticky **inline-only** switch: every
+later `send`/`banner` defaults to the self-contained one-liner wrapper (no
+sourcing, no pane-side state) until you call `local-init "$SESS"` to revert —
+e.g. once the pane `exit`s the ssh hop back to the Mac's own shell.
+
+The env vars `WSH_LIVE_SEP_REINIT=1` (for `send`) and `WSH_STEP_INLINE=1` (for
+`banner`) remain valid as a **one-off override** — e.g. forcing inline framing
+for a single command without flipping the sticky session-wide switch. They
+always win over both `remote-init` and the default:
+
+```bash
+WSH_LIVE_SEP_REINIT=1 scripts/wsh-live.sh send '<cmd>' [session]
+```
 
 **Self-test escaping:** after changing framing or quoting, run
 `scripts/wsh-live.sh selftest-sep`. It exercises the helper wrapper under bash
@@ -393,8 +434,11 @@ and zsh without tmux.
 > **Mainteneur :** après toute retouche du cœur live (framing, `wait-done`,
 > `banner`, `stop`, fichiers d'état), lance `scripts/wsh-live.sh selftest-sep`
 > **et** `scripts/wsh-live.sh selftest-live` — ce dernier exerce la vraie boucle
-> tmux bout-en-bout (start/send/wait-done/read/banner/stop) sur une session
-> `cockpit-selftest-$$` jetable, sans jamais ouvrir de bloc Wave.
+> tmux bout-en-bout (start/send/wait-done/read/banner/remote-init/local-init/stop)
+> sur une session `cockpit-selftest-$$` jetable, sans jamais ouvrir de bloc Wave.
+> `remote-init` avec un `<host>` (le chemin qui pousse les helpers via
+> `wsh-push.sh`) n'est PAS couvert par le selftest — il dépend d'un hôte distant
+> réel — et a été vérifié manuellement à la place (voir la PR).
 
 ## Cleaning up — but not too fast
 
@@ -455,6 +499,31 @@ tmux, avec le même cœur de boucle : `spawn`/`start`/`send`/`read`/`wait-done`/
 
 ## Gotchas
 
+- **A reused session can turn out to be your OWN Claude Code terminal —
+  `spawn` now guards against this automatically, but know the failure mode.**
+  `find_reusable_session` looks up the last-remembered session **for the
+  agent/prefix key**, not for the exact positional name you passed — if that
+  key was ever recorded against a tmux session that got repurposed later (e.g.
+  a human attached to it and started an interactive program, including another
+  `claude` CLI), a bare `spawn` would previously hand it back with zero
+  content check. `send`ing into that pane doesn't run a command — it types the
+  text into whatever's running there; against a live Claude Code REPL, that
+  means your "situate" probe (`hostname; pwd; whoami`) is submitted as a **new
+  chat message** instead of executing, and you only notice from a confused
+  reply. `session_safe_to_reuse()` (`lib/session.sh`) now guards on two checks
+  before any reuse: (1) an unconditional block on the exact tmux session the
+  caller is itself running inside (`$TMUX` + `tmux display-message -p '#S'`,
+  via `own_tmux_session`) — this is the check that actually catches the
+  incident above, since `pane_current_command` alone would report "bash" from
+  inside the check itself; and (2) a `pane_current_command` heuristic that
+  rejects any OTHER session whose foreground process isn't a bare shell
+  (`bash`/`zsh`/`sh`/`fish`). Either guard failing makes `spawn` fall back to
+  a fresh session instead of reusing them silently.
+  This is a code-level fix, not just a doc reminder — but it's still a
+  heuristic (a shell running inside `screen`/another mux layer can still slip
+  through), so keep doing the "situate" `read`-then-`send` dance below as
+  defense in depth, and treat any pane content that doesn't look like a bare
+  prompt as a hard stop.
 - **Never `start cockpit` blindly.** Another agent may already own that tmux
   session. Use `spawn` to open/continue your cockpit; it reuses an alive session
   automatically. Only `spawn --force` creates a duplicate window.

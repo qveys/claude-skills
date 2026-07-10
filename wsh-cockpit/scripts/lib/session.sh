@@ -72,16 +72,62 @@ newest_session_for_prefix() {
   printf '%s\n' "$best"
 }
 
+# The tmux session that is CURRENTLY running the calling process itself, if any.
+# `$TMUX` is set by tmux in every process spawned inside a pane — including a
+# Bash tool call whose shell lives inside the Claude Code CLI's own wrapping
+# tmux session (Wave wraps every terminal in tmux, one block = one session).
+# `tmux display-message` asks the tmux server, not the pane content, so it's
+# authoritative regardless of what's currently drawn on screen.
+own_tmux_session() {
+  [ "$MUX" = tmux ] || return 1
+  [ -n "${TMUX:-}" ] || return 1
+  tmux display-message -p '#S' 2>/dev/null
+}
+
+# A session is safe to silently reuse only if BOTH hold:
+#  1. It is not the tmux session the caller is itself currently running inside
+#     (absolute, unconditional block — see own_tmux_session).
+#  2. Its foreground process is a bare shell, not some other interactive
+#     program left running in an otherwise-orphaned cockpit.
+# Guards against reusing a tmux session that — unbeknownst to the caller — is
+# hosting an interactive program, most dangerously another Claude Code CLI: a
+# blind `send` there doesn't run a command, it types the "situate" probe into
+# that program's own prompt, and the caller only finds out from a confused
+# reply. (Incident: `find_reusable_session` returned the exact tmux session
+# wrapping the calling agent's own Claude Code CLI — `send`ing into it
+# resubmitted the probe as a new chat message. `pane_current_command` alone
+# can't catch this specific case: querying it from inside a Bash tool call
+# always transiently reports "bash", since that IS the process running the
+# check — hence guard #1 being a separate, name-based, unconditional check
+# rather than relying on the foreground-process heuristic for this scenario.)
+# Empty pane_current_command (zellij: unsupported, or a transient read) is
+# treated as unverifiable-but-safe, not unsafe.
+session_safe_to_reuse() {
+  local sess="$1" cmd own
+  if own=$(own_tmux_session) && [ "$sess" = "$own" ]; then
+    echo "⚠️  session '$sess' IS the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2
+    return 1
+  fi
+  cmd=$(mux_pane_command "$sess")
+  case "$cmd" in
+    ""|bash|zsh|sh|fish|-bash|-zsh|-sh|-fish) return 0 ;;
+    *)
+      echo "⚠️  session '$sess' foreground process is '$cmd', not a bare shell — refusing silent reuse (pass --force for a fresh cockpit, or 'read' it manually first)" >&2
+      return 1 ;;
+  esac
+}
+
 # Prefer last remembered session; else newest alive session for the spawn prefix.
+# Both candidates must also pass session_safe_to_reuse before being handed back.
 find_reusable_session() {
   local prefix="${1:-}"
   local norm remembered newest
   norm=$(normalize_prefix "$prefix")
-  if remembered=$(last_session 2>/dev/null); then
+  if remembered=$(last_session 2>/dev/null) && session_safe_to_reuse "$remembered"; then
     printf '%s\n' "$remembered"
     return 0
   fi
-  if newest=$(newest_session_for_prefix "$norm" 2>/dev/null); then
+  if newest=$(newest_session_for_prefix "$norm" 2>/dev/null) && session_safe_to_reuse "$newest"; then
     printf '%s\n' "$newest"
     return 0
   fi
@@ -103,6 +149,54 @@ need_session() {
     echo "no $MUX session '$1' — run: $0 start $1" >&2; exit 4; }
 }
 
+# --- Remote mode: sticky per-session inline-framing flag ---------------------
+# The local helper files (lib/framing.sh's sep/step helpers) live under
+# $STATE_DIR on the Mac. Once a pane `ssh`/`tailscale ssh`-hops to a remote
+# host, that path doesn't exist there, so sourcing it fails ("command not
+# found") — the existing fix is the self-contained inline framing
+# (WSH_LIVE_SEP_REINIT=1 / WSH_STEP_INLINE=1), but requiring the caller to
+# repeat those env vars on every single send/banner after the hop is exactly
+# the kind of thing that gets forgotten mid-workflow. `remote-init` sets a
+# tmux session option once; send/banner then default to inline framing for
+# that session until `local-init` clears it. Explicit env vars still win, for
+# one-off overrides. Zellij has no per-session option store (same limitation
+# as helper_loaded) — remote mode is env-var-only there; remote_mode_set is a
+# no-op with a stderr note rather than a silent failure.
+remote_mode_option() { printf '@wsh_remote_mode\n'; }
+remote_mode_get() {  # $1 sess -> "1" (on) or "" (off/unset)
+  [ "$MUX" = tmux ] || return 1
+  [ "$(tmux show-option -qv -t "$1" "$(remote_mode_option)" 2>/dev/null || true)" = "1" ]
+}
+remote_mode_set() {  # $1 sess  $2 (1|0) -> 0 if actually set, 1 if a tmux-only no-op
+  if [ "$MUX" != tmux ]; then
+    echo "note: remote-init/local-init has no effect under $MUX (no per-session option store) — use WSH_LIVE_SEP_REINIT=1 / WSH_STEP_INLINE=1 explicitly instead" >&2
+    return 1
+  fi
+  tmux set-option -t "$1" "$(remote_mode_option)" "$2" >/dev/null 2>&1 || true
+}
+
+# --- Remote mode: pushed-helper paths (when remote-init was given a host) ---
+# When `remote-init <session> <host>` manages to push the sep/step helper
+# files to the remote host (see wsh-live.sh's remote-init case, which shells
+# out to wsh-push.sh), the REMOTE absolute path of each pushed file is
+# recorded here so send/banner can build the short `. '<remote-path>' && ...`
+# sourcing form instead of falling back to the ~700-char inline blob. Same
+# per-session tmux-option store as remote_mode_*, same Zellij limitation
+# (no-op — callers just never find a path, so they fall back to inline).
+remote_helper_option() { printf '@wsh_remote_helper_%s\n' "$1"; }  # $1 kind (sep|step)
+remote_helper_path_get() {  # $1 sess $2 kind -> remote path, or "" if none recorded
+  [ "$MUX" = tmux ] || { printf ''; return 0; }
+  tmux show-option -qv -t "$1" "$(remote_helper_option "$2")" 2>/dev/null || true
+}
+remote_helper_path_set() {  # $1 sess $2 kind $3 remote-path
+  [ "$MUX" = tmux ] || return 0
+  tmux set-option -t "$1" "$(remote_helper_option "$2")" "$3" >/dev/null 2>&1 || true
+}
+remote_helper_path_clear() {  # $1 sess $2 kind
+  [ "$MUX" = tmux ] || return 0
+  tmux set-option -u -t "$1" "$(remote_helper_option "$2")" >/dev/null 2>&1 || true
+}
+
 # Human-only narration. The cockpit is driven by Claude through a non-TTY Bash pipe,
 # where every line is re-read into the model's context on each call — so per-command
 # confirmations and multi-line "how to attach" help are pure token cost there. Print
@@ -115,3 +209,46 @@ seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Z
 # Per-session Wave block id file: lets `stop` delete the block `open` created, so
 # killing the cockpit doesn't leave an orphaned dead-terminal pane in Wave.
 block_file() { printf '%s/block-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# Kill a session and clean up everything that belongs to it: the seq-counter
+# file, the sep/step "helpers loaded" tmux options, its ttyd web view (if
+# any), and — only if it was the one remembered for the CURRENT agent/prefix
+# — the last-session pointer. Shared by `stop` (explicit, one session) and
+# `gc` (idle sweep, many sessions) so this cleanup logic lives in exactly one
+# place. Also deletes the Wave block `open` created for this session (if
+# any) — killing tmux alone would leave it behind as an orphaned
+# dead-terminal pane; wave_delete_block (lib/wave.sh) is best-effort and
+# reports whether the delete actually happened. Folding this in here (rather
+# than in `stop` alone) means `gc`'s idle sweep cleans up orphaned Wave
+# blocks too, not just an explicit `stop`. Returns 0 if a session was
+# actually killed, 1 if there was nothing to kill (already gone).
+teardown_session() {
+  local sess="$1" sf bf bid killed=1
+  rm -f "$(seq_file "$sess")" 2>/dev/null || true
+  if [ "$MUX" = tmux ]; then
+    tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
+  fi
+  web_teardown "$sess"
+  if mux_kill "$sess"; then killed=0; fi
+  bf=$(block_file "$sess")
+  if [ -f "$bf" ]; then
+    bid=$(tr -d '[:space:]' <"$bf")
+    if [ -n "$bid" ]; then
+      if wave_delete_block "$bid"; then
+        echo "cleaned Wave block $bid"
+      else
+        echo "could not clean Wave block $bid (best-effort; wsh/sqlite3 missing, block already gone, or context unresolved)" >&2
+      fi
+    fi
+    rm -f "$bf" 2>/dev/null || true
+  fi
+  sf=$(state_file)
+  if [ -f "$sf" ] && [ "$(tr -d '[:space:]' <"$sf")" = "$sess" ]; then
+    rm -f "$sf" 2>/dev/null || true
+  fi
+  return "$killed"
+}
