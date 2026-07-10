@@ -459,10 +459,15 @@ tmux, avec le même cœur de boucle : `spawn`/`start`/`send`/`read`/`wait-done`/
   text into whatever's running there; against a live Claude Code REPL, that
   means your "situate" probe (`hostname; pwd; whoami`) is submitted as a **new
   chat message** instead of executing, and you only notice from a confused
-  reply. `session_safe_to_reuse()` (`lib/session.sh`) now checks
-  `pane_current_command` before any reuse — tmux sessions whose foreground
-  process isn't a bare shell (`bash`/`zsh`/`sh`/`fish`) are rejected and
-  `spawn` falls back to a fresh session instead of reusing them silently.
+  reply. `session_safe_to_reuse()` (`lib/session.sh`) now guards on two checks
+  before any reuse: (1) an unconditional block on the exact tmux session the
+  caller is itself running inside (`$TMUX` + `tmux display-message -p '#S'`,
+  via `own_tmux_session`) — this is the check that actually catches the
+  incident above, since `pane_current_command` alone would report "bash" from
+  inside the check itself; and (2) a `pane_current_command` heuristic that
+  rejects any OTHER session whose foreground process isn't a bare shell
+  (`bash`/`zsh`/`sh`/`fish`). Either guard failing makes `spawn` fall back to
+  a fresh session instead of reusing them silently.
   This is a code-level fix, not just a doc reminder — but it's still a
   heuristic (a shell running inside `screen`/another mux layer can still slip
   through), so keep doing the "situate" `read`-then-`send` dance below as
