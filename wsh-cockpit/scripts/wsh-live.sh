@@ -451,6 +451,7 @@ Fallback — ask the user to attach manually:
 MSG
     exit 7
   fi
+  block_id_store "$SESS" "$NEWID"
 
   # Remember the block id so `stop` can delete the Wave block too (not just the
   # tmux session) — otherwise killing the cockpit leaves an orphaned dead-terminal

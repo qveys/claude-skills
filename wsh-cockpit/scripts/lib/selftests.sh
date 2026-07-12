@@ -427,6 +427,25 @@ cmd_selftest_cache() {
 
   rm -f "$CF" 2>/dev/null || true
 
+  # 5. block-id state: teardown_session closes a stubbed block-id best-effort,
+  # even with no real Wave block behind it — `wsh deleteblock` on a fake id
+  # just returns "not found", swallowed by block_id_close's `|| true`. Proves
+  # the auto-close path can't break teardown_session outside a real Wave env.
+  local BF
+  BF=$(block_id_file "$SESS")
+  block_id_store "$SESS" "not-a-real-block-$$"
+  if [ -f "$BF" ]; then
+    report_cache_case "5a block_id_store writes state" 0
+  else
+    report_cache_case "5a block_id_store writes state" 1 "no state file at $BF"
+  fi
+  teardown_session "$SESS" >/dev/null 2>&1 || true
+  if [ -f "$BF" ]; then
+    report_cache_case "5b teardown_session closes block-id state" 1 "state file still present: $BF"
+  else
+    report_cache_case "5b teardown_session closes block-id state" 0
+  fi
+
   if [ "$failures" -ne 0 ]; then
     echo "selftest-cache: $failures failure(s)" >&2
     exit 1

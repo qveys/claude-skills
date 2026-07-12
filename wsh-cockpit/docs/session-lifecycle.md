@@ -117,12 +117,14 @@ Flow:
 The session persists across calls and across detach (Ctrl-b d), which is exactly
 what makes it a shared workspace. Kill it with `stop` when you're done.
 
-**`stop` kills the tmux session but does not reliably close the Wave block —
-close both.** `open`/`spawn` print `opened Wave block <block-id> ...`: keep that
-id. After `stop`, also run `wsh deleteblock -b <block-id>` (best-effort: the
-block sometimes auto-closes once the pane's process exits, in which case
-`deleteblock` just returns `not found` — that's fine, it means it's already
-gone). Skipping this leaves a dead, empty pane in the user's Wave tab.
+**`stop` (and `gc`) auto-close the Wave block.** `open`/`spawn` print
+`opened Wave block <block-id> ...` and remember that id under
+`~/.cache/wsh-cockpit/block-<session>`; `teardown_session` — shared by `stop`
+and `gc` — reads it back and runs `wsh deleteblock -b <block-id>` best-effort
+(the block sometimes auto-closes once the pane's process exits, in which case
+`deleteblock` just returns `not found`; no `wsh` on PATH is also fine). Nothing
+manual to do here anymore — this is only a fallback if the state file is
+missing (e.g. a block opened by hand, or state cleared out from under it).
 
 ## Cleaning up — but not too fast
 
@@ -143,9 +145,9 @@ wsh deleteblock -b <block-id>   # remove each confirmed orphan
 Only delete blocks **you** created. Leave the user's own panes — their long-lived
 terminal, their `tmux attach`, your own block — alone. When unsure, leave it.
 
-**`live` mode:** `stop` only kills the tmux session — it does not close the Wave
-block. Delete that too (see "Opening a cockpit" above for the `deleteblock`
-step); otherwise a dead pane lingers in the user's tab.
+**`live` mode:** `stop` (and `gc`) close the Wave block automatically along with
+the tmux session — see "Opening a cockpit" above. This heuristic-scan cleanup
+section is for `rexec` strays only, which have no state file to key off.
 
 ## `gc` — sweep automatique des sessions orphelines
 

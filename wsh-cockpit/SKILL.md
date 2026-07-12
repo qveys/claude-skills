@@ -128,7 +128,7 @@ commonly reused by other agents). `spawn` reuses an alive session by default;
 `spawn --force` only when you intentionally need a second window. `spawn
 --situate` also runs the mandatory hostname/pwd/whoami probe in one call — see
 "Situer le shell" below. Full lifecycle (`start --reuse`, `open` self-healing,
-`stop` + `deleteblock`, cleanup timing, `gc` sweep) : voir `docs/session-lifecycle.md`.
+`stop` auto-closing the Wave block, cleanup timing, `gc` sweep) : voir `docs/session-lifecycle.md`.
 
 **Situer le shell juste après `spawn` — obligatoire.** Une session réutilisée
 peut être restée sur un serveur distant (ssh persistant, `cd` projet). Avant
@@ -165,10 +165,10 @@ le cockpit pour vérifier/utiliser. Détails, fallback chain, méthodes : voir
 
 Every visible block/pane is clutter if left behind. **Wait at least 60s** before
 treating an apparently-idle block/session as an orphan — it may still be mid-run.
-Only delete blocks/sessions **you** created. `live` mode: `stop` kills the tmux
-session but not the Wave block — `wsh deleteblock -b <block-id>` too. Automated
-sweep for forgotten `live` sessions: `scripts/wsh-live.sh gc`. Full detail: see
-`docs/session-lifecycle.md`.
+Only delete blocks/sessions **you** created. `live` mode: `stop` (and `gc`) close
+the Wave block automatically along with the tmux session — nothing manual
+needed. Automated sweep for forgotten `live` sessions: `scripts/wsh-live.sh gc`.
+Full detail: see `docs/session-lifecycle.md`.
 
 ## Gotchas — top of mind
 

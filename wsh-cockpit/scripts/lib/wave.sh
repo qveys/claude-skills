@@ -130,6 +130,33 @@ resolve_live_tab_cached() {
 # closed cockpit never hands a future `open` a stale/recycled tab id.
 tab_cache_invalidate() { rm -f "$(tab_cache_file "$1")" 2>/dev/null || true; }
 
+# Per-session state of the Wave block-id `open` last created, same slug
+# convention as tab_cache_file. Lets teardown_session close the block itself
+# instead of leaving it to a manual `wsh deleteblock` the agent can forget.
+block_id_file() { printf '%s/block-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+block_id_store() {
+  local sess="$1" id="$2"
+  [ -n "$sess" ] && [ -n "$id" ] || return 0
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$id" >"$(block_id_file "$sess")"
+}
+
+# Best-effort close of the block remembered for $sess, called from
+# teardown_session. Never fails the caller: no state file, no `wsh`, or a
+# block that already auto-closed ("not found") are all silently fine — only
+# the specific id `open` recorded is ever targeted, never a pane scan.
+block_id_close() {
+  local sess="$1" bf id
+  bf=$(block_id_file "$sess")
+  [ -f "$bf" ] || return 0
+  id=$(tr -d '[:space:]' <"$bf" 2>/dev/null || true)
+  rm -f "$bf" 2>/dev/null || true
+  [ -n "$id" ] || return 0
+  command -v wsh >/dev/null 2>&1 || return 0
+  wsh deleteblock -b "$id" >/dev/null 2>&1 || true
+}
+
 # Print "NAME|COUNT" for a tab oid: its display name (e.g. "T2") and the TOTAL
 # number of tabs in Wave. Used so `open` can tell the human EXACTLY which tab to
 # click — critical because Wave does NOT persist the active-tab switch to the
