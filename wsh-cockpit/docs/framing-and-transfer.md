@@ -169,4 +169,6 @@ and zsh without tmux.
 > sur une session `cockpit-selftest-$$` jetable, sans jamais ouvrir de bloc Wave.
 > `remote-init` avec un `<host>` (le chemin qui pousse les helpers via
 > `wsh-push.sh`) n'est PAS couvert par le selftest — il dépend d'un hôte distant
-> réel — et a été vérifié manuellement à la place (voir la PR).
+> réel — et a été vérifié manuellement à la place (voir la PR). Si la retouche
+> touche `send` (framing, garde one-shot SSH), lance aussi
+> `scripts/wsh-live.sh selftest-oneshot-ssh` — pur, sans tmux.

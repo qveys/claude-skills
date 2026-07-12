@@ -165,6 +165,36 @@ last-session state under `~/.cache/wsh-cockpit/`.
 `capture-pane`; default to short reads (`read [session] 20`), only widen when
 output is truncated.
 
+### Travailler sur un hôte distant — une session SSH persistante, pas de rafale de one-shots
+
+**Règle impérative.** Pour travailler sur un hôte distant : ouvre **une seule**
+session SSH interactive (auth FIDO2 une fois), reste dedans pour tout le
+travail, puis quitte :
+
+```bash
+$COCKPIT send 'ssh <host>' "$SESS"        # ou: tailscale ssh <host>
+$COCKPIT remote-init "$SESS" <host>       # (ou --pre <host> AVANT le hop — voir plus haut)
+# ... toutes les actions de travail se font DANS cette session (send/banner) ...
+$COCKPIT send 'exit' "$SESS"              # retour au Mac en fin de travail
+```
+
+Le one-shot `ssh <host> '<cmd> 2>&1'` (une commande inline qui rend la main
+tout de suite, sans ouvrir de shell interactif) reste légitime **uniquement
+pour un diagnostic ponctuel** (1-2 commandes max) — jamais comme mode de
+travail habituel. `send` compte les one-shots SSH consécutifs et, à partir du
+2e, émet un **avertissement sur stderr** recommandant la session persistante —
+jamais bloquant (des rafales légitimes existent, ex. sondes multi-hôtes), et
+jamais visible dans le pane. Le compteur repart à zéro dès qu'un `send` ne
+matche pas ce motif, ou qu'un hop SSH **interactif** (sans commande inline) est
+envoyé.
+
+Ceci ne contredit pas le gotcha "toujours `2>&1`, jamais sauter `wait-done`"
+(voir plus bas) : dans la session persistante, le footer `└─[#N] exit <code>`
+reste garanti à chaque `send`, exactement comme en local — c'est précisément
+ce que `remote-init`/`--pre <host>` maintiennent en poussant les helpers sur
+l'hôte. Les deux règles sont compatibles : une session, `2>&1` systématique,
+footer fiable à chaque commande.
+
 ### Pousser des fichiers vers un remote — **jamais base64 dans `send`**
 
 Séparer transfert et exécution : `scripts/wsh-push.sh` (ou `wsh file cp`) pour

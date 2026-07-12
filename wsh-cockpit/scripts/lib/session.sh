@@ -161,6 +161,44 @@ tty_only() { [ -t 1 ] && printf '%s\n' "$@" || true; }
 # Per-session sequence counter file path: normalized slug of session name.
 seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
 
+# --- One-shot SSH nudge -------------------------------------------------------
+# SKILL.md requires one persistent SSH session per host (auth once, work
+# inside, `send 'exit'`) — a fire-and-forget `ssh host '<cmd>'` per command is
+# only legitimate for a one-off diagnostic (1-2 commands). This tracks
+# consecutive `send`s that look like that one-shot shape and, from the 2nd
+# consecutive match on, prints a nudge to STDERR (never the pane, never
+# blocking — legitimate bursts like multi-host probes exist).
+oneshot_ssh_file() { printf '%s/oneshot-ssh-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# A one-shot ssh/tailscale-ssh call carrying an inline command:
+# `ssh host '<cmd>'` / `tailscale ssh host "<cmd>"`. Deliberately does NOT
+# match: a bare interactive hop (`ssh host`, `tailscale ssh host` — no inline
+# command, the persistent-session shape this nudge wants to encourage),
+# `wsh ssh -n host` (opens a Wave connection, different verb), or `scp`/`rsync`.
+oneshot_ssh_is_inline() {
+  [[ "$1" =~ ^(tailscale[[:space:]]+)?ssh[[:space:]].*[[:space:]][\"\'] ]]
+}
+
+# Update the per-session consecutive-count and warn from the 2nd match on.
+# $1 sess $2 cmd — no return value; state file write is the only side effect
+# besides the optional stderr line.
+oneshot_ssh_track() {
+  local sess="$1" cmd="$2" f n
+  f=$(oneshot_ssh_file "$sess")
+  if oneshot_ssh_is_inline "$cmd"; then
+    n=$(cat "$f" 2>/dev/null || true)
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    n=$((n + 1))
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$n" >"$f"
+    if [ "$n" -ge 2 ]; then
+      echo "wsh-cockpit: ${n} one-shot SSH commands in a row on '${sess}' — for real work on a host, prefer ONE persistent session: send 'ssh <host>' (or 'tailscale ssh <host>') once, remote-init, work inside, then send 'exit'. (nudge only, not blocking — multi-host probes are a legitimate burst)" >&2
+    fi
+  else
+    rm -f "$f" 2>/dev/null || true
+  fi
+}
+
 # Kill a session and clean up everything that belongs to it: the seq-counter
 # file, the sep/step "helpers loaded" tmux options, its ttyd web view (if
 # any), the Wave block `open` last attached (best-effort deleteblock), and —
@@ -172,6 +210,7 @@ seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Z
 teardown_session() {
   local sess="$1" sf killed=1
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
+  rm -f "$(oneshot_ssh_file "$sess")" 2>/dev/null || true
   tab_cache_invalidate "$sess"
   if [ "$MUX" = tmux ]; then
     tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true

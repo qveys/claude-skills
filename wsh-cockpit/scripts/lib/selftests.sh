@@ -442,3 +442,109 @@ cmd_selftest_cache() {
   fi
   echo "selftest-cache: ok"
 }
+
+# One-shot-SSH nudge test: pure-function pattern matching (lib/session.sh's
+# oneshot_ssh_is_inline) plus the consecutive-count/warning behavior of
+# oneshot_ssh_track, exercised directly against its state file — no tmux
+# session needed (the tracker only touches $STATE_DIR), same spirit as
+# selftest-gc's pure gc_should_kill cases.
+cmd_selftest_oneshot_ssh() {
+  # SESS, F are deliberately NOT local: the EXIT trap below fires after this
+  # function returns (at script exit), and a `local` var is out of scope by
+  # then — under `set -u` that reads as "unbound variable", not "empty" (same
+  # rationale as cmd_selftest_live's SESS/SF).
+  local failures=0
+  SESS="selftest-ssh-guard-$$"
+  F=$(oneshot_ssh_file "$SESS")
+
+  report_oneshot_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  rm -f "$F" 2>/dev/null || true
+  trap 'rm -f "$F" 2>/dev/null || true' EXIT
+
+  # 1. matches: ssh host '<cmd>' (single-quoted inline command)
+  if oneshot_ssh_is_inline "ssh srv1453980 'uname -a 2>&1'"; then
+    report_oneshot_case "1 matches ssh inline single-quote" 0
+  else
+    report_oneshot_case "1 matches ssh inline single-quote" 1
+  fi
+
+  # 2. matches: tailscale ssh host "<cmd>" (double-quoted inline command)
+  if oneshot_ssh_is_inline 'tailscale ssh macbook-openclaw "ls -l ~/.openclaw 2>&1"'; then
+    report_oneshot_case "2 matches tailscale ssh inline double-quote" 0
+  else
+    report_oneshot_case "2 matches tailscale ssh inline double-quote" 1
+  fi
+
+  # 3. does NOT match a bare interactive hop (no inline command) — this is the
+  # persistent-session shape the nudge wants to encourage, not flag.
+  if oneshot_ssh_is_inline 'ssh srv1453980'; then
+    report_oneshot_case "3 no match on interactive ssh" 1 "flagged a bare interactive hop"
+  else
+    report_oneshot_case "3 no match on interactive ssh" 0
+  fi
+
+  # 4. does NOT match `wsh ssh -n host` (opens a Wave connection, different verb)
+  if oneshot_ssh_is_inline 'wsh ssh -n srv1453980'; then
+    report_oneshot_case "4 no match on wsh ssh -n" 1 "flagged a Wave connection open"
+  else
+    report_oneshot_case "4 no match on wsh ssh -n" 0
+  fi
+
+  # 5. does NOT match scp/rsync
+  if oneshot_ssh_is_inline "scp file.txt srv1453980:/tmp/" || oneshot_ssh_is_inline "rsync -av ./dir/ srv1453980:/tmp/dir/"; then
+    report_oneshot_case "5 no match on scp/rsync" 1 "flagged a file transfer"
+  else
+    report_oneshot_case "5 no match on scp/rsync" 0
+  fi
+
+  # 6. two one-shots in a row: silent on the 1st, warns on the 2nd.
+  local err1 err2
+  err1=$(oneshot_ssh_track "$SESS" "ssh srv1 'uptime 2>&1'" 2>&1 >/dev/null)
+  err2=$(oneshot_ssh_track "$SESS" "ssh srv2 'df -h 2>&1'" 2>&1 >/dev/null)
+  if [ -z "$err1" ] && printf '%s' "$err2" | grep -q 'persistent session'; then
+    report_oneshot_case "6 warns on 2nd consecutive one-shot" 0
+  else
+    report_oneshot_case "6 warns on 2nd consecutive one-shot" 1 "err1='$err1' err2='$err2'"
+  fi
+
+  # 7. interleaved with a non-matching send resets the counter — the next
+  # one-shot is treated as the 1st again (no warning).
+  rm -f "$F" 2>/dev/null || true
+  oneshot_ssh_track "$SESS" "ssh srv1 'uptime 2>&1'" >/dev/null 2>&1
+  oneshot_ssh_track "$SESS" "echo hi 2>&1" >/dev/null 2>&1
+  local err3
+  err3=$(oneshot_ssh_track "$SESS" "ssh srv2 'df -h 2>&1'" 2>&1 >/dev/null)
+  if [ -z "$err3" ]; then
+    report_oneshot_case "7 interleaved resets counter (no warning)" 0
+  else
+    report_oneshot_case "7 interleaved resets counter (no warning)" 1 "err3='$err3'"
+  fi
+
+  # 8. a bare interactive hop also resets the counter (not just a non-SSH send).
+  rm -f "$F" 2>/dev/null || true
+  oneshot_ssh_track "$SESS" "ssh srv1 'uptime 2>&1'" >/dev/null 2>&1
+  oneshot_ssh_track "$SESS" "ssh srv1" >/dev/null 2>&1
+  local err4
+  err4=$(oneshot_ssh_track "$SESS" "ssh srv2 'df -h 2>&1'" 2>&1 >/dev/null)
+  if [ -z "$err4" ]; then
+    report_oneshot_case "8 interactive hop resets counter (no warning)" 0
+  else
+    report_oneshot_case "8 interactive hop resets counter (no warning)" 1 "err4='$err4'"
+  fi
+
+  rm -f "$F" 2>/dev/null || true
+
+  if [ "$failures" -ne 0 ]; then
+    echo "selftest-oneshot-ssh: $failures failure(s)" >&2
+    exit 1
+  fi
+  echo "selftest-oneshot-ssh: ok"
+}

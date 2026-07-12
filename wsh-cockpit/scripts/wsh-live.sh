@@ -74,6 +74,10 @@
 #                              a real dry-run-then-real sweep on a throwaway session; rc 0/1
 #   selftest-cache             resolve_live_tab_cached hit/miss/invalidation against a real
 #                              live tab (skips if none resolvable); rc 0/1
+#   selftest-oneshot-ssh       oneshot_ssh_is_inline pattern cases + oneshot_ssh_track
+#                              consecutive-count/warning behavior (2nd match warns,
+#                              interleaved/interactive resets); pure state-file test,
+#                              no tmux session needed; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -690,10 +694,15 @@ selftest-gc)
 selftest-cache)
   cmd_selftest_cache
   ;;
+selftest-oneshot-ssh)
+  cmd_selftest_oneshot_ssh
+  ;;
 send)
   have_mux
   CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
   SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  # One-shot-SSH-in-a-row nudge (stderr only, never blocking) — see lib/session.sh.
+  oneshot_ssh_track "$SESS" "$CMD"
   # WSH_LIVE_SEP (default 1): frame the command with header/footer banners so the
   # watching human can clearly tell each call + its output apart. Set to 0 to send
   # the raw command verbatim (e.g. when driving a TUI that dislikes extra noise).
@@ -813,5 +822,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh} [args]" >&2; exit 2 ;;
 esac
