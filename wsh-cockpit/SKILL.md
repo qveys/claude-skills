@@ -85,7 +85,7 @@ the Mac, so you talk to the local tmux server directly — no remote dispatcher,
 the Mac (`brew install tmux`).
 
 ```bash
-scripts/wsh-live.sh spawn [prefix] [--force] [--situate]  # open cockpit: reuse alive session by default
+scripts/wsh-live.sh spawn [prefix] [--force] [--situate] [--pre <host>]  # open cockpit: reuse alive session by default
 scripts/wsh-live.sh start [session] [--reuse]  # create session (auto-unique if no name)
 scripts/wsh-live.sh open  [session]            # AUTO-OPEN a Wave block attached to it
 scripts/wsh-live.sh send  '<command>' [session]  # type a command + Enter
@@ -100,6 +100,7 @@ scripts/wsh-live.sh status [prefix]            # is last session alive? matching
 scripts/wsh-live.sh banner {header|phase|step|done} ... [session]  # airy step banners (required)
 scripts/wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]  # banner step + send + wait-done in ONE call
 scripts/wsh-live.sh remote-init [session] [host]  # after an ssh hop: push helpers to [host] (or sticky inline-only without it)
+scripts/wsh-live.sh remote-init --pre <host> [session]  # RECOMMENDED when <host> is known: push helpers BEFORE the hop
 scripts/wsh-live.sh local-init  [session]         # revert remote-init — back to local helper-file framing
 scripts/wsh-live.sh wait-done [session] [timeout_sec]              # wait for send exit footer
 scripts/wsh-step.sh {header|phase|step|done|cmd|defs}  # renderer / one-liner / pane-side fn defs
@@ -130,9 +131,16 @@ commonly reused by other agents). `spawn` reuses an alive session by default;
 "Situer le shell" below. Full lifecycle (`start --reuse`, `open` self-healing,
 `stop` auto-closing the Wave block, cleanup timing, `gc` sweep) : voir `docs/session-lifecycle.md`.
 
-**Situer le shell juste après `spawn` — obligatoire.** Une session réutilisée
-peut être restée sur un serveur distant (ssh persistant, `cd` projet). Avant
-toute autre commande, sache sur quelle machine/répertoire/identité tu parles :
+**Hôte distant déjà connu ? Pousse les helpers AVANT le hop.** `spawn --pre
+<host>` (ou `remote-init --pre <host>` sur une session déjà spawnée) pré-stage
+les helpers sur `<host>` avant même que le pane fasse son `ssh` — le premier
+`send` après le hop est déjà en forme courte. C'est la voie **recommandée**
+quand tu connais l'hôte à l'avance.
+
+**Situer le shell juste après `spawn` — obligatoire, sinon.** Une session
+réutilisée peut être restée sur un serveur distant (ssh persistant, `cd`
+projet). Avant toute autre commande, sache sur quelle machine/répertoire/identité
+tu parles :
 
 ```bash
 COCKPIT=/Users/qveys/.claude/skills/wsh-cockpit/scripts/wsh-live.sh
@@ -141,8 +149,11 @@ $COCKPIT spawn theo-plan --situate
 #   srv1453980 / /docker/paperclip / root  (ou le Mac)
 ```
 
-Si le résultat montre un hôte différent de l'attendu, appelle `$COCKPIT
-remote-init "$SESS" [host]` avant tout autre `send`/`banner` — voir
+Si le résultat montre un hôte différent de l'attendu, `--situate` appelle déjà
+`remote-init` pour toi en best-effort (repli inline + warning si l'hôte
+détecté n'est pas joignable — jamais de hard-fail). Pour re-situer plus tard
+dans le workflow, ou forcer un hôte précis, appelle `$COCKPIT remote-init
+"$SESS" [host]` toi-même avant tout autre `send`/`banner` — voir
 `docs/framing-and-transfer.md` ("Remote shell / lost helpers").
 
 Set `WSH_COCKPIT_PREFIX` or `WSH_COCKPIT_AGENT` so parallel agents keep separate

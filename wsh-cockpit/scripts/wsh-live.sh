@@ -11,12 +11,18 @@
 # (`wsh ssh -n host`, `ssh host`, `docker exec -it ...`) and keep using send/read.
 #
 # Subcommands:
-#   spawn [prefix] [--force] [--situate]
+#   spawn [prefix] [--force] [--situate] [--pre <host>]
 #                              open/reuse cockpit: reuse last alive session by default;
 #                              --force always creates a fresh session + auto-open Wave;
 #                              --situate also runs the hostname/pwd/whoami probe
 #                              (send + wait-done + read) internally before returning,
 #                              so the caller sees where the shell actually is in one call
+#                              — and if the probed hostname differs from this Mac's, it
+#                              auto-calls `remote-init` (best-effort, falls back to inline
+#                              framing with a warning); --pre <host> is the RECOMMENDED
+#                              path when the target host is already known: it pre-stages
+#                              the helpers on <host> before the pane even ssh-hops there
+#                              (shorthand for `remote-init --pre <host>` right after spawn)
 #   start [session] [--reuse]  create the session + print the attach command
 #   open  [session]            AUTO-OPEN a visible Wave block attached to the session
 #   send  '<command>' [sess]   type a command into the pane and press Enter
@@ -50,6 +56,13 @@
 #                              form, now against the REMOTE path — falls back to inline
 #                              framing if the push fails. Without [host]: sticky inline-
 #                              only mode (send/banner default to the self-contained blob).
+#   remote-init --pre <host> [session]
+#                              RECOMMENDED when <host> is known ahead of time: push the
+#                              helpers to <host> BEFORE the pane ssh-hops there (no pane
+#                              probe involved — $HOME is resolved directly over `tailscale
+#                              ssh`), so the FIRST send/banner after the hop already uses
+#                              the short remote sourcing form instead of the inline blob.
+#                              Same one-hop-only / best-effort-falls-back-to-inline rules.
 #   local-init  [session]      revert remote-init — back to local helper-file framing
 #   wait-done [session] [timeout_sec] [seq]
 #                              block until last `send` footer shows exit (before next send)
@@ -113,6 +126,7 @@ esac
 # CDPATH= : a matching CDPATH entry makes `cd` PRINT the directory, which would
 # be captured into the variable and break the lib/*.sh sourcing below.
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
+PUSH_SCRIPT="$SCRIPT_DIR/wsh-push.sh"
 # shellcheck source=./lib/mux.sh
 . "$SCRIPT_DIR/lib/mux.sh"
 # shellcheck source=./lib/framing.sh
@@ -136,15 +150,104 @@ sub="${1:-}"; shift || true
 # protocol (SKILL.md § "Situer le shell après spawn") into one send/wait-done/read
 # sequence, by re-invoking this same script the same way `spawn` already does for
 # `open` — no duplication of the send/wait-done/read implementations themselves.
+# The probe also carries a grep-able WSH_SITUATE_HOST= marker (in addition to the
+# human-readable hostname/pwd/whoami trio) so this function can auto-detect a
+# remote hop and flip sticky remote mode ON, without the caller having to notice
+# the mismatch itself and issue a separate `remote-init` call.
 situate_session() {
   local sess="$1"
-  "$0" send 'hostname; pwd; whoami 2>&1' "$sess"
+  "$0" send 'printf "WSH_SITUATE_HOST=%s\n" "$(hostname)"; pwd; whoami 2>&1' "$sess"
   local rc=0
   "$0" wait-done "$sess" 60 || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "situate: wait-done exited $rc (timeout or non-zero probe) — showing pane anyway" >&2
   fi
-  "$0" read "$sess" 20
+  local out
+  out=$("$0" read "$sess" 20)
+  printf '%s\n' "$out"
+  local remote_host
+  remote_host=$(printf '%s\n' "$out" | tr -d '\r' | grep -o 'WSH_SITUATE_HOST=.*' | tail -n1 | cut -d= -f2-)
+  # Only act on a genuine mismatch, and only if nothing (e.g. `spawn --pre
+  # <host>`, run just before this) already primed remote mode for real — a
+  # session already in remote mode has either been pre-pushed or already had
+  # remote-init run on it; situate must not clobber that.
+  if [ -n "$remote_host" ] && [ "$remote_host" != "$(hostname)" ] && ! remote_mode_get "$sess"; then
+    # `hostname` on macOS returns the Bonjour/mDNS name (foo.local), which
+    # `tailscale ssh`/`scp` generally do NOT resolve (they want the bare
+    # MagicDNS name, e.g. "foo") — strip a trailing .local so the best-effort
+    # push has a real shot instead of failing on a suffix mismatch alone. If
+    # the stripped name still isn't reachable, remote-init's own fallback
+    # (inline framing + stderr warning) still applies — no hard-fail either way.
+    local remote_conn="${remote_host%.local}"
+    echo "situate: pane is on '$remote_host' (this Mac is '$(hostname)') — auto-calling remote-init '$remote_conn' (best-effort push; falls back to inline framing with a warning if unreachable)"
+    "$0" remote-init "$sess" "$remote_conn"
+  fi
+}
+
+# Resolve $HOME on <host> directly from the agent's own shell — no pane
+# involved — via the same one-hop `tailscale ssh` channel wsh-push.sh's own
+# remote_size() uses. Needed for pre-push, which runs BEFORE the pane has
+# ssh-hopped to <host>, so there is no pane content to frame/read yet.
+remote_home_direct() {
+  command -v tailscale >/dev/null 2>&1 || return 1
+  tailscale ssh "$1" 'printf "%s" "$HOME"' 2>/dev/null
+}
+
+# Push local sep/step helper files to <host>:<remote_dir> and record their
+# remote paths as sticky tmux session options, so send/banner build the short
+# `. '<remote-path>' && ...` sourcing form instead of the inline blob. Shared
+# tail for both `remote-init <sess> <host>` (pane already hopped there) and
+# pre_push_helpers below (pane hasn't hopped yet) — the two differ only in how
+# they resolve $HOME/mkdir the remote dir, not in how they push+register.
+push_and_register_helpers() {  # $1 sess $2 host $3 remote_dir -> 0 ok, 1 failed
+  local sess="$1" host="$2" remote_dir="$3"
+  [ -f "$PUSH_SCRIPT" ] || { echo "warn: missing $PUSH_SCRIPT — cannot push helpers to '$host'" >&2; return 1; }
+  local local_sep local_step remote_sep remote_step prc1 prc2
+  local_sep=$(sep_ensure_helpers)
+  local_step=$(step_ensure_helpers)
+  remote_sep="${remote_dir}/$(basename "$local_sep")"
+  remote_step="${remote_dir}/$(basename "$local_step")"
+  set +e
+  "$PUSH_SCRIPT" "$local_sep" "$remote_sep" "$host" >/dev/null 2>&1
+  prc1=$?
+  "$PUSH_SCRIPT" "$local_step" "$remote_step" "$host" >/dev/null 2>&1
+  prc2=$?
+  set -e
+  if [ "$prc1" -eq 0 ] && [ "$prc2" -eq 0 ]; then
+    remote_helper_path_set "$sess" sep "$remote_sep"
+    remote_helper_path_set "$sess" step "$remote_step"
+    return 0
+  fi
+  echo "warn: wsh-push.sh failed to push helpers to '$host' (sep rc=$prc1 step rc=$prc2)" >&2
+  return 1
+}
+
+# Used by `spawn --pre <host>`: pre-stage the sep/step helper files on <host>
+# BEFORE the pane has ssh-hopped there (unlike `remote-init <sess> <host>`,
+# which requires the hop to already have happened so it can resolve $HOME
+# through the pane). $HOME/mkdir are resolved directly via tailscale ssh
+# instead — there is no pane content to visibly frame yet, so this is closer
+# in spirit to wsh-push.sh's own agent-side file transfer than to a `send`.
+# Once the pane actually lands on <host> later, send/banner are immediately
+# ready with short remote sourcing — no extra remote-init round-trip needed.
+pre_push_helpers() {  # $1 sess $2 host -> 0 staged, 1 skipped/failed
+  local sess="$1" host="$2" rhome
+  rhome=$(remote_home_direct "$host") || true
+  if [ -z "$rhome" ]; then
+    echo "warn: could not resolve \$HOME on '$host' directly (tailscale ssh unavailable/failed) — skipping pre-push; remote-init after the hop still works" >&2
+    return 1
+  fi
+  local remote_dir="${rhome}/.cache/wsh-cockpit/helpers"
+  if ! tailscale ssh "$host" "mkdir -p '${remote_dir}'" >/dev/null 2>&1; then
+    echo "warn: could not create $remote_dir on '$host' — skipping pre-push" >&2
+    return 1
+  fi
+  if push_and_register_helpers "$sess" "$host" "$remote_dir"; then
+    remote_mode_set "$sess" 1 >/dev/null 2>&1 || true
+    echo "pre-push: helpers staged on '$host':$remote_dir for session '$sess' — remote mode ON, ready before the hop"
+    return 0
+  fi
+  return 1
 }
 
 # Used by `step-run`: internalizes the "announce then run" protocol (SKILL.md
@@ -177,12 +280,14 @@ spawn)
   FORCE=0
   SITUATE=0
   PREFIX=""
-  for arg in "$@"; do
-    case "$arg" in
-      --force|--fresh) FORCE=1 ;;
-      --situate) SITUATE=1 ;;
-      -*) echo "unknown flag: $arg (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami)" >&2; exit 2 ;;
-      *) PREFIX="$arg" ;;
+  PRE_HOST=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force|--fresh) FORCE=1; shift ;;
+      --situate) SITUATE=1; shift ;;
+      --pre) PRE_HOST="${2:?usage: spawn --pre <host> (connection string, e.g. qveys@srv1453980)}"; shift 2 ;;
+      -*) echo "unknown flag: $1 (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami, --pre <host> to pre-stage remote helpers before the hop)" >&2; exit 2 ;;
+      *) PREFIX="$1"; shift ;;
     esac
   done
 
@@ -199,6 +304,7 @@ spawn)
     echo "SESSION=$SESS"
     tty_only "Use this session for all subsequent send/read calls in this workflow." \
              "Pass --force only when you intentionally need a second cockpit window."
+    [ -n "$PRE_HOST" ] && "$0" remote-init --pre "$PRE_HOST" "$SESS"
     [ "$SITUATE" -eq 1 ] && situate_session "$SESS"
     exit 0
   fi
@@ -210,6 +316,7 @@ spawn)
   "$0" open "$SESS"
   echo "SESSION=$SESS"
   tty_only "Use this session for all subsequent send/read calls in this workflow."
+  [ -n "$PRE_HOST" ] && "$0" remote-init --pre "$PRE_HOST" "$SESS"
   [ "$SITUATE" -eq 1 ] && situate_session "$SESS"
   ;;
 status)
@@ -488,7 +595,21 @@ remote-init)
   # inline framing becomes the fallback (push unavailable/failed), not the
   # only option. One hop only: hopping again from the remote host to a THIRD
   # host isn't tracked — falls back to inline there, still correct.
+  #
+  # --pre <host> [session]: the PRE-hop variant — push the helpers to <host>
+  # BEFORE the pane has ssh-hopped there (recommended whenever the host is
+  # known ahead of time: it removes the round trip through the pane entirely,
+  # since $HOME is resolved directly over `tailscale ssh` — see
+  # pre_push_helpers/remote_home_direct). Same one-hop-only / best-effort
+  # fallback-to-inline semantics as the post-hop form above.
   have_mux
+  if [ "${1:-}" = "--pre" ]; then
+    shift
+    HOST="${1:?usage: remote-init --pre <host> [session]}"; shift || true
+    SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+    pre_push_helpers "$SESS" "$HOST"
+    exit $?
+  fi
   SESS=$(resolve_session "${1:-}"); need_session "$SESS"
   HOST="${2:-}"
   if [ -z "$HOST" ]; then
@@ -500,55 +621,36 @@ remote-init)
       echo "remote mode ON for '$SESS' — send/banner now default to inline framing (local-init to revert)"
     fi
   else
-    PUSH_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-push.sh"
     PUSHED=0
-    if [ ! -f "$PUSH_SCRIPT" ]; then
-      echo "warn: missing $PUSH_SCRIPT — falling back to inline-only remote mode" >&2
+    # Resolve the remote $HOME through the pane itself (visibly framed, like
+    # every other cockpit command) rather than assume a path shape — the
+    # remote path is later embedded in single-quoted contexts inside
+    # wsh-push.sh's scp/tailscale-ssh fallbacks, where a literal '~' is NOT
+    # guaranteed to expand. (`spawn --pre <host>` resolves $HOME differently —
+    # directly via tailscale ssh — because it runs before any hop exists; see
+    # remote_home_direct.)
+    set +e
+    WSH_LIVE_SEP_REINIT=1 "$0" send 'printf "WSH_REMOTE_HOME=%s\n" "$HOME"' "$SESS" >/dev/null 2>&1
+    "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+    HRC=$?
+    set -e
+    RHOME=""
+    if [ "$HRC" -eq 0 ]; then
+      RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o 'WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
+    fi
+    if [ -z "$RHOME" ]; then
+      echo "warn: could not resolve \$HOME on '$HOST' — falling back to inline-only remote mode" >&2
     else
-      # Resolve the remote $HOME through the pane itself (visibly framed, like
-      # every other cockpit command) rather than assume a path shape — the
-      # remote path is later embedded in single-quoted contexts inside
-      # wsh-push.sh's scp/tailscale-ssh fallbacks, where a literal '~' is NOT
-      # guaranteed to expand.
+      REMOTE_DIR="${RHOME}/.cache/wsh-cockpit/helpers"
       set +e
-      WSH_LIVE_SEP_REINIT=1 "$0" send 'printf "WSH_REMOTE_HOME=%s\n" "$HOME"' "$SESS" >/dev/null 2>&1
+      WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR}'" "$SESS" >/dev/null 2>&1
       "$0" wait-done "$SESS" 30 >/dev/null 2>&1
-      HRC=$?
+      MKRC=$?
       set -e
-      RHOME=""
-      if [ "$HRC" -eq 0 ]; then
-        RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o 'WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
-      fi
-      if [ -z "$RHOME" ]; then
-        echo "warn: could not resolve \$HOME on '$HOST' — falling back to inline-only remote mode" >&2
-      else
-        REMOTE_DIR="${RHOME}/.cache/wsh-cockpit/helpers"
-        set +e
-        WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR}'" "$SESS" >/dev/null 2>&1
-        "$0" wait-done "$SESS" 30 >/dev/null 2>&1
-        MKRC=$?
-        set -e
-        if [ "$MKRC" -ne 0 ]; then
-          echo "warn: could not create $REMOTE_DIR on '$HOST' (rc=$MKRC) — falling back to inline-only remote mode" >&2
-        else
-          LOCAL_SEP=$(sep_ensure_helpers)
-          LOCAL_STEP=$(step_ensure_helpers)
-          REMOTE_SEP="${REMOTE_DIR}/$(basename "$LOCAL_SEP")"
-          REMOTE_STEP="${REMOTE_DIR}/$(basename "$LOCAL_STEP")"
-          set +e
-          "$PUSH_SCRIPT" "$LOCAL_SEP" "$REMOTE_SEP" "$HOST" >/dev/null 2>&1
-          PRC1=$?
-          "$PUSH_SCRIPT" "$LOCAL_STEP" "$REMOTE_STEP" "$HOST" >/dev/null 2>&1
-          PRC2=$?
-          set -e
-          if [ "$PRC1" -eq 0 ] && [ "$PRC2" -eq 0 ]; then
-            remote_helper_path_set "$SESS" sep "$REMOTE_SEP"
-            remote_helper_path_set "$SESS" step "$REMOTE_STEP"
-            PUSHED=1
-          else
-            echo "warn: wsh-push.sh failed to push helpers to '$HOST' (sep rc=$PRC1 step rc=$PRC2) — falling back to inline-only remote mode" >&2
-          fi
-        fi
+      if [ "$MKRC" -ne 0 ]; then
+        echo "warn: could not create $REMOTE_DIR on '$HOST' (rc=$MKRC) — falling back to inline-only remote mode" >&2
+      elif push_and_register_helpers "$SESS" "$HOST" "$REMOTE_DIR"; then
+        PUSHED=1
       fi
     fi
     if remote_mode_set "$SESS" 1; then
