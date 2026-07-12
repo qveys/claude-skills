@@ -250,14 +250,31 @@ cmd_selftest_live() {
     fi
   fi
 
-  # 11. stop kills the session and removes its seq file
+  # 11. step-run combines banner-step + framed send + wait-done into ONE call:
+  # the pane must show both the step banner's label AND the framed command's
+  # output, and step-run's own exit code must be the command's real rc (3) —
+  # not wait-done's or read's.
+  set +e
+  "$0" step-run '11' 'step-run selftest' 'sh -c "echo STEP_RUN_OK; exit 3"' "$SESS" 30 >/dev/null 2>&1
+  rc=$?
+  set -e
+  out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
+  if [ "$rc" -eq 3 ] \
+     && printf '%s' "$out" | grep -Fq 'step-run selftest' \
+     && printf '%s' "$out" | grep -Fq 'STEP_RUN_OK'; then
+    report_live_case "11 step-run" 0
+  else
+    report_live_case "11 step-run" 1 "rc=$rc want=3, missing step banner label and/or command output"
+  fi
+
+  # 12. stop kills the session and removes its seq file
   "$0" stop "$SESS" >/dev/null 2>&1 || true
   if mux_has "$SESS"; then
-    report_live_case "11 stop" 1 "session '$SESS' still alive"
+    report_live_case "12 stop" 1 "session '$SESS' still alive"
   elif [ -f "$SEQF" ]; then
-    report_live_case "11 stop" 1 "seq file still present: $SEQF"
+    report_live_case "12 stop" 1 "seq file still present: $SEQF"
   else
-    report_live_case "11 stop" 0
+    report_live_case "12 stop" 0
   fi
 
   if [ "$failures" -ne 0 ]; then
