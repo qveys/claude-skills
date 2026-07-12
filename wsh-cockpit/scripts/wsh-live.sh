@@ -39,6 +39,10 @@
 #                              for a writable view) — see SKILL.md for tailnet exposure
 #   banner {header|phase|step|done} ... [session]
 #                              airy step announcement (no send framing — see wsh-step.sh)
+#   step-run <id> '<label>' '<command>' [session] [timeout_sec]
+#                              ONE call = banner step + framed send + wait-done + read:
+#                              the visual step announcement and the command it covers,
+#                              without the caller having to chain 3 separate round-trips
 #   remote-init [session] [host]
 #                              call once after an ssh hop lands the pane on a remote host.
 #                              With [host]: pushes the sep/step helper files there (via
@@ -139,6 +143,22 @@ situate_session() {
     echo "situate: wait-done exited $rc (timeout or non-zero probe) — showing pane anyway" >&2
   fi
   "$0" read "$sess" 20
+}
+
+# Used by `step-run`: internalizes the "announce then run" protocol (SKILL.md
+# § "Annonces d'étapes aérées" — banner step, then send, then wait-done) into
+# one call, by re-invoking this same script for each piece — no duplication of
+# the banner/send/wait-done/read implementations themselves (same technique as
+# situate_session above). Unlike situate_session, the command's real exit code
+# is propagated: the caller needs to know whether the step it just ran succeeded.
+step_run() {
+  local id="$1" label="$2" cmd="$3" sess="$4" timeout="$5"
+  "$0" banner step "$id" "$label" "$sess"
+  "$0" send "$cmd" "$sess"
+  local rc=0
+  "$0" wait-done "$sess" "$timeout" || rc=$?
+  "$0" read "$sess" 40
+  return "$rc"
 }
 
 case "$sub" in
@@ -635,6 +655,31 @@ read)
     { l[NR]=$0 }
     END { e=NR; while (e>0 && l[e] ~ /^[[:space:]]*$/) e--; for (i=1;i<=e;i++) print l[i] }'
   ;;
+step-run)
+  # ONE call for "announce the step, run the command, wait for it to finish" —
+  # the protocol SKILL.md mandates per step, previously always 2-3 separate
+  # tool calls (banner, send, wait-done). <id>/<label> match `banner step`'s
+  # own two fields (e.g. "1.1" / "openclaw doctor").
+  have_mux
+  ID="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]}"
+  shift || true
+  LABEL="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]}"
+  shift || true
+  CMD="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]}"
+  shift || true
+  run_sess=""
+  run_timeout=""
+  for arg in "$@"; do
+    if [ -z "$run_sess" ] && mux_has "$arg"; then
+      run_sess="$arg"
+    elif [ -z "$run_timeout" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+      run_timeout="$arg"
+    fi
+  done
+  SESS=$(resolve_session "${run_sess:-}"); need_session "$SESS"
+  TIMEOUT="${run_timeout:-${WSH_WAIT_TIMEOUT:-300}}"
+  step_run "$ID" "$LABEL" "$CMD" "$SESS" "$TIMEOUT"
+  ;;
 stop)
   have_mux
   # Resolve WITHOUT requiring the session to be alive: resolve_session falls back to
@@ -660,5 +705,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc} [args]" >&2; exit 2 ;;
 esac

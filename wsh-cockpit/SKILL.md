@@ -98,6 +98,7 @@ scripts/wsh-live.sh doctor                     # read-only diagnostic, 11 checks
 scripts/wsh-live.sh web {start|stop|status} [session]  # browser view via ttyd, read-only by default
 scripts/wsh-live.sh status [prefix]            # is last session alive? matching sessions?
 scripts/wsh-live.sh banner {header|phase|step|done} ... [session]  # airy step banners (required)
+scripts/wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]  # banner step + send + wait-done in ONE call
 scripts/wsh-live.sh remote-init [session] [host]  # after an ssh hop: push helpers to [host] (or sticky inline-only without it)
 scripts/wsh-live.sh local-init  [session]         # revert remote-init — back to local helper-file framing
 scripts/wsh-live.sh wait-done [session] [timeout_sec]              # wait for send exit footer
@@ -189,6 +190,11 @@ Checklist avant chaque phase :
 2. `banner step` → `send` (commande)
 3. `banner step` → `send` (commande suivante)
 4. `banner done`
+
+**Raccourci `step-run`** — `step-run "<id>" "<label>" "<commande>" [session]` combine
+bannière + `send` + `wait-done` (+ `read`) en **un seul appel**, au lieu d'enchaîner 2-3
+appels séparés pour chaque étape. Rend le même résultat visuel dans Wave ; à utiliser à la
+place de `banner step` + `send` + `wait-done` quand l'étape n'a qu'une seule commande.
 
 ### Opening a cockpit — never hijack another agent's session
 
