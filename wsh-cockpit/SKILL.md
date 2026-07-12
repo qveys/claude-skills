@@ -211,6 +211,8 @@ while the first tab was still open.
    for every subsequent command in this workflow.
 4. **`spawn --force`** — only when you intentionally need a *second* cockpit
    window (rare). Never call bare `spawn` again mid-workflow just to "reconnect".
+5. **`spawn --situate`** — also runs the hostname/pwd/whoami probe (see below)
+   internally before returning, in one call instead of four.
 
 ```bash
 # First cockpit for this workflow:
@@ -232,14 +234,26 @@ scripts/wsh-live.sh read
 toujours sur le Mac de l'utilisateur : une session tmux vivante peut avoir été
 laissée sur un serveur (ssh persistant, `su -` déjà fait, `cd` dans un dossier
 projet), et un `spawn` qui réutilise cette session atterrit dans ce contexte sans
-avertissement. Avant **toute** autre commande, envoie un one-shot de situation
-pour savoir sur quelle machine, dans quel répertoire et sous quelle identité tu
-parles — sinon tu pilotes à l'aveugle (commandes Docker lancées sur le Mac au
-lieu du serveur, `tailscale ssh` redondant vers une machine où tu es déjà, etc.) :
+avertissement. Avant **toute** autre commande, il faut savoir sur quelle machine,
+dans quel répertoire et sous quelle identité tu parles — sinon tu pilotes à
+l'aveugle (commandes Docker lancées sur le Mac au lieu du serveur, `tailscale ssh`
+redondant vers une machine où tu es déjà, etc.).
+
+**Voie recommandée — `spawn --situate` :** le probe hostname/pwd/whoami (send +
+wait-done + read) tourne en interne, en un seul appel :
+
+```bash
+COCKPIT=/Users/qveys/.claude/skills/wsh-cockpit/scripts/wsh-live.sh
+$COCKPIT spawn theo-plan --situate
+# → SESSION=cockpit-... puis directement la sortie du pane :
+#   srv1453980 / /docker/paperclip / root  (ou le Mac)
+```
+
+**Repli — séquence manuelle** (équivalente, utile si tu dois re-situer le shell
+plus tard dans le workflow, pas juste après un `spawn`) :
 
 ```bash
 SESS=cockpit-...        # la valeur retournée par spawn
-COCKPIT=/Users/qveys/.claude/skills/wsh-cockpit/scripts/wsh-live.sh
 $COCKPIT send 'hostname; pwd; whoami 2>&1' "$SESS"
 $COCKPIT wait-done "$SESS" 60
 $COCKPIT read "$SESS" 20   # → srv1453980 / /docker/paperclip / root  (ou le Mac)
