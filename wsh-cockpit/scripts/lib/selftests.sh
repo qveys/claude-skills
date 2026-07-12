@@ -354,3 +354,72 @@ cmd_selftest_gc() {
   fi
   echo "selftest-gc: ok"
 }
+
+# Cache smoke test: exercises resolve_live_tab_cached (lib/wave.sh) against
+# whatever live tab this machine can actually resolve right now — skipped
+# entirely if none can be, same spirit as selftest-gc's tmux-only skip. Never
+# calls spawn/open; uses a throwaway session name purely as a cache key, so
+# teardown_session at the end only needs to clean up the cache file it wrote.
+cmd_selftest_cache() {
+  local failures=0 SESS CF TAB1 TAB2 TAB3 TAB4
+
+  report_cache_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  if ! command -v sqlite3 >/dev/null 2>&1 || ! TAB1=$(resolve_live_tab 2>/dev/null); then
+    echo "selftest-cache: skip (no live Wave tab resolvable — nothing to validate)"
+    return 0
+  fi
+
+  SESS="cockpit-selftest-cache-$$"
+  CF=$(tab_cache_file "$SESS")
+  rm -f "$CF" 2>/dev/null || true
+
+  # 1. miss: no cache file yet — resolves live and populates the cache.
+  TAB2=$(resolve_live_tab_cached "$SESS" 2>/dev/null || true)
+  if [ "$TAB2" = "$TAB1" ] && [ -f "$CF" ] && [ "$(tr -d '[:space:]' <"$CF")" = "$TAB1" ]; then
+    report_cache_case "1 miss populates cache" 0
+  else
+    report_cache_case "1 miss populates cache" 1 "got '$TAB2', cache file '$CF' missing or mismatched"
+  fi
+
+  # 2. hit: same tab returned, purely from the cache file.
+  TAB3=$(resolve_live_tab_cached "$SESS" 2>/dev/null || true)
+  if [ "$TAB3" = "$TAB1" ]; then
+    report_cache_case "2 hit returns cached tab" 0
+  else
+    report_cache_case "2 hit returns cached tab" 1 "got '$TAB3' want '$TAB1'"
+  fi
+
+  # 3. invalidation: a poisoned/stale entry is detected (validation query) and
+  # transparently re-resolved, overwriting the cache with the real tab again.
+  printf '%s\n' "nonexistent-oid-$$" >"$CF"
+  TAB4=$(resolve_live_tab_cached "$SESS" 2>/dev/null || true)
+  if [ "$TAB4" = "$TAB1" ] && [ "$(tr -d '[:space:]' <"$CF" 2>/dev/null)" = "$TAB1" ]; then
+    report_cache_case "3 stale cache entry is revalidated" 0
+  else
+    report_cache_case "3 stale cache entry is revalidated" 1 "got '$TAB4', cache now '$(cat "$CF" 2>/dev/null)'"
+  fi
+
+  # 4. teardown_session (stop/gc's shared cleanup) drops the cache file.
+  teardown_session "$SESS" >/dev/null 2>&1 || true
+  if [ -f "$CF" ]; then
+    report_cache_case "4 teardown_session invalidates cache" 1 "cache file still present: $CF"
+  else
+    report_cache_case "4 teardown_session invalidates cache" 0
+  fi
+
+  rm -f "$CF" 2>/dev/null || true
+
+  if [ "$failures" -ne 0 ]; then
+    echo "selftest-cache: $failures failure(s)" >&2
+    exit 1
+  fi
+  echo "selftest-cache: ok"
+}

@@ -171,6 +171,7 @@ seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Z
 teardown_session() {
   local sess="$1" sf killed=1
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
+  tab_cache_invalidate "$sess"
   if [ "$MUX" = tmux ]; then
     tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
     tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true

@@ -59,6 +59,8 @@
 #                              rc 0/1
 #   selftest-gc                gc_should_kill pure-function cases (fresh/attached/idle) +
 #                              a real dry-run-then-real sweep on a throwaway session; rc 0/1
+#   selftest-cache             resolve_live_tab_cached hit/miss/invalidation against a real
+#                              live tab (skips if none resolvable); rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -418,7 +420,7 @@ open)
     echo "wsh not found — can't auto-open a Wave block. Attach by hand:" >&2
     echo "  ${ATTACH}" >&2; exit 5; }
 
-  if ! TAB=$(resolve_live_tab); then
+  if ! TAB=$(resolve_live_tab_cached "$SESS"); then
     cat >&2 <<MSG
 could not find a live Wave tab to anchor the block on (stale/empty Wave state).
 Ask the user to attach manually in any terminal or Wave block:
@@ -582,6 +584,9 @@ selftest-live)
 selftest-gc)
   cmd_selftest_gc
   ;;
+selftest-cache)
+  cmd_selftest_cache
+  ;;
 send)
   have_mux
   CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
@@ -705,5 +710,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache} [args]" >&2; exit 2 ;;
 esac
