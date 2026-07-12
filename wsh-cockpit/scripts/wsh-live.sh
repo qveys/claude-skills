@@ -403,10 +403,14 @@ MSG
   fi
 
   # Verify a client actually joined (the attach can fail silently inside the
-  # block, e.g. wrong tmux/path); give it a moment, then confirm.
-  for _ in 1 2 3 4 5; do
+  # block, e.g. wrong tmux/path); poll adaptively instead of a flat 5x1s wait —
+  # same growing-interval style as wait-done — so a fast attach returns almost
+  # instantly while a slow one still gets ~6s before we give up.
+  SECONDS=0
+  set -- 0.2 0.3 0.5 1
+  while [ "$SECONDS" -lt 6 ]; do
     mux_clients "$SESS" | grep -q . && break
-    sleep 1
+    if [ $# -gt 0 ]; then sleep "$1"; shift; else sleep 1; fi
   done
   if mux_clients "$SESS" | grep -q .; then
     # Resolve the tab's human NAME + total tab count. Wave doesn't persist the
