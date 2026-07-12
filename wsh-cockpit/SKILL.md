@@ -305,6 +305,13 @@ Flow:
 The session persists across calls and across detach (Ctrl-b d), which is exactly
 what makes it a shared workspace. Kill it with `stop` when you're done.
 
+**`stop` kills the tmux session but does not reliably close the Wave block —
+close both.** `open`/`spawn` print `opened Wave block <block-id> ...`: keep that
+id. After `stop`, also run `wsh deleteblock -b <block-id>` (best-effort: the
+block sometimes auto-closes once the pane's process exits, in which case
+`deleteblock` just returns `not found` — that's fine, it means it's already
+gone). Skipping this leaves a dead, empty pane in the user's Wave tab.
+
 ### Pousser des fichiers vers un remote — **jamais base64 dans `send`**
 
 Le cockpit (`send` / `send-keys`) est fait pour des **commandes courtes** visibles
@@ -483,6 +490,10 @@ wsh deleteblock -b <block-id>   # remove each confirmed orphan
 
 Only delete blocks **you** created. Leave the user's own panes — their long-lived
 terminal, their `tmux attach`, your own block — alone. When unsure, leave it.
+
+**`live` mode:** `stop` only kills the tmux session — it does not close the Wave
+block. Delete that too (see "Opening a cockpit" above for the `deleteblock`
+step); otherwise a dead pane lingers in the user's tab.
 
 ## Audit trail
 
