@@ -11,8 +11,12 @@
 # (`wsh ssh -n host`, `ssh host`, `docker exec -it ...`) and keep using send/read.
 #
 # Subcommands:
-#   spawn [prefix] [--force]   open/reuse cockpit: reuse last alive session by default;
-#                              --force always creates a fresh session + auto-open Wave
+#   spawn [prefix] [--force] [--situate]
+#                              open/reuse cockpit: reuse last alive session by default;
+#                              --force always creates a fresh session + auto-open Wave;
+#                              --situate also runs the hostname/pwd/whoami probe
+#                              (send + wait-done + read) internally before returning,
+#                              so the caller sees where the shell actually is in one call
 #   start [session] [--reuse]  create the session + print the attach command
 #   open  [session]            AUTO-OPEN a visible Wave block attached to the session
 #   send  '<command>' [sess]   type a command into the pane and press Enter
@@ -122,6 +126,21 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
 
 sub="${1:-}"; shift || true
 
+# Used by `spawn --situate`: internalizes the 4-call manual "situate the shell"
+# protocol (SKILL.md § "Situer le shell après spawn") into one send/wait-done/read
+# sequence, by re-invoking this same script the same way `spawn` already does for
+# `open` — no duplication of the send/wait-done/read implementations themselves.
+situate_session() {
+  local sess="$1"
+  "$0" send 'hostname; pwd; whoami 2>&1' "$sess"
+  local rc=0
+  "$0" wait-done "$sess" 60 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "situate: wait-done exited $rc (timeout or non-zero probe) — showing pane anyway" >&2
+  fi
+  "$0" read "$sess" 20
+}
+
 case "$sub" in
 spawn)
   # Preferred entry point. Reuses the last alive cockpit for this agent/prefix unless
@@ -134,11 +153,13 @@ spawn)
   # neither abort THIS session's creation nor delay it.
   ( cmd_gc >/dev/null 2>&1 & ) || true
   FORCE=0
+  SITUATE=0
   PREFIX=""
   for arg in "$@"; do
     case "$arg" in
       --force|--fresh) FORCE=1 ;;
-      -*) echo "unknown flag: $arg (use --force to create a duplicate cockpit)" >&2; exit 2 ;;
+      --situate) SITUATE=1 ;;
+      -*) echo "unknown flag: $arg (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami)" >&2; exit 2 ;;
       *) PREFIX="$arg" ;;
     esac
   done
@@ -156,6 +177,7 @@ spawn)
     echo "SESSION=$SESS"
     tty_only "Use this session for all subsequent send/read calls in this workflow." \
              "Pass --force only when you intentionally need a second cockpit window."
+    [ "$SITUATE" -eq 1 ] && situate_session "$SESS"
     exit 0
   fi
 
@@ -166,6 +188,7 @@ spawn)
   "$0" open "$SESS"
   echo "SESSION=$SESS"
   tty_only "Use this session for all subsequent send/read calls in this workflow."
+  [ "$SITUATE" -eq 1 ] && situate_session "$SESS"
   ;;
 status)
   have_mux
