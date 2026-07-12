@@ -446,6 +446,7 @@ Fallback — ask the user to attach manually:
 MSG
     exit 7
   fi
+  block_id_store "$SESS" "$NEWID"
 
   # Verify a client actually joined (the attach can fail silently inside the
   # block, e.g. wrong tmux/path); poll adaptively instead of a flat 5x1s wait —

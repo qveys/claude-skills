@@ -163,9 +163,10 @@ seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Z
 
 # Kill a session and clean up everything that belongs to it: the seq-counter
 # file, the sep/step "helpers loaded" tmux options, its ttyd web view (if
-# any), and — only if it was the one remembered for the CURRENT agent/prefix
-# — the last-session pointer. Shared by `stop` (explicit, one session) and
-# `gc` (idle sweep, many sessions) so this cleanup logic lives in exactly one
+# any), the Wave block `open` last attached (best-effort deleteblock), and —
+# only if it was the one remembered for the CURRENT agent/prefix — the
+# last-session pointer. Shared by `stop` (explicit, one session) and `gc`
+# (idle sweep, many sessions) so this cleanup logic lives in exactly one
 # place. Returns 0 if a session was actually killed, 1 if there was nothing
 # to kill (already gone).
 teardown_session() {
@@ -181,6 +182,7 @@ teardown_session() {
   fi
   web_teardown "$sess"
   if mux_kill "$sess"; then killed=0; fi
+  block_id_close "$sess"
   sf=$(state_file)
   if [ -f "$sf" ] && [ "$(tr -d '[:space:]' <"$sf")" = "$sess" ]; then
     rm -f "$sf" 2>/dev/null || true
