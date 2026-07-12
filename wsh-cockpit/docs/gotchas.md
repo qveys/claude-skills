@@ -76,6 +76,11 @@ suit est le détail et le "pourquoi" derrière chacune.
     commande) ouvre un **shell interactif** : il ne rend jamais la main, donc le
     footer `exit` n'apparaît qu'à la déconnexion. Pour un diagnostic, préférer un
     **one-shot** `tailscale ssh host '<cmd> 2>&1'` qui retourne et imprime le footer.
+  - **Ce one-shot est pour un diagnostic ponctuel, pas pour travailler.** Pour du
+    travail réel sur un hôte, ouvre une session SSH persistante (une seule fois)
+    au lieu d'enchaîner des one-shots — voir SKILL.md "Travailler sur un hôte
+    distant". `send` avertit sur stderr (jamais bloquant) à partir du 2e one-shot
+    SSH consécutif.
 - **Never `send` the next command until the previous one shows `exit` in the pane.**
   Each framed `send` ends with `└─[#N] exit <code>`. Use `wait-done` before the next
   `send` — do not guess with agent-side `sleep` or grep arbitrary output text:
