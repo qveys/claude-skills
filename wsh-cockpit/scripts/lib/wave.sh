@@ -92,6 +92,44 @@ resolve_live_tab() {
   return 1
 }
 
+# Per-session cache of a resolved live tab id: normalized slug of the session
+# name, same convention as session.sh's seq_file/pane_file. The session→tab
+# mapping is stable for the life of a cockpit session, so repeated `open`
+# calls don't need to re-run resolve_live_tab's 5-6 sqlite3 round-trips.
+tab_cache_file() { printf '%s/tab-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# Cached wrapper around resolve_live_tab(), keyed by cockpit session name
+# ($1). A cache hit still costs one read-only sqlite3 query to confirm the
+# cached tab still exists in Wave's DB (it can vanish if the tab was closed);
+# a stale entry is dropped and resolve_live_tab runs its full strategy.
+# Call with no session name (or an empty one) to behave exactly like the
+# uncached resolve_live_tab — used by `doctor`, which must never write state.
+resolve_live_tab_cached() {
+  local sess="$1" cache tab ro
+  if [ -n "$sess" ]; then
+    cache=$(tab_cache_file "$sess")
+    if [ -f "$cache" ]; then
+      tab=$(tr -d '[:space:]' <"$cache" 2>/dev/null || true)
+      if [ -n "$tab" ] && ro=$(wave_db_ro) && [ "$(sqlite3 "$ro" \
+            "SELECT count(*) FROM db_tab WHERE oid='${tab//\'/}';" 2>/dev/null)" = "1" ]; then
+        printf '%s\n' "$tab"
+        return 0
+      fi
+      rm -f "$cache" 2>/dev/null || true
+    fi
+  fi
+  tab=$(resolve_live_tab) || return 1
+  if [ -n "$sess" ]; then
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$tab" >"$cache"
+  fi
+  printf '%s\n' "$tab"
+}
+
+# Drop a session's cached tab — called from teardown_session (stop/gc) so a
+# closed cockpit never hands a future `open` a stale/recycled tab id.
+tab_cache_invalidate() { rm -f "$(tab_cache_file "$1")" 2>/dev/null || true; }
+
 # Print "NAME|COUNT" for a tab oid: its display name (e.g. "T2") and the TOTAL
 # number of tabs in Wave. Used so `open` can tell the human EXACTLY which tab to
 # click — critical because Wave does NOT persist the active-tab switch to the
