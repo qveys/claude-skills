@@ -22,7 +22,12 @@ while the first tab was still open.
 4. **`spawn --force`** — only when you intentionally need a *second* cockpit
    window (rare). Never call bare `spawn` again mid-workflow just to "reconnect".
 5. **`spawn --situate`** — also runs the hostname/pwd/whoami probe (see below)
-   internally before returning, in one call instead of four.
+   internally before returning, in one call instead of four. If the probed
+   hostname differs from this Mac's, it now auto-calls `remote-init` for you
+   (best-effort push, falls back to inline framing with a warning — see below).
+6. **`spawn --pre <host>`** — pre-stages the sep/step helpers on `<host>`
+   *before* the pane ever ssh-hops there (shorthand for `remote-init --pre
+   <host>` right after spawn — see "Voie recommandée" below).
 
 ```bash
 # First cockpit for this workflow:
@@ -49,14 +54,37 @@ dans quel répertoire et sous quelle identité tu parles — sinon tu pilotes à
 l'aveugle (commandes Docker lancées sur le Mac au lieu du serveur, `tailscale ssh`
 redondant vers une machine où tu es déjà, etc.).
 
-**Voie recommandée — `spawn --situate` :** le probe hostname/pwd/whoami (send +
-wait-done + read) tourne en interne, en un seul appel :
+**Voie recommandée quand l'hôte est déjà connu — pré-push avant le hop :**
+`remote-init --pre <host>` pousse les helpers sur `<host>` **avant** que le pane
+ne fasse son `ssh`, en résolvant `$HOME` distant directement (hors pane, via
+`tailscale ssh`) — pas besoin d'attendre le hop pour situer le shell. Le premier
+`send`/`banner` après le hop utilise donc immédiatement la forme courte (~100
+caractères), jamais le blob inline. `spawn --pre <host>` fait la même chose en
+un seul appel, juste après avoir créé/réutilisé la session :
 
 ```bash
 COCKPIT=/Users/qveys/.claude/skills/wsh-cockpit/scripts/wsh-live.sh
+$COCKPIT spawn theo-plan --pre macbook-openclaw
+# → SESSION=cockpit-... puis "pre-push: helpers staged on 'macbook-openclaw':... — remote mode ON"
+$COCKPIT send 'tailscale ssh macbook-openclaw' "$SESS"   # le hop lui-même
+$COCKPIT wait-done "$SESS" 60
+$COCKPIT send 'docker ps' "$SESS"   # déjà en forme courte, pas de remote-init à part
+```
+
+Équivalent en deux appels sur une session déjà spawnée :
+`$COCKPIT remote-init --pre <host> "$SESS"`, puis le `send` du hop.
+
+**Sinon (hôte inconnu à l'avance) — `spawn --situate` :** le probe
+hostname/pwd/whoami (send + wait-done + read) tourne en interne, en un seul
+appel, et si le hostname retourné diffère de celui du Mac, `situate` appelle
+lui-même `remote-init` en best-effort (push si `<host>` est joignable, sinon
+repli inline avec warning stderr — jamais de hard-fail) :
+
+```bash
 $COCKPIT spawn theo-plan --situate
 # → SESSION=cockpit-... puis directement la sortie du pane :
 #   srv1453980 / /docker/paperclip / root  (ou le Mac)
+# → si différent du Mac : "situate: pane is on '...' — auto-calling remote-init '...'"
 ```
 
 **Repli — séquence manuelle** (équivalente, utile si tu dois re-situer le shell
@@ -74,9 +102,10 @@ atteindre un serveur ; shell **déjà sur le serveur** → Docker/psql/commands 
 direct, sans re-SHS. Ne présume jamais « je suis sur le Mac » par défaut.
 
 Si le résultat montre un hôte différent de celui attendu (le pane vient de
-`ssh`-hopper), appelle `$COCKPIT remote-init "$SESS"` (ou `remote-init "$SESS" <host>`
-si tu connais le nom/l'IP à passer à `tailscale ssh`/`scp`) **avant tout autre**
-`send`/`banner` — voir `docs/framing-and-transfer.md` ("Remote shell / lost helpers").
+`ssh`-hopper) et que rien n'a encore poussé les helpers, appelle `$COCKPIT
+remote-init "$SESS"` (ou `remote-init "$SESS" <host>` si tu connais le nom/l'IP
+à passer à `tailscale ssh`/`scp`) **avant tout autre** `send`/`banner` — voir
+`docs/framing-and-transfer.md` ("Remote shell / lost helpers").
 
 Set `WSH_COCKPIT_PREFIX` or `WSH_COCKPIT_AGENT` so parallel agents keep separate
 last-session state under `~/.cache/wsh-cockpit/`.

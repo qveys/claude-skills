@@ -99,13 +99,35 @@ the extra echo noise. Default is on (`WSH_LIVE_SEP=1`).
 
 **Remote shell / lost helpers:** once the pane `ssh`/`tailscale ssh`-hops to a
 remote host, the local helper file (`~/.cache/wsh-cockpit/helpers/...`) doesn't
-exist there, so sourcing it fails ("command not found"). Primary workflow —
-call `remote-init` **once**, right after the "situer le shell" probe confirms
-the pane landed on a different host, and it sticks for the rest of the session:
+exist there, so sourcing it fails ("command not found"). Two ways to get ahead
+of it:
+
+**Recommended, when `<host>` is known up front — push BEFORE the hop:**
+
+```bash
+scripts/wsh-live.sh remote-init --pre <host> "$SESS"   # or: spawn --pre <host>
+scripts/wsh-live.sh send 'tailscale ssh <host>' "$SESS"   # the hop itself
+```
+
+`--pre` resolves `<host>`'s `$HOME` directly over `tailscale ssh` (no pane probe
+needed — there's no pane content to read yet, the hop hasn't happened) and
+registers the remote helper paths on the session right away, so the **first**
+`send`/`banner` after the hop already uses the short sourcing form — no extra
+`remote-init` round-trip once the pane lands.
+
+**Otherwise — after the hop**, right after the "situer le shell" probe confirms
+the pane landed on a different host (`spawn --situate` now does this check and
+this call for you automatically — see `docs/session-lifecycle.md`):
 
 ```bash
 scripts/wsh-live.sh remote-init "$SESS" <host>   # <host> = whatever tailscale ssh/scp accepts
 ```
+
+Both forms are best-effort and never hard-fail: when `spawn --situate`
+auto-detects a hostname mismatch, it passes the pane's own `hostname` output as
+`<host>` (stripping a trailing `.local` — macOS's Bonjour/mDNS suffix, which
+`tailscale ssh`/`scp` don't resolve) and falls back to inline framing with a
+stderr warning if that guess still isn't reachable.
 
 With `<host>`, `remote-init` pushes the sep/step helper files to
 `~/.cache/wsh-cockpit/helpers/` on that host (via `scripts/wsh-push.sh` — `wsh
