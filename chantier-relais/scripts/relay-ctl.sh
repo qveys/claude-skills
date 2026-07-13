@@ -85,12 +85,15 @@ case "$CMD" in
     ;;
   watch)
     S=$(session); [ -n "$S" ] || die "aucune session relais"
-    "$TMUX_BIN" capture-pane -p -t "$S" 2>/dev/null | tail -"${TEXT:-30}"
+    N="${TEXT:-30}"
+    case "$N" in ''|*[!0-9]*) die "nombre de lignes invalide « $N » (entier attendu)" ;; esac
+    "$TMUX_BIN" capture-pane -p -t "$S" 2>/dev/null | tail -n "$N"
     ;;
   set)
     [ -r "$STATE" ] || die "pas de $STATE"
     case "$TEXT" in step-*|PAUSE|FIN) : ;; *) die "valeur invalide « $TEXT » (attendu : step-X.Y, PAUSE ou FIN)" ;; esac
-    sed -i '' "s/^NEXT:.*/NEXT: $TEXT/" "$STATE" && echo "✓ $(next_line)"
+    tmp="$STATE.tmp.$$"
+    sed "s/^NEXT:.*/NEXT: $TEXT/" "$STATE" > "$tmp" && mv "$tmp" "$STATE" && echo "✓ $(next_line)"
     ;;
   go)
     [ -x "$DIR/execution/next.sh" ] || die "pas de $DIR/execution/next.sh exécutable"
@@ -103,7 +106,7 @@ case "$CMD" in
     fi
     PP=$(pane_pid "$S")
     pane_busy "$PP" && die "le pane de $S est occupé — 'watch' pour voir, 'stop' pour interrompre d'abord"
-    "$TMUX_BIN" send-keys -t "$S" -l "(cd '$DIR' && ./execution/next.sh) 2>&1"
+    "$TMUX_BIN" send-keys -t "$S" -l "(cd -- $(printf %q "$DIR") && ./execution/next.sh) 2>&1"
     "$TMUX_BIN" send-keys -t "$S" Enter
     echo "✓ relais lancé dans $S — $(next_line)"
     ;;
