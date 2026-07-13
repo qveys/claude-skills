@@ -28,7 +28,7 @@ Pas d'opusplan : le blueprint a déjà été payé au découpage, chaque fiche E
 | Cas | Modèle |
 |---|---|
 | Défaut (implémentation au contrat clair) | Sonnet |
-| Fiches de jugement (audit, arbitrage qui redécoupe le plan) | Opus (ou mieux) |
+| Fiches de jugement (audit, arbitrage qui redécoupe le plan) | Opus, ou Fable (le plus capable) |
 | Mécanique pur, credentials en place | Haiku possible |
 | Blocage réel en cours de session | Consigner dans STATE.md, escalader, redescendre |
 
