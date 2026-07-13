@@ -97,6 +97,33 @@ ls: /nonexistent-xyz: No such file or directory   ← real output
 the raw command with no framing — use it when driving a TUI/REPL that dislikes
 the extra echo noise. Default is on (`WSH_LIVE_SEP=1`).
 
+## Lire un résultat sans deviner (`output`, `wait-done --print`)
+
+Ces mêmes marqueurs `┌─[#N]` / `└─[#N] exit <code>` délimitent chaque `send`
+de façon déterministe dans le pane — pas besoin de deviner un nombre de lignes
+pour le relire :
+
+```bash
+scripts/wsh-live.sh send 'seq 1 500' "$SESS"
+scripts/wsh-live.sh wait-done "$SESS" 30 --print   # attend le footer PUIS imprime le segment #N — un seul appel
+# — équivalent à —
+scripts/wsh-live.sh wait-done "$SESS" 30
+scripts/wsh-live.sh output "$SESS"                 # imprime le segment #N (défaut = le dernier send)
+```
+
+`output [session] [seq] [--full]` extrait exactement le segment du header au
+footer inclus (`seq` par défaut = le dernier `send`, lu depuis le compteur
+`@[wsh_seq]`). Pas de troncature aveugle : au-delà de `WSH_READ_MAX` lignes
+(120 par défaut), il imprime les ~30 premières + une note `« K lignes omises —
+relire avec « output --full » ou « read N » »` + les ~60 dernières (la fin
+porte les erreurs et le footer). `output --full` désactive le plafond.
+
+Cas dégradés — jamais de mensonge, toujours un message clair sur stderr :
+segment sorti du scrollback capturé (`capture-pane` a une limite) → repli
+suggéré sur `read N` ; pane sans marqueurs (`WSH_LIVE_SEP=0`, `keys`,
+TUI/REPL) → `output` l'explique directement et suggère `read N`. `read [session]
+[lines]` reste la voie pour l'inspection libre.
+
 **Remote shell / lost helpers:** once the pane `ssh`/`tailscale ssh`-hops to a
 remote host, the local helper file (`~/.cache/wsh-cockpit/helpers/...`) doesn't
 exist there, so sourcing it fails ("command not found"). Two ways to get ahead

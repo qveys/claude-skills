@@ -90,10 +90,11 @@ Checklist avant chaque phase :
 ## Raccourci `step-run`
 
 `step-run "<id>" "<label>" "<commande>" [session]` combine bannière + `send` +
-`wait-done` (+ `read`) en **un seul appel**, au lieu d'enchaîner 2-3 appels
-séparés pour chaque étape. Rend le même résultat visuel dans Wave ; à utiliser à
-la place de `banner step` + `send` + `wait-done` quand l'étape n'a qu'une seule
-commande.
+`wait-done --print` (sortie bornée par les marqueurs, voir
+`docs/framing-and-transfer.md` → "Lire un résultat sans deviner") en **un seul
+appel**, au lieu d'enchaîner 3 appels séparés pour chaque étape. Rend le même
+résultat visuel dans Wave ; à utiliser à la place de `banner step` + `send` +
+`wait-done` quand l'étape n'a qu'une seule commande.
 
 > **Mainteneur :** le rendu a une seule source de layout (`__wsh_banner` dans
 > `wsh-step.sh defs`) ; le live `banner` et le preview direct l'utilisent, seul le

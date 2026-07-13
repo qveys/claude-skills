@@ -27,7 +27,22 @@
 #   open  [session]            AUTO-OPEN a visible Wave block attached to the session
 #   send  '<command>' [sess]   type a command into the pane and press Enter
 #   keys  '<tmux-keys>' [sess] send raw tmux keys (C-c, Up, Enter, q ...) verbatim
-#   read  [session] [lines]    print the current pane (default 30 lines back)
+#   read  [session] [lines]    print the current pane (default 30 lines back) — free-form
+#                              scrollback inspection (TUI/REPL, unframed pane); when the
+#                              pane IS framed, prefer `output` below (nothing to guess)
+#   output [session] [seq] [--full]
+#                              print EXACTLY the framed segment for send #<seq> — header
+#                              through footer inclusive, delimited by the ┌─[#N]/└─[#N]
+#                              exit <code> markers already in the pane, so there is no
+#                              line count to guess (default seq = the last one sent, read
+#                              from the same counter `send` writes). Capped at WSH_READ_MAX
+#                              lines (default 120): a longer segment prints the first ~30 +
+#                              a "K lignes omises" note + the last ~60 (the tail carries
+#                              errors and the exit code); `--full` disables the cap.
+#                              Falls back to a clear stderr message — never a silent guess
+#                              — when the segment isn't in the captured scrollback, or the
+#                              pane has no markers at all (WSH_LIVE_SEP=0, `keys`, a TUI):
+#                              use `read N` there instead.
 #   stop  [session]            kill the session
 #   current                    print the last session created by `spawn` in this shell tree
 #   doctor                     read-only diagnostic of the whole cockpit chain (11 checks,
@@ -64,8 +79,11 @@
 #                              the short remote sourcing form instead of the inline blob.
 #                              Same one-hop-only / best-effort-falls-back-to-inline rules.
 #   local-init  [session]      revert remote-init — back to local helper-file framing
-#   wait-done [session] [timeout_sec] [seq]
-#                              block until last `send` footer shows exit (before next send)
+#   wait-done [session] [timeout_sec] [seq] [--print]
+#                              block until last `send` footer shows exit (before next send);
+#                              --print also emits the bounded `output` segment on success —
+#                              one call instead of wait-done + output separately (this is
+#                              what `step-run` uses under the hood)
 #   selftest-live              end-to-end smoke test on a throwaway cockpit-selftest-$$
 #                              session (start/send/wait-done/read/banner/remote-init/
 #                              local-init/stop, NO Wave block — never calls spawn/open);
@@ -78,6 +96,10 @@
 #                              consecutive-count/warning behavior (2nd match warns,
 #                              interleaved/interactive resets); pure state-file test,
 #                              no tmux session needed; rc 0/1
+#   selftest-output            `output` segment extraction on a throwaway session: short
+#                              complete segment, long segment truncated head+tail, --full,
+#                              explicit seq, wait-done --print, WSH_LIVE_SEP=0 fallback;
+#                              rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -92,6 +114,8 @@
 #      WSH_LIVE_GC_IDLE (default 86400)  `gc` idle threshold in seconds; overridden per-call
 #                                by --idle=SECONDS
 #      WSH_LIVE_SEP=1 (default)   enable send/recv visual framing; =0 for raw shell
+#      WSH_READ_MAX (default 120) `output` truncation threshold in lines; longer segments
+#                                print head+tail with an omitted-count note; --full bypasses it
 #      WSH_WEB_PORT (default 7681)  loopback TCP port for `web` (ttyd)
 #      WSH_WEB_WRITE=1              `web start` becomes writable (default: read-only)
 #
@@ -116,6 +140,7 @@ SESS_DEFAULT="cockpit"
 STATE_DIR="${WSH_COCKPIT_STATE_DIR:-$HOME/.cache/wsh-cockpit}"
 SEP_HELPER_VERSION="4"
 STEP_HELPER_VERSION="1"
+WSH_READ_MAX="${WSH_READ_MAX:-120}"
 # WSH_MUX selects the multiplexer backend. tmux is the reference (full feature
 # set); zellij covers the core loop only (start/send/read/wait-done/stop/open/
 # status/spawn). keys and the ttyd web view are tmux-only — each refuses
@@ -265,9 +290,60 @@ step_run() {
   "$0" banner step "$id" "$label" "$sess"
   "$0" send "$cmd" "$sess"
   local rc=0
-  "$0" wait-done "$sess" "$timeout" || rc=$?
-  "$0" read "$sess" 40
+  # --print folds the bounded `output` segment into this same wait-done call —
+  # one round-trip instead of wait-done + a separate read/output.
+  "$0" wait-done "$sess" "$timeout" --print || rc=$?
   return "$rc"
+}
+
+# Used by `output` and `wait-done --print`: extract EXACTLY the framed segment
+# for send #<seq> — header through footer inclusive — instead of a `read N`
+# guess. $1 sess $2 seq $3 full (0/1, bypasses the WSH_READ_MAX truncation).
+# Prints the segment on stdout; rc 0 if found, 1 (with a clear stderr message,
+# never a silent guess) if the markers aren't in the captured scrollback.
+cmd_output() {
+  local sess="$1" seq="$2" full="$3"
+  local pane segment total_lines max head_n tail_n omitted line tail_start
+  local -a seg_lines
+  # tmux clamps -S to the actual history available, so a generous ask here is
+  # safe and cheap (local capture) — the whole point of `output` is to never
+  # guess a line count, including for the scrollback lookback itself.
+  pane=$(mux_capture "$sess" 100000)
+  # `|| true`: awk deliberately exits 1 when the markers aren't found (see
+  # END below) — under `set -e` that would abort the whole script right here,
+  # before the explicit not-found message below ever gets a chance to print.
+  segment=$(printf '%s\n' "$pane" | awk -v seq="$seq" '
+    $0 ~ ("┌─\\[#" seq "\\]") { start=1; buf="" }
+    start        { buf = buf $0 "\n" }
+    $0 ~ ("└─\\[#" seq "\\] exit [0-9]+") && start { printf "%s", buf; found=1; exit }
+    END          { exit(found ? 0 : 1) }
+  ') || true
+  if [ -z "$segment" ]; then
+    echo "output: segment for send #${seq} not found in '${sess}' scrollback (it rolled off capture-pane's history, or that send never completed) — retry with 'read N' for a raw snapshot" >&2
+    return 1
+  fi
+  # Bash-3.2-compatible line split — no mapfile/readarray (macOS ships bash
+  # 3.2 as /bin/bash; this script has to run there, not just under a newer
+  # brew bash). Trim the one trailing newline `buf` always ends with first,
+  # or the here-string's own appended newline would read as a spurious blank
+  # final element.
+  segment="${segment%$'\n'}"
+  seg_lines=()
+  while IFS= read -r line; do
+    seg_lines+=("$line")
+  done <<<"$segment"
+  total_lines=${#seg_lines[@]}
+  max="$WSH_READ_MAX"
+  if [ "$full" -eq 1 ] || [ "$total_lines" -le "$max" ]; then
+    printf '%s\n' "${seg_lines[@]}"
+  else
+    head_n=30; tail_n=60
+    omitted=$((total_lines - head_n - tail_n))
+    tail_start=$((total_lines - tail_n))
+    printf '%s\n' "${seg_lines[@]:0:head_n}"
+    printf -- '… %s lignes omises — relire avec « output --full » ou « read N » …\n' "$omitted"
+    printf '%s\n' "${seg_lines[@]:tail_start:tail_n}"
+  fi
 }
 
 case "$sub" in
@@ -490,7 +566,9 @@ wait-done)
   local_sess=""
   timeout_sec=""
   target_seq=""
+  PRINT=0
   for arg in "$@"; do
+    case "$arg" in --print) PRINT=1 ;; esac
     if [ -z "$local_sess" ] && mux_has "$arg"; then
       local_sess="$arg"
     elif [ -z "$timeout_sec" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
@@ -513,6 +591,12 @@ wait-done)
     if printf '%s\n' "$pane" | grep -qE "└─\\[#${target_seq}\\] exit [0-9]+"; then
       rc=$(printf '%s\n' "$pane" | grep -oE "└─\\[#${target_seq}\\] exit [0-9]+" | tail -1 | grep -oE '[0-9]+$')
       echo "done: #[${target_seq}] exit ${rc} (${SECONDS}s)"
+      # --print: fold `output`'s bounded segment into this same call — see
+      # cmd_output above. `|| true` so a (theoretical) extraction failure here
+      # never masks the real command's exit code below.
+      if [ "$PRINT" -eq 1 ]; then
+        cmd_output "$SESS" "$target_seq" 0 || true
+      fi
       [ "${rc:-1}" -eq 0 ] && exit 0 || exit "${rc:-1}"
     fi
     if [ $# -gt 0 ]; then sleep "$1"; shift; else sleep 2; fi
@@ -697,6 +781,9 @@ selftest-cache)
 selftest-oneshot-ssh)
   cmd_selftest_oneshot_ssh
   ;;
+selftest-output)
+  cmd_selftest_output
+  ;;
 send)
   have_mux
   CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
@@ -772,6 +859,31 @@ read)
     { l[NR]=$0 }
     END { e=NR; while (e>0 && l[e] ~ /^[[:space:]]*$/) e--; for (i=1;i<=e;i++) print l[i] }'
   ;;
+output)
+  # Marker-bounded read: no lines-to-guess, see cmd_output above.
+  have_mux
+  FULL=0
+  local_sess=""
+  target_seq=""
+  for arg in "$@"; do
+    case "$arg" in --full) FULL=1 ;; esac
+    if [ -z "$local_sess" ] && mux_has "$arg"; then
+      local_sess="$arg"
+    elif [ -z "$target_seq" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
+      target_seq="$arg"
+    fi
+  done
+  SESS=$(resolve_session "${local_sess:-}"); need_session "$SESS"
+  if [ "${WSH_LIVE_SEP:-1}" = "0" ]; then
+    echo "output: WSH_LIVE_SEP=0 — this pane has no ┌─[#N]/└─[#N] markers to extract; use 'read N' for a raw scrollback snapshot" >&2
+    exit 13
+  fi
+  if [ -z "$target_seq" ]; then
+    target_seq=$(cat "$(seq_file "$SESS")" 2>/dev/null || true)
+  fi
+  [ -n "$target_seq" ] || { echo "output: no framed send recorded for '$SESS' yet (run send first, or use 'read N' for a raw snapshot)" >&2; exit 12; }
+  cmd_output "$SESS" "$target_seq" "$FULL"
+  ;;
 step-run)
   # ONE call for "announce the step, run the command, wait for it to finish" —
   # the protocol SKILL.md mandates per step, previously always 2-3 separate
@@ -822,5 +934,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output} [args]" >&2; exit 2 ;;
 esac

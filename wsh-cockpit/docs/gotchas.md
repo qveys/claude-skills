@@ -93,3 +93,6 @@ suit est le détail et le "pourquoi" derrière chacune.
   ```
   `wait-done` reads the `@[wsh_seq]` counter set by the last `send` and polls the
   tmux pane for the matching footer. Timeout defaults to 300s (`WSH_WAIT_TIMEOUT`).
+  Add `--print` to also emit the result — bounded by the `┌─[#N]`/`└─[#N]` markers,
+  no line count to guess — in that same call instead of a separate `read`/`output`;
+  see `docs/framing-and-transfer.md` → "Lire un résultat sans deviner".

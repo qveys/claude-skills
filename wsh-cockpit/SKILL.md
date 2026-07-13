@@ -90,7 +90,8 @@ scripts/wsh-live.sh start [session] [--reuse]  # create session (auto-unique if 
 scripts/wsh-live.sh open  [session]            # AUTO-OPEN a Wave block attached to it
 scripts/wsh-live.sh send  '<command>' [session]  # type a command + Enter
 scripts/wsh-live.sh keys  '<tmux-keys>' [session] # raw keys: C-c, Up, q, Enter...
-scripts/wsh-live.sh read  [session] [lines]    # snapshot the pane (default 30 lines)
+scripts/wsh-live.sh read  [session] [lines]    # free-form pane snapshot (default 30 lines) — unframed panes only
+scripts/wsh-live.sh output [session] [seq] [--full]  # print exactly send #seq's framed segment — no lines to guess
 scripts/wsh-live.sh stop  [session]            # kill the session
 scripts/wsh-live.sh current                    # print last spawned session for this agent
 scripts/wsh-live.sh doctor                     # read-only diagnostic, 11 checks, rc 0/1
@@ -102,7 +103,7 @@ scripts/wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec] 
 scripts/wsh-live.sh remote-init [session] [host]  # after an ssh hop: push helpers to [host] (or sticky inline-only without it)
 scripts/wsh-live.sh remote-init --pre <host> [session]  # RECOMMENDED when <host> is known: push helpers BEFORE the hop
 scripts/wsh-live.sh local-init  [session]         # revert remote-init — back to local helper-file framing
-scripts/wsh-live.sh wait-done [session] [timeout_sec]              # wait for send exit footer
+scripts/wsh-live.sh wait-done [session] [timeout_sec] [--print]    # wait for send exit footer; --print = + bounded output in one call
 scripts/wsh-step.sh {header|phase|step|done|cmd|defs}  # renderer / one-liner / pane-side fn defs
 ```
 
@@ -161,9 +162,16 @@ last-session state under `~/.cache/wsh-cockpit/`.
 
 `send` types a command + Enter, framed by default with header/footer banners
 (see `docs/framing-and-transfer.md`). `keys` sends raw control sequences
-(`C-c`, `Up`, `q`) for interactive programs — never framed. `read` is
-`capture-pane`; default to short reads (`read [session] 20`), only widen when
-output is truncated.
+(`C-c`, `Up`, `q`) for interactive programs — never framed.
+
+**To read a `send` result, prefer `wait-done --print` (or `output` after a
+plain `wait-done`) over `read N`.** The framing markers already delimit each
+`send` exactly (`┌─[#N]` … `└─[#N] exit <code>`), so `output` prints precisely
+that segment — no line count to guess, capped at `WSH_READ_MAX` (default 120,
+head+tail with an omitted-count note past that; `--full` disables the cap).
+`read [session] [lines]` stays for free-form scrollback inspection where there
+are no markers to bound on: an interactive program's screen, a TUI/REPL, or a
+`WSH_LIVE_SEP=0` pane.
 
 ### Travailler sur un hôte distant — une session SSH persistante, pas de rafale de one-shots
 
