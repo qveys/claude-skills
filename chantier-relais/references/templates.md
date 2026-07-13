@@ -11,7 +11,7 @@ Source maîtresse : <lien vers le plan/la doc de référence>. Les fiches `step-
 
 ## Rituel de session (obligatoire)
 
-1. Charger UNIQUEMENT : `STATE.md` + cette fiche + la fiche `step-X.Y` courante.
+1. Charger UNIQUEMENT, dans cet ordre : `CONVENTIONS.md` (ce fichier) + `STATE.md` + la fiche `step-X.Y` courante.
 2. **Contrôle modèle** (filet — le relais lance normalement le bon) : comparer le modèle actif à la ligne « Modèle : » de la fiche ; mismatch → s'arrêter et demander `/model <bon modèle>` (l'agent ne peut pas le faire lui-même).
 3. Exécuter la fiche. Ne pas déborder sur l'étape suivante, même si « il ne reste qu'un petit truc ».
 4. Fin de session : mettre à jour `STATE.md` (statut, **ligne `NEXT:`**, décisions, bloqueurs), commit, push, puis **annoncer de taper `/exit`** (hors relais : `/clear`).
