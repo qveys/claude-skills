@@ -29,6 +29,8 @@ moitié des verdicts. Ce skill sépare donc strictement :
 Ne JAMAIS lire un `.jsonl` de session en entier (certains font 8 Mo). Ne JAMAIS demander à un
 agent un verdict sans lui donner les règles verbatim.
 
+Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invocation).
+
 ## Étapes
 
 1. **Fenêtre.** Défaut 7 jours ; si Quentin précise (« depuis lundi », « sur 2 jours »), adapter
@@ -36,10 +38,11 @@ agent un verdict sans lui donner les règles verbatim.
 
 2. **Extraction.**
    ```bash
-   ~/.claude/skills/ou-en-suis-je/scripts/collect.sh --days 7
+   scripts/collect.sh --days 7 --exclude <id8>
    ```
    Une ligne par session : `PROJET|ID8|DERNIERE_ACTIVITE|TAILLE|TYPE_DERNIERE_ENTREE|intr=N|TAG|SUJET|…FIN`.
-   Options : `--project SUBSTR` (filtrer un projet), `--include-sidechains`.
+   Options : `--project SUBSTR` (filtrer un projet), `--exclude ID8` (écarter la session
+   courante : son UUID apparaît dans le chemin du scratchpad de session), `--include-sidechains`.
 
 3. **Verdicts.** Lire `references/verdicts.md` et appliquer les règles sur chaque ligne, dans
    l'ordre (VIDE → AUTO → À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE).
@@ -58,7 +61,7 @@ agent un verdict sans lui donner les règles verbatim.
    un tmux/Wave autonome — et y planter en silence (cas réel : chaîne bloquée sur « Please run
    /login » qu'aucune session ne voyait). Donc :
    ```bash
-   ~/.claude/skills/ou-en-suis-je/scripts/cockpits.sh
+   scripts/cockpits.sh
    ```
    Lecture seule (capture-pane) — ne JAMAIS envoyer de touches à un cockpit depuis ce skill.
    Classer chaque cockpit vivant : **tourne** / **terminé** / **bloqué sur X** (citer la ligne
@@ -66,7 +69,7 @@ agent un verdict sans lui donner les règles verbatim.
 
 6. **Rendu** — format validé par Quentin (revue du 2026-07-13) ; le suivre précisément :
 
-   ```
+   ```text
    # 📋 Où en suis-je ? — <période couverte>
 
    **Réponse courte en gras** (ex. « Non, pas tout : 1 échec, 3 attentes ») + compteurs :
