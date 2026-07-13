@@ -45,8 +45,8 @@
 #                              use `read N` there instead.
 #   stop  [session]            kill the session
 #   current                    print the last session created by `spawn` in this shell tree
-#   doctor                     read-only diagnostic of the whole cockpit chain (11 checks,
-#                              rc 0/1, never writes anything — safe to run anytime)
+#   doctor                     read-only diagnostic of the whole cockpit chain
+#                              (rc 0/1, never writes anything — safe to run anytime)
 #   gc [--dry-run] [--idle=SECONDS]
 #                              kill idle, UNATTACHED cockpit-* sessions (orphans left behind
 #                              by a crash/forgotten `stop`); default idle threshold is
@@ -389,7 +389,10 @@ cmd_output() {
   if [ "$full" -eq 1 ] || [ "$total_lines" -le "$max" ]; then
     printf '%s\n' "${seg_lines[@]}"
   else
-    head_n=30; tail_n=60
+    # Sized from the cap itself (30/60 at the default 120) so a custom
+    # WSH_READ_MAX below 90 still respects its own budget.
+    head_n=$((max / 4)); [ "$head_n" -ge 1 ] || head_n=1
+    tail_n=$((max / 2)); [ "$tail_n" -ge 1 ] || tail_n=1
     omitted=$((total_lines - head_n - tail_n))
     tail_start=$((total_lines - tail_n))
     printf '%s\n' "${seg_lines[@]:0:head_n}"
@@ -436,8 +439,12 @@ spawn)
     echo "SESSION=$SESS"
     tty_only "Use this session for all subsequent send/read calls in this workflow." \
              "Pass --force only when you intentionally need a second cockpit window."
-    [ -n "$PRE_HOST" ] && "$0" remote-init --pre "$PRE_HOST" "$SESS"
-    [ "$SITUATE" -eq 1 ] && situate_session "$SESS"
+    # Both are best-effort by design (pre-push falls back to inline framing,
+    # situate tolerates its own probe failing): under set -e a bare
+    # `[ ... ] && cmd` here would turn a failed cmd — or even just a false
+    # guard as the case's last command — into a non-zero spawn exit.
+    if [ -n "$PRE_HOST" ]; then "$0" remote-init --pre "$PRE_HOST" "$SESS" || true; fi
+    if [ "$SITUATE" -eq 1 ]; then situate_session "$SESS" || true; fi
     exit 0
   fi
 
@@ -448,8 +455,10 @@ spawn)
   "$0" open "$SESS"
   echo "SESSION=$SESS"
   tty_only "Use this session for all subsequent send/read calls in this workflow."
-  [ -n "$PRE_HOST" ] && "$0" remote-init --pre "$PRE_HOST" "$SESS"
-  [ "$SITUATE" -eq 1 ] && situate_session "$SESS"
+  # Same best-effort rule as the reuse path above — a spawn that created its
+  # session must exit 0 even when pre-push/situate degrade.
+  if [ -n "$PRE_HOST" ]; then "$0" remote-init --pre "$PRE_HOST" "$SESS" || true; fi
+  if [ "$SITUATE" -eq 1 ]; then situate_session "$SESS" || true; fi
   ;;
 status)
   have_mux
@@ -846,14 +855,19 @@ selftest-transfer)
   ;;
 push)
   have_mux
-  SESS=$(resolve_session "${1:-}"); shift || true; need_session "$SESS"
+  # [session] is genuinely optional: with only <local> <remote-path> the
+  # remembered last session is used (same convention as send/read) — a 3-arg
+  # call always names the session first, so a path can never be mistaken for one.
+  if [ $# -ge 3 ]; then SESS=$(resolve_session "$1"); shift; else SESS=$(resolve_session ""); fi
+  need_session "$SESS"
   LOCAL="${1:?usage: wsh-live.sh push [session] <local> <remote-path>}"; shift || true
   REMOTE="${1:?usage: wsh-live.sh push [session] <local> <remote-path>}"; shift || true
   cmd_transfer push "$SESS" "$LOCAL" "$REMOTE"
   ;;
 pull)
   have_mux
-  SESS=$(resolve_session "${1:-}"); shift || true; need_session "$SESS"
+  if [ $# -ge 3 ]; then SESS=$(resolve_session "$1"); shift; else SESS=$(resolve_session ""); fi
+  need_session "$SESS"
   REMOTE="${1:?usage: wsh-live.sh pull [session] <remote-path> <local>}"; shift || true
   LOCAL="${1:?usage: wsh-live.sh pull [session] <remote-path> <local>}"; shift || true
   cmd_transfer pull "$SESS" "$LOCAL" "$REMOTE"

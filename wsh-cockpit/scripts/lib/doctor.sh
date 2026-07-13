@@ -2,7 +2,7 @@
 # lib/doctor.sh — read-only diagnostic of the whole cockpit chain.
 # Sourced by wsh-live.sh; not meant to be run standalone.
 
-# Read-only diagnostic of the whole cockpit chain: 11 checks, no mkdir/touch/
+# Read-only diagnostic of the whole cockpit chain: no mkdir/touch/
 # remember_session, no need_session (must run on a machine with nothing spawned
 # yet). Every check that CAN fail is wrapped in `if` or ends `|| true` so a
 # missing tmux/wsh/sqlite3/tmux-server never kills the script under set -e.

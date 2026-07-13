@@ -94,7 +94,7 @@ scripts/wsh-live.sh read  [session] [lines]    # free-form pane snapshot (defaul
 scripts/wsh-live.sh output [session] [seq] [--full]  # print exactly send #seq's framed segment — no lines to guess
 scripts/wsh-live.sh stop  [session]            # kill the session
 scripts/wsh-live.sh current                    # print last spawned session for this agent
-scripts/wsh-live.sh doctor                     # read-only diagnostic, 11 checks, rc 0/1
+scripts/wsh-live.sh doctor                     # read-only diagnostic of the whole chain, rc 0/1
 scripts/wsh-live.sh gc [--dry-run] [--idle=SECONDS] [--only-session=NAME]  # sweep orphaned idle sessions
 scripts/wsh-live.sh web {start|stop|status} [session]  # browser view via ttyd, read-only by default
 scripts/wsh-live.sh status [prefix]            # is last session alive? matching sessions?
