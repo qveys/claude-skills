@@ -9,6 +9,10 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR/.." || exit 1
 command -v claude >/dev/null 2>&1 || { echo "■ claude introuvable dans le PATH — relais impossible."; exit 1; }
 
+# Nom du chantier : titre de STATE.md (« # STATE — chantier <NOM> »), sinon le dossier projet.
+chantier=$(sed -n '1s/^# *STATE *[—-]* *\(chantier \)\{0,1\}//p' "$DIR/STATE.md")
+[ -n "$chantier" ] || chantier=$(basename "$PWD")
+
 while :; do
   next=$(grep -m1 '^NEXT:' "$DIR/STATE.md" | awk '{print $2}')
   case "${next:-}" in
@@ -32,7 +36,7 @@ while :; do
   echo "  Ctrl+C dans les 5 s pour interrompre le relais."
   sleep 5 || break
 
-  claude --model "$model" "Session d'exécution lancée par le relais du chantier (skill chantier-relais). Lis execution/CONVENTIONS.md, execution/STATE.md puis la fiche execution/$(basename "$fiche"), et exécute UNIQUEMENT cette fiche. À la fin : mets à jour STATE.md (statut, ligne NEXT, décisions, bloqueurs), commit signé, push, puis annonce au pilote qu'il peut taper /exit pour passer le relais." || {
+  claude --model "$model" "Chantier $chantier — session d'exécution lancée par le relais (skill chantier-relais). Lis execution/CONVENTIONS.md, execution/STATE.md puis la fiche execution/$(basename "$fiche"), et exécute UNIQUEMENT cette fiche. À la fin : mets à jour STATE.md (statut, ligne NEXT, décisions, bloqueurs), commit et push selon les conventions du chantier, puis annonce au pilote qu'il peut taper /exit pour passer le relais." || {
     echo "■ claude s'est terminé en erreur — arrêt du relais."
     break
   }

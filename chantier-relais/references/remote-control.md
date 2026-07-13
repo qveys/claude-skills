@@ -6,13 +6,14 @@ Tout l'état du chantier est pilotable à distance parce qu'il vit dans deux cho
 
 ```bash
 RC='~/.claude/skills/chantier-relais/scripts/relay-ctl.sh'
-H='qveys@macbook-openclaw'    # l'hôte qui fait tourner le relais
+H='<user>@<hôte>'             # l'hôte qui fait tourner le relais
+P='~/chemin/vers/le/projet'   # le projet qui contient execution/
 
-tailscale ssh $H "$RC status --dir ~/Atlas/60-Agentic-OS"   # où en est-on ?
-tailscale ssh $H "$RC watch 40 --dir ~/Atlas/60-Agentic-OS" # voir le pane
-tailscale ssh $H "$RC set step-0.2 --dir ~/Atlas/60-Agentic-OS && $RC go --dir ~/Atlas/60-Agentic-OS"
-tailscale ssh $H "$RC say 'Oui, option 1, config globale' --dir ~/Atlas/60-Agentic-OS"
-tailscale ssh $H "$RC exit --dir ~/Atlas/60-Agentic-OS"     # /exit à distance → étape suivante
+tailscale ssh $H "$RC status --dir $P"   # où en est-on ?
+tailscale ssh $H "$RC watch 40 --dir $P" # voir le pane
+tailscale ssh $H "$RC set step-0.2 --dir $P && $RC go --dir $P"
+tailscale ssh $H "$RC say 'Oui, option 1, config globale' --dir $P"
+tailscale ssh $H "$RC exit --dir $P"     # /exit à distance → étape suivante
 ```
 
 Le cycle complet à distance : `status` → (la session pose une question ? `say`) → (elle annonce la fin ? `exit`) → le relais enchaîne seul → `status`.
