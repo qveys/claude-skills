@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Relais de sessions du chantier Agentic OS.
+# Relais de sessions d'un chantier (skill chantier-relais) — générique, aucun projet en dur.
 # Boucle : lit « NEXT: » dans STATE.md → lance claude avec le modèle exigé par
-# la fiche → quand Quentin quitte la session (/exit), relance pour l'étape
-# suivante. S'arrête sur NEXT: PAUSE, NEXT: FIN, fiche introuvable, ou Ctrl+C.
+# la fiche → quand le pilote quitte la session (/exit), relance pour l'étape
+# suivante. S'arrête sur NEXT: PAUSE, NEXT: FIN, fiche introuvable, erreur de
+# lancement de claude, ou Ctrl+C.
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR/.." || exit 1
+command -v claude >/dev/null 2>&1 || { echo "■ claude introuvable dans le PATH — relais impossible."; exit 1; }
 
 while :; do
   next=$(grep -m1 '^NEXT:' "$DIR/STATE.md" | awk '{print $2}')
@@ -30,5 +32,8 @@ while :; do
   echo "  Ctrl+C dans les 5 s pour interrompre le relais."
   sleep 5 || break
 
-  claude --model "$model" "Chantier Agentic OS — session d'exécution lancée par le relais. Lis execution/CONVENTIONS.md, execution/STATE.md puis la fiche execution/$(basename "$fiche"), et exécute UNIQUEMENT cette fiche. À la fin : mets à jour STATE.md (statut, ligne NEXT, décisions, bloqueurs), commit signé, push, puis annonce à Quentin qu'il peut taper /exit pour passer le relais."
+  claude --model "$model" "Session d'exécution lancée par le relais du chantier (skill chantier-relais). Lis execution/CONVENTIONS.md, execution/STATE.md puis la fiche execution/$(basename "$fiche"), et exécute UNIQUEMENT cette fiche. À la fin : mets à jour STATE.md (statut, ligne NEXT, décisions, bloqueurs), commit signé, push, puis annonce au pilote qu'il peut taper /exit pour passer le relais." || {
+    echo "■ claude s'est terminé en erreur — arrêt du relais."
+    break
+  }
 done
