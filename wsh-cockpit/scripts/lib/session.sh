@@ -151,6 +151,39 @@ remote_helper_path_clear() {  # $1 sess $2 kind
   tmux set-option -u -t "$1" "$(remote_helper_option "$2")" >/dev/null 2>&1 || true
 }
 
+# --- Remote mode: recorded hop host (for out-of-pane push/pull) -------------
+# `remote-init <sess> <host>` / `remote-init --pre <host> <sess>` learn the
+# host the pane has (or is about to) ssh-hop to; `push`/`pull` need that same
+# host to pick a transport WITHOUT asking the caller to repeat it (the whole
+# point is that the agent never re-types a hostname it already told the skill
+# once). Same per-session tmux-option store as remote_mode_*/remote_helper_*,
+# same Zellij limitation (no-op — push/pull just find no host and error).
+remote_host_option() { printf '@wsh_remote_host\n'; }
+remote_host_get() {  # $1 sess -> recorded host, or "" if none
+  [ "$MUX" = tmux ] || { printf ''; return 0; }
+  tmux show-option -qv -t "$1" "$(remote_host_option)" 2>/dev/null || true
+}
+remote_host_set() {  # $1 sess $2 host
+  [ "$MUX" = tmux ] || return 0
+  tmux set-option -t "$1" "$(remote_host_option)" "$2" >/dev/null 2>&1 || true
+}
+remote_host_clear() {  # $1 sess
+  [ "$MUX" = tmux ] || return 0
+  tmux set-option -u -t "$1" "$(remote_host_option)" >/dev/null 2>&1 || true
+}
+
+# --- OpenSSH ControlMaster socket path for a session -------------------------
+# Deterministic from the session name alone (no state lookup needed) so both
+# the pane's hop command (`ssh -o ControlPath=...`, see SKILL.md) and
+# push/pull's out-of-pane scp/ssh calls agree on the exact same socket path
+# without any extra bookkeeping. tailscale ssh does NOT support ControlMaster
+# — a session hopped that way just never has a live socket here, and
+# wsh-push.sh's `try_control_path` falls through cleanly when `ssh -O check`
+# finds nothing (see wsh-push.sh). Cleaned up by teardown_session below.
+control_path_for_session() {  # $1 sess -> path under STATE_DIR
+  printf '%s/cm-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"
+}
+
 # Human-only narration. The cockpit is driven by Claude through a non-TTY Bash pipe,
 # where every line is re-read into the model's context on each call — so per-command
 # confirmations and multi-line "how to attach" help are pure token cost there. Print
@@ -208,7 +241,7 @@ oneshot_ssh_track() {
 # place. Returns 0 if a session was actually killed, 1 if there was nothing
 # to kill (already gone).
 teardown_session() {
-  local sess="$1" sf killed=1
+  local sess="$1" sf killed=1 cpath
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
   rm -f "$(oneshot_ssh_file "$sess")" 2>/dev/null || true
   tab_cache_invalidate "$sess"
@@ -218,7 +251,18 @@ teardown_session() {
     tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
     tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
     tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
   fi
+  # Close and remove the session's ControlMaster socket, if any (orphaned
+  # otherwise — see control_path_for_session). "-O exit" needs a host
+  # argument syntactically but ignores it once -o ControlPath points at a
+  # real socket; a dead/stale socket file just fails the check, so `rm -f`
+  # after it is what actually clears it either way.
+  cpath=$(control_path_for_session "$sess")
+  if [ -S "$cpath" ] && command -v ssh >/dev/null 2>&1; then
+    ssh -o ControlPath="$cpath" -O exit x >/dev/null 2>&1 || true
+  fi
+  rm -f "$cpath" 2>/dev/null || true
   web_teardown "$sess"
   if mux_kill "$sess"; then killed=0; fi
   block_id_close "$sess"

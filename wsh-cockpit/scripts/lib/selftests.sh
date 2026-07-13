@@ -559,6 +559,161 @@ cmd_selftest_oneshot_ssh() {
   echo "selftest-oneshot-ssh: ok"
 }
 
+# push/pull smoke test. Deterministic error paths (missing local file,
+# unreachable host) need no real remote and always run. The round-trip +
+# missing-remote-file cases exercise wsh-push.sh's real fallback chain over
+# loopback ssh (the "transport local simulable" — same Mac talking to itself
+# via bare scp, since there's no live Wave route or ControlMaster to itself
+# and `tailscale ssh` to "localhost" isn't a tailnet peer) and are skipped
+# with a note when this Mac doesn't accept passwordless ssh to itself
+# (Remote Login off / no matching key) — same "skip if infra unavailable"
+# spirit as selftest-cache. The final case exercises wsh-live.sh's own
+# `push` subcommand end-to-end against a real (Wave-less) tmux session,
+# proving the "no remote host recorded" error path — never calls spawn/open.
+cmd_selftest_transfer() {
+  local failures=0
+  report_transfer_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # tmpdir is deliberately NOT local: later traps in this function (and the
+  # EXIT trap that ends up registered when the function returns) fire after
+  # this function has already returned — a `local` var is out of scope by
+  # then, and under `set -u` that reads as "unbound variable", not "empty"
+  # (same rationale as cmd_selftest_sep's tmpdir).
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/wsh-transfer-test.XXXXXX")
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  # 1. push: missing local file -> exit 2, clear message.
+  local err rc
+  set +e
+  err=$("$PUSH_SCRIPT" "$tmpdir/does-not-exist.txt" "/tmp/wsh-transfer-selftest-absent" "192.0.2.1" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'not found'; then
+    report_transfer_case "1 push missing local file" 0
+  else
+    report_transfer_case "1 push missing local file" 1 "rc=$rc err=$err"
+  fi
+
+  # 2. push: unreachable host (RFC 5737 TEST-NET-1, guaranteed unroutable) ->
+  # all transports fail -> exit 3, clear message. WSH_PUSH_SSH_TIMEOUT keeps
+  # the scp fallback's ConnectTimeout short so this doesn't hang the selftest.
+  printf 'hello\n' >"$tmpdir/src.txt"
+  set +e
+  err=$(WSH_PUSH_SSH_TIMEOUT=3 "$PUSH_SCRIPT" "$tmpdir/src.txt" "/tmp/wsh-transfer-selftest-$$" "192.0.2.1" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 3 ] && printf '%s' "$err" | grep -q 'failed'; then
+    report_transfer_case "2 push unreachable host" 0
+  else
+    report_transfer_case "2 push unreachable host" 1 "rc=$rc err=$err"
+  fi
+
+  # 3-5. opportunistic: push+pull round-trip (text + binary, checksum
+  # compared) and a missing-remote-file pull, all over loopback ssh.
+  if command -v ssh >/dev/null 2>&1 && command -v scp >/dev/null 2>&1 \
+     && ssh -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no "$(whoami)@localhost" true >/dev/null 2>&1; then
+    # conn/rdir are deliberately NOT local: transfer_selftest_loopback_cleanup
+    # is registered as the EXIT trap below and must still see them if the
+    # script aborts (set -e) before this function returns — same rationale as
+    # cmd_selftest_live's SESS/SF/LIVE_LOG_FILE.
+    conn="$(whoami)@localhost"
+    rdir="/tmp/wsh-transfer-selftest-$$"
+    ssh -o BatchMode=yes "$conn" "mkdir -p '$rdir'" >/dev/null 2>&1
+    transfer_selftest_loopback_cleanup() {
+      ssh -o BatchMode=yes "$conn" "rm -rf '$rdir'" >/dev/null 2>&1 || true
+    }
+    trap 'transfer_selftest_loopback_cleanup; rm -rf "$tmpdir"' EXIT
+
+    # 3. text file round-trip: push, pull back, checksums match.
+    printf 'hello wsh-cockpit push/pull\nligne 2\n' >"$tmpdir/text-src.txt"
+    set +e
+    "$PUSH_SCRIPT" "$tmpdir/text-src.txt" "$rdir/text.txt" "$conn" >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      set +e
+      "$PUSH_SCRIPT" --pull "$tmpdir/text-out.txt" "$rdir/text.txt" "$conn" >/dev/null 2>&1
+      rc=$?
+      set -e
+      if [ "$rc" -eq 0 ] && [ -f "$tmpdir/text-out.txt" ] \
+         && [ "$(cksum <"$tmpdir/text-src.txt")" = "$(cksum <"$tmpdir/text-out.txt")" ]; then
+        report_transfer_case "3 text round-trip checksum match" 0
+      else
+        report_transfer_case "3 text round-trip checksum match" 1 "pull rc=$rc"
+      fi
+    else
+      report_transfer_case "3 text round-trip checksum match" 1 "push rc=$rc"
+    fi
+
+    # 4. binary file round-trip: same, with random bytes.
+    dd if=/dev/urandom of="$tmpdir/bin-src.bin" bs=1024 count=8 >/dev/null 2>&1
+    set +e
+    "$PUSH_SCRIPT" "$tmpdir/bin-src.bin" "$rdir/bin.bin" "$conn" >/dev/null 2>&1
+    rc=$?
+    "$PUSH_SCRIPT" --pull "$tmpdir/bin-out.bin" "$rdir/bin.bin" "$conn" >/dev/null 2>&1
+    local rc2=$?
+    set -e
+    if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && [ -f "$tmpdir/bin-out.bin" ] \
+       && [ "$(cksum <"$tmpdir/bin-src.bin")" = "$(cksum <"$tmpdir/bin-out.bin")" ]; then
+      report_transfer_case "4 binary round-trip checksum match" 0
+    else
+      report_transfer_case "4 binary round-trip checksum match" 1 "push rc=$rc pull rc=$rc2"
+    fi
+
+    # 5. pull: remote file absent -> nonzero exit, clear message, and NO
+    # truncated file left behind at the local destination.
+    set +e
+    err=$("$PUSH_SCRIPT" --pull "$tmpdir/absent-out.txt" "$rdir/does-not-exist.txt" "$conn" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ] && [ ! -e "$tmpdir/absent-out.txt" ]; then
+      report_transfer_case "5 pull missing remote file" 0
+    else
+      report_transfer_case "5 pull missing remote file" 1 "rc=$rc err=$err"
+    fi
+
+    transfer_selftest_loopback_cleanup
+  else
+    echo "skip 3-5 round-trip+missing-file (no passwordless loopback ssh — Remote Login likely off on this Mac)"
+  fi
+
+  # 6. wsh-live.sh push errors clearly when the session has no remote host
+  # recorded (remote-init/--pre never ran) — real tmux session, no Wave block.
+  have_mux
+  # SESS is deliberately NOT local: transfer_selftest_session_cleanup runs
+  # from the EXIT trap after this function has already returned (at script
+  # exit), and a `local` var is out of scope by then — under `set -u` that
+  # reads as "unbound variable", not "empty" (same rationale as
+  # cmd_selftest_live's SESS/SF/LIVE_LOG_FILE).
+  SESS="cockpit-selftest-transfer-$$"
+  transfer_selftest_session_cleanup() { "$0" stop "$SESS" >/dev/null 2>&1 || true; }
+  trap 'transfer_selftest_session_cleanup; rm -rf "$tmpdir"' EXIT
+  create_session "$SESS"
+  set +e
+  err=$("$0" push "$SESS" "$tmpdir/src.txt" "/tmp/x" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && printf '%s' "$err" | grep -q 'no remote host recorded'; then
+    report_transfer_case "6 push without remote-init errors clearly" 0
+  else
+    report_transfer_case "6 push without remote-init errors clearly" 1 "rc=$rc err=$err"
+  fi
+  transfer_selftest_session_cleanup
+
+  if [ "$failures" -ne 0 ]; then
+    echo "selftest-transfer: $failures failure(s)" >&2
+    exit 1
+  fi
+  echo "selftest-transfer: ok"
+}
+
 # `output` smoke test: exercises the marker-bounded segment extraction (see
 # cmd_output in wsh-live.sh) on a real, throwaway tmux session — a short
 # complete segment, a long segment truncated head+tail with an omitted-count
