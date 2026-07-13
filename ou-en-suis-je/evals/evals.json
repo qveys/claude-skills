@@ -1,0 +1,26 @@
+{
+  "skill_name": "ou-en-suis-je",
+  "evals": [
+    {
+      "id": 0,
+      "eval_name": "recap-48h-global",
+      "prompt": "Je ne sais plus où j'en suis. Fais-moi le point sur toutes mes sessions Claude Code des 2 derniers jours, tous projets confondus : ce qui est fini, ce qui traîne encore, et ce qui attend une action de ma part. Sauve le récap final dans recap.md",
+      "expected_output": "Un recap.md structuré distinguant terminé / à reprendre / en attente de l'utilisateur, exact vis-à-vis des transcripts réels, sessions CI agrégées, état des cockpits tmux vérifié",
+      "files": []
+    },
+    {
+      "id": 1,
+      "eval_name": "tableau-abouti",
+      "prompt": "est ce que toutes les sessions claude d'hier et d'aujourd'hui ont abouti ? je veux un tableau avec ce qui reste à faire. mets le résultat dans recap.md",
+      "expected_output": "Réponse oui/non argumentée + tableau des sessions non abouties avec ce qui reste à faire, sans lister les sessions CI une par une",
+      "files": []
+    },
+    {
+      "id": 2,
+      "eval_name": "filtre-projet-claude-skills",
+      "prompt": "Qu'est-ce qui reste ouvert dans mes sessions récentes sur le projet claude-skills (3 derniers jours) ? Écris ta réponse dans recap.md",
+      "expected_output": "Un recap.md limité au projet claude-skills, listant les sessions encore ouvertes (dont l'état de la chaîne wsh-cockpit-optim) et rien des autres projets",
+      "files": []
+    }
+  ]
+}
