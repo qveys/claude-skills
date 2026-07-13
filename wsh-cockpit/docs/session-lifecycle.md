@@ -134,11 +134,13 @@ Flow:
    programs (`keys 'C-c'` to interrupt, `keys 'Up'` to recall history, `keys 'q'`
    to quit a pager) — that's how you use tmux's full interactivity, not just
    one-shots. `keys` is **never** framed (raw by design).
-5. `read` is `capture-pane` of the scrollback — that's how you see output. Default
-   to short reads: use `read [session] 20` or `read [session] 30` for normal
-   command checks, and increase only when the output is clearly truncated or
-   you are recovering lost context. Avoid broad reads like 80+ lines for
-   routine verification; they bury the relevant result.
+5. To see a `send` result, prefer `wait-done --print` (or `output` after a plain
+   `wait-done`) over `read N` — the `┌─[#N]`/`└─[#N] exit <code>` markers already
+   bound the segment exactly, so there is no line count to guess (see
+   `docs/framing-and-transfer.md` → "Lire un résultat sans deviner"). `read` is
+   `capture-pane` of the raw scrollback — reserve it for free-form inspection
+   where there are no markers to bound on (a TUI/REPL, `WSH_LIVE_SEP=0`, or
+   recovering lost context), and keep it short (`read [session] 20`) even then.
 6. To co-drive a **remote** host, just open it *inside* the session
    (`send 'wsh ssh -n qveys@1.2.3.4'` or `send 'ssh host'`) and keep going — tmux
    stays on the Mac, the remote shell lives inside it.

@@ -548,3 +548,127 @@ cmd_selftest_oneshot_ssh() {
   fi
   echo "selftest-oneshot-ssh: ok"
 }
+
+# `output` smoke test: exercises the marker-bounded segment extraction (see
+# cmd_output in wsh-live.sh) on a real, throwaway tmux session — a short
+# complete segment, a long segment truncated head+tail with an omitted-count
+# note, --full bypassing the cap, an explicit older seq, wait-done --print,
+# and the WSH_LIVE_SEP=0 fallback (no markers to extract). Mirrors
+# selftest-live's shape; never calls spawn/open.
+cmd_selftest_output() {
+  have_mux
+  export WSH_COCKPIT_AGENT=selftest
+  # SESS, SESS2, SF are deliberately NOT local: live_selftest_output_cleanup
+  # runs from the EXIT trap after this function returns (at script exit),
+  # and a `local` var is out of scope by then — same rationale as
+  # cmd_selftest_live's SESS/SF/LIVE_LOG_FILE.
+  SESS="cockpit-selftest-output-$$"
+  SESS2="cockpit-selftest-output-unframed-$$"
+  SF="$(state_file)"
+
+  live_selftest_output_cleanup() {
+    "$0" stop "$SESS" >/dev/null 2>&1 || true
+    "$0" stop "$SESS2" >/dev/null 2>&1 || true
+    rm -f "$SF" 2>/dev/null || true
+  }
+  trap live_selftest_output_cleanup EXIT
+
+  local failures=0
+  report_output_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  "$0" start "$SESS" >/dev/null 2>&1
+
+  # 1. short complete segment: header, command output, and footer all present.
+  "$0" send 'echo OUTPUT_SHORT_OK' "$SESS" >/dev/null 2>&1
+  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+  local out1
+  out1=$("$0" output "$SESS" 2>&1)
+  if printf '%s\n' "$out1" | grep -Fq '┌─[#1]' \
+     && printf '%s\n' "$out1" | grep -Fq 'OUTPUT_SHORT_OK' \
+     && printf '%s\n' "$out1" | grep -Fq '└─[#1] exit 0'; then
+    report_output_case "1 short segment complete" 0
+  else
+    report_output_case "1 short segment complete" 1 "$out1"
+  fi
+
+  # 2. a long segment (seq 1 500 -> 500+ lines) is truncated head+tail with an
+  # omitted-count note; the footer (exit code) still survives in the tail.
+  "$0" send 'seq 1 500' "$SESS" >/dev/null 2>&1
+  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+  local out2 lines2
+  out2=$("$0" output "$SESS" 2>&1)
+  lines2=$(printf '%s\n' "$out2" | wc -l | tr -d ' ')
+  if printf '%s\n' "$out2" | grep -q 'lignes omises' \
+     && printf '%s\n' "$out2" | grep -Fq '└─[#2] exit 0' \
+     && [ "$lines2" -le "$((WSH_READ_MAX + 5))" ]; then
+    report_output_case "2 long segment truncated head+tail" 0
+  else
+    report_output_case "2 long segment truncated head+tail" 1 "lines=$lines2 out=$out2"
+  fi
+
+  # 3. --full disables the cap: the same #2 segment, uncapped, is well past
+  # the 500 lines `seq 1 500` printed and carries no omission note.
+  local out3 lines3
+  out3=$("$0" output "$SESS" 2 --full 2>&1)
+  lines3=$(printf '%s\n' "$out3" | wc -l | tr -d ' ')
+  if ! printf '%s\n' "$out3" | grep -q 'lignes omises' && [ "$lines3" -gt 500 ]; then
+    report_output_case "3 --full bypasses the cap" 0
+  else
+    report_output_case "3 --full bypasses the cap" 1 "lines=$lines3"
+  fi
+
+  # 4. an explicit seq targets an OLDER send (#1), not the latest (#2).
+  local out4
+  out4=$("$0" output "$SESS" 1 2>&1)
+  if printf '%s\n' "$out4" | grep -Fq 'OUTPUT_SHORT_OK' \
+     && ! printf '%s\n' "$out4" | grep -Fq '└─[#2]'; then
+    report_output_case "4 explicit seq targets an older send" 0
+  else
+    report_output_case "4 explicit seq targets an older send" 1 "$out4"
+  fi
+
+  # 5. wait-done --print = wait-done + output folded into ONE call.
+  "$0" send 'echo PRINT_COMBO_OK' "$SESS" >/dev/null 2>&1
+  local out5 rc5
+  set +e
+  out5=$("$0" wait-done "$SESS" 30 --print 2>&1)
+  rc5=$?
+  set -e
+  if [ "$rc5" -eq 0 ] && printf '%s\n' "$out5" | grep -Fq 'PRINT_COMBO_OK' \
+     && printf '%s\n' "$out5" | grep -Fq '└─[#3] exit 0'; then
+    report_output_case "5 wait-done --print" 0
+  else
+    report_output_case "5 wait-done --print" 1 "rc=$rc5 out=$out5"
+  fi
+
+  # 6. unframed pane (WSH_LIVE_SEP=0): no markers to extract — a clear
+  # stderr fallback pointing at `read N`, never a guessed/truncated read
+  # passed off as the real thing. Fresh session, no framed send ever made.
+  "$0" start "$SESS2" >/dev/null 2>&1
+  local err6 rc6
+  set +e
+  err6=$(WSH_LIVE_SEP=0 "$0" output "$SESS2" 2>&1 >/dev/null)
+  rc6=$?
+  set -e
+  if [ "$rc6" -ne 0 ] && printf '%s' "$err6" | grep -q 'WSH_LIVE_SEP=0'; then
+    report_output_case "6 WSH_LIVE_SEP=0 falls back cleanly" 0
+  else
+    report_output_case "6 WSH_LIVE_SEP=0 falls back cleanly" 1 "rc=$rc6 err=$err6"
+  fi
+
+  "$0" stop "$SESS" >/dev/null 2>&1 || true
+  "$0" stop "$SESS2" >/dev/null 2>&1 || true
+
+  if [ "$failures" -ne 0 ]; then
+    echo "selftest-output: $failures failure(s)" >&2
+    exit 1
+  fi
+  echo "selftest-output: ok"
+}
