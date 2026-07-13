@@ -54,7 +54,44 @@ wsh file cat wsh://qveys@macbook-openclaw/Users/qveys/cible.md   # lire
 send 'python3 -c "import base64; ... decode('\''GIANT...'\'')..."'
 # NON — printf base64 en morceaux
 send "printf '%s' 'IyBUT09M...' > /tmp/x.b64"
+# NON — cat/heredoc du contenu d'un fichier à travers le pane, même "juste pour lire"
+send "cat /remote/path/big-file.log"
 ```
+
+### Méthode 3 — `push`/`pull` (voie officielle quand le pane est en SSH)
+
+Une fois que le pane a fait un hop SSH (`remote-init`/`--pre <host>` a
+enregistré l'hôte pour la session), `wsh-push.sh` n'est plus appelé
+directement : `scripts/wsh-live.sh push`/`pull` déduisent l'hôte de l'état de
+session — pas besoin de le redonner à la main, et impossible de se tromper
+d'hôte entre deux appels.
+
+```bash
+scripts/wsh-live.sh push "$SESS" ./local-file.md /remote/absolute/path.md
+scripts/wsh-live.sh pull "$SESS" /remote/absolute/path.log ./local-copy.log
+```
+
+Sous le capot, ces deux commandes shellent vers `wsh-push.sh` (le même moteur
+que la méthode 1, étendu pour supporter les deux sens et un `--control-path`)
+avec l'hôte enregistré et le socket `ControlMaster` de la session (voir
+« Remote shell / lost helpers » plus bas). Ordre de fallback, identique dans
+les deux sens, choisi automatiquement et **annoncé sur stderr** :
+
+1. **`wsh file cp`** — si Wave a déjà une route pour la connexion
+2. **Socket `ControlMaster` de la session** (`ssh -O check` local, pas de
+   round-trip réseau) — réutilise la connexion OpenSSH déjà authentifiée du
+   hop du pane, zéro nouvelle auth FIDO2. Absent/skip silencieusement si le
+   hop était un `tailscale ssh` (pas de ControlMaster côté tailscale) ou si le
+   pane n'a pas encore hopé.
+3. **`tailscale ssh`** — pipe stdin (push) / `cat` (pull), pas de multiplexage
+   mais l'auth tailnet est transparente
+4. **`scp` nu** — dernier recours ; avertissement sur stderr, ré-auth probable
+
+`push`/`pull` tournent depuis le shell agent (jamais via `send`) : ils ne
+comptent **jamais** pour l'avertissement one-shot SSH de la tâche 09 — ce
+compteur ne surveille que ce qui passe par `send`. Sans hôte enregistré pour
+la session (`remote-init`/`--pre` jamais appelé), `push`/`pull` échouent avec
+un message clair plutôt que de deviner.
 
 ## Command framing (visual delimiters)
 
@@ -170,6 +207,24 @@ hard-fails the call. **One hop only:** hopping again from that host to a THIRD
 host isn't tracked; it falls back to inline there too, still correct, just not
 optimized.
 
+**ControlMaster on the hop itself.** For an OpenSSH hop (not `tailscale
+ssh` — see below), send it with multiplexing on:
+
+```bash
+scripts/wsh-live.sh send "ssh -o ControlMaster=auto -o ControlPath=~/.cache/wsh-cockpit/cm-$SESS -o ControlPersist=10m <host>" "$SESS"
+```
+
+The pane's own interactive session then IS the master connection: `push`/
+`pull` (see below) find that same socket by the session name alone
+(`control_path_for_session` in `lib/session.sh`) and reuse it — no fresh
+FIDO2 prompt for out-of-pane transfers. This does not contradict the
+persistent-session rule above; it's the same one session, just also usable
+from the agent shell. **`tailscale ssh` does NOT support ControlMaster** — a
+session hopped that way simply never has a live socket at that path, so
+`push`/`pull` fall through to the `tailscale ssh` transport cleanly (see
+`wsh-push.sh`'s `try_control_path`/`control_master_alive` — a purely local,
+fast socket check, no special-casing needed to tell the two hop kinds apart).
+
 Without `<host>` (or when you don't know it up front), `scripts/wsh-live.sh
 remote-init "$SESS"` still works as a sticky **inline-only** switch: every
 later `send`/`banner` defaults to the self-contained one-liner wrapper (no
@@ -198,4 +253,12 @@ and zsh without tmux.
 > `wsh-push.sh`) n'est PAS couvert par le selftest — il dépend d'un hôte distant
 > réel — et a été vérifié manuellement à la place (voir la PR). Si la retouche
 > touche `send` (framing, garde one-shot SSH), lance aussi
-> `scripts/wsh-live.sh selftest-oneshot-ssh` — pur, sans tmux.
+> `scripts/wsh-live.sh selftest-oneshot-ssh` — pur, sans tmux. Si la retouche
+> touche `wsh-push.sh`, `push`/`pull`, ou le socket `ControlMaster` de session
+> (`control_path_for_session`, `remote_host_*` dans `lib/session.sh`), lance
+> aussi `scripts/wsh-live.sh selftest-transfer` — les cas d'erreur (fichier
+> local absent, hôte injoignable) sont couverts sans hôte distant réel ; le
+> round-trip checksum et le cas fichier-distant-absent tournent en plus si ce
+> Mac accepte le ssh loopback vers lui-même (sinon `skip` explicite), et le
+> transport `ControlMaster` a été vérifié manuellement contre un hôte réel du
+> tailnet (voir la PR) — même limitation que `remote-init <host>` ci-dessus.

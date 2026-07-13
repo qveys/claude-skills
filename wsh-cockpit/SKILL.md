@@ -177,10 +177,15 @@ are no markers to bound on: an interactive program's screen, a TUI/REPL, or a
 
 **Règle impérative.** Pour travailler sur un hôte distant : ouvre **une seule**
 session SSH interactive (auth FIDO2 une fois), reste dedans pour tout le
-travail, puis quitte :
+travail, puis quitte. Pour un hop **OpenSSH**, active le multiplexage
+`ControlMaster` : la session interactive du pane devient alors la connexion
+maîtresse, réutilisable hors pane sans ré-auth (voir « Transférer des fichiers »
+plus bas) :
 
 ```bash
-$COCKPIT send 'ssh <host>' "$SESS"        # ou: tailscale ssh <host>
+$COCKPIT send "ssh -o ControlMaster=auto -o ControlPath=~/.cache/wsh-cockpit/cm-$SESS -o ControlPersist=10m <host>" "$SESS"
+# ou, si <host> n'est joignable qu'en tailscale ssh (PAS d'OpenSSH ControlMaster) :
+$COCKPIT send 'tailscale ssh <host>' "$SESS"
 $COCKPIT remote-init "$SESS" <host>       # (ou --pre <host> AVANT le hop — voir plus haut)
 # ... toutes les actions de travail se font DANS cette session (send/banner) ...
 $COCKPIT send 'exit' "$SESS"              # retour au Mac en fin de travail
@@ -203,11 +208,27 @@ ce que `remote-init`/`--pre <host>` maintiennent en poussant les helpers sur
 l'hôte. Les deux règles sont compatibles : une session, `2>&1` systématique,
 footer fiable à chaque commande.
 
-### Pousser des fichiers vers un remote — **jamais base64 dans `send`**
+### Transférer des fichiers — **jamais base64/cat dans `send`**
 
-Séparer transfert et exécution : `scripts/wsh-push.sh` (ou `wsh file cp`) pour
-pousser le fichier depuis le shell agent (invisible), puis un `send` court dans
-le cockpit pour vérifier/utiliser. Détails, fallback chain, méthodes : voir
+Séparer transfert et exécution. **Quand le pane est en session SSH**, la voie
+officielle est `push`/`pull` (l'hôte est déduit de `remote-init`/`--pre` —
+jamais à redonner à la main) :
+
+```bash
+$COCKPIT push "$SESS" ./local-file.md /remote/absolute/path.md   # local -> remote
+$COCKPIT pull "$SESS" /remote/absolute/path.log ./local-copy.log # remote -> local
+```
+
+Ordre de transport (choisi automatiquement, annoncé sur stderr) : `wsh file
+cp` → le socket `ControlMaster` de la session (zéro ré-auth — voir ci-dessus)
+→ `tailscale ssh` → `scp` nu en dernier recours. Ces transports tournent hors
+pane depuis le shell agent : ils ne comptent **jamais** pour l'avertissement
+one-shot SSH (qui ne surveille que `send`) — le hors-pane piggyback la
+connexion du pane, il ne la contourne pas.
+
+Hors session SSH (local → local, ou hôte connu sans passer par une session
+cockpit), `scripts/wsh-push.sh` (ou `wsh file cp`) reste utilisable
+directement. Détails, fallback chain, méthodes : voir
 `docs/framing-and-transfer.md`.
 
 ## Cleaning up — but not too fast

@@ -79,6 +79,18 @@
 #                              the short remote sourcing form instead of the inline blob.
 #                              Same one-hop-only / best-effort-falls-back-to-inline rules.
 #   local-init  [session]      revert remote-init — back to local helper-file framing
+#   push [session] <local> <remote-path>
+#   pull [session] <remote-path> <local>
+#                              the ONLY official file transfer path once the pane has
+#                              ssh-hopped (never base64/cat through the pane — see
+#                              docs/framing-and-transfer.md). Host is resolved from the
+#                              session's recorded remote-init/--pre host, never re-asked.
+#                              Transport order (announced on stderr): Wave `wsh file cp`
+#                              → the session's OpenSSH ControlMaster socket (reuses the
+#                              pane's own already-authenticated hop, zero new auth) →
+#                              `tailscale ssh` → bare `scp` (last resort, likely a fresh
+#                              auth prompt). Shells out to wsh-push.sh; never counts
+#                              toward the one-shot-SSH nudge (that only tracks `send`).
 #   wait-done [session] [timeout_sec] [seq] [--print]
 #                              block until last `send` footer shows exit (before next send);
 #                              --print also emits the bounded `output` segment on success —
@@ -99,6 +111,13 @@
 #   selftest-output            `output` segment extraction on a throwaway session: short
 #                              complete segment, long segment truncated head+tail, --full,
 #                              explicit seq, wait-done --print, WSH_LIVE_SEP=0 fallback;
+#                              rc 0/1
+#   selftest-transfer          wsh-push.sh error paths (missing local file, unreachable
+#                              host) always run; a push+pull round-trip (text + binary,
+#                              checksum-compared) over loopback ssh plus a missing-remote-
+#                              file case run opportunistically (skipped with a note if this
+#                              Mac doesn't accept passwordless ssh to itself); push/pull's
+#                              own "no remote host recorded" error path on a real session;
 #                              rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
@@ -231,15 +250,19 @@ remote_home_direct() {
 push_and_register_helpers() {  # $1 sess $2 host $3 remote_dir -> 0 ok, 1 failed
   local sess="$1" host="$2" remote_dir="$3"
   [ -f "$PUSH_SCRIPT" ] || { echo "warn: missing $PUSH_SCRIPT — cannot push helpers to '$host'" >&2; return 1; }
-  local local_sep local_step remote_sep remote_step prc1 prc2
+  local local_sep local_step remote_sep remote_step prc1 prc2 cpath
   local_sep=$(sep_ensure_helpers)
   local_step=$(step_ensure_helpers)
   remote_sep="${remote_dir}/$(basename "$local_sep")"
   remote_step="${remote_dir}/$(basename "$local_step")"
+  # --control-path is a no-op when no ControlMaster is alive yet at that
+  # socket (e.g. the pane hasn't hopped there yet, or hopped via tailscale
+  # ssh) — wsh-push.sh's own fallback chain handles that, see try_control_path.
+  cpath=$(control_path_for_session "$sess")
   set +e
-  "$PUSH_SCRIPT" "$local_sep" "$remote_sep" "$host" >/dev/null 2>&1
+  "$PUSH_SCRIPT" --control-path="$cpath" "$local_sep" "$remote_sep" "$host" >/dev/null 2>&1
   prc1=$?
-  "$PUSH_SCRIPT" "$local_step" "$remote_step" "$host" >/dev/null 2>&1
+  "$PUSH_SCRIPT" --control-path="$cpath" "$local_step" "$remote_step" "$host" >/dev/null 2>&1
   prc2=$?
   set -e
   if [ "$prc1" -eq 0 ] && [ "$prc2" -eq 0 ]; then
@@ -261,6 +284,11 @@ push_and_register_helpers() {  # $1 sess $2 host $3 remote_dir -> 0 ok, 1 failed
 # ready with short remote sourcing — no extra remote-init round-trip needed.
 pre_push_helpers() {  # $1 sess $2 host -> 0 staged, 1 skipped/failed
   local sess="$1" host="$2" rhome
+  # Record the host now: the caller already knows the pane is ABOUT to hop
+  # there (that's the whole point of --pre), so push/pull can resolve it
+  # afterwards regardless of whether the best-effort helper pre-stage below
+  # succeeds.
+  remote_host_set "$sess" "$host"
   rhome=$(remote_home_direct "$host") || true
   if [ -z "$rhome" ]; then
     echo "warn: could not resolve \$HOME on '$host' directly (tailscale ssh unavailable/failed) — skipping pre-push; remote-init after the hop still works" >&2
@@ -277,6 +305,30 @@ pre_push_helpers() {  # $1 sess $2 host -> 0 staged, 1 skipped/failed
     return 0
   fi
   return 1
+}
+
+# Shared engine for the `push`/`pull` subcommands: resolves the session's
+# recorded remote host (set by remote-init/--pre — the caller never repeats
+# it) and hands off to wsh-push.sh with that session's ControlPath, so an
+# already-authenticated OpenSSH hop (see SKILL.md's ControlMaster hop command)
+# is reused instead of opening a fresh connection. Does NOT touch `send` or
+# oneshot_ssh_track — these are agent-shell calls, never typed into the pane,
+# so they never count toward (or trigger) the one-shot SSH nudge.
+# $1 direction (push|pull) $2 sess $3 local-path $4 remote-path
+cmd_transfer() {
+  local dir="$1" sess="$2" local_arg="$3" remote_arg="$4" host cpath
+  host=$(remote_host_get "$sess")
+  if [ -z "$host" ]; then
+    echo "$0 $dir: no remote host recorded for session '$sess' — run remote-init/--pre <host> first (if the pane never left this Mac, use plain cp instead)" >&2
+    exit 2
+  fi
+  [ -f "$PUSH_SCRIPT" ] || { echo "$0 $dir: missing $PUSH_SCRIPT" >&2; exit 3; }
+  cpath=$(control_path_for_session "$sess")
+  if [ "$dir" = pull ]; then
+    "$PUSH_SCRIPT" --pull --control-path="$cpath" "$local_arg" "$remote_arg" "$host"
+  else
+    "$PUSH_SCRIPT" --control-path="$cpath" "$local_arg" "$remote_arg" "$host"
+  fi
 }
 
 # Used by `step-run`: internalizes the "announce then run" protocol (SKILL.md
@@ -710,6 +762,10 @@ remote-init)
     fi
   else
     PUSHED=0
+    # Record the host now: the pane HAS hopped there (this is the post-hop
+    # form), regardless of whether the best-effort helper push below
+    # succeeds — push/pull need this to resolve a target without asking again.
+    remote_host_set "$SESS" "$HOST"
     # Resolve the remote $HOME through the pane itself (visibly framed, like
     # every other cockpit command) rather than assume a path shape — the
     # remote path is later embedded in single-quoted contexts inside
@@ -759,6 +815,7 @@ local-init)
   SESS=$(resolve_session "${1:-}"); need_session "$SESS"
   remote_helper_path_clear "$SESS" sep
   remote_helper_path_clear "$SESS" step
+  remote_host_clear "$SESS"
   # Same as remote-init: only claim "remote mode OFF" when the sticky tmux
   # option was actually cleared — under zellij this is a no-op (its own
   # stderr note explains why) and the session was never in remote mode.
@@ -783,6 +840,23 @@ selftest-oneshot-ssh)
   ;;
 selftest-output)
   cmd_selftest_output
+  ;;
+selftest-transfer)
+  cmd_selftest_transfer
+  ;;
+push)
+  have_mux
+  SESS=$(resolve_session "${1:-}"); shift || true; need_session "$SESS"
+  LOCAL="${1:?usage: wsh-live.sh push [session] <local> <remote-path>}"; shift || true
+  REMOTE="${1:?usage: wsh-live.sh push [session] <local> <remote-path>}"; shift || true
+  cmd_transfer push "$SESS" "$LOCAL" "$REMOTE"
+  ;;
+pull)
+  have_mux
+  SESS=$(resolve_session "${1:-}"); shift || true; need_session "$SESS"
+  REMOTE="${1:?usage: wsh-live.sh pull [session] <remote-path> <local>}"; shift || true
+  LOCAL="${1:?usage: wsh-live.sh pull [session] <remote-path> <local>}"; shift || true
+  cmd_transfer pull "$SESS" "$LOCAL" "$REMOTE"
   ;;
 send)
   have_mux
@@ -934,5 +1008,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer} [args]" >&2; exit 2 ;;
 esac
