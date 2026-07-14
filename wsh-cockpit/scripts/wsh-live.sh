@@ -214,7 +214,7 @@ situate_session() {
   out=$("$0" read "$sess" 20)
   printf '%s\n' "$out"
   local remote_host
-  remote_host=$(printf '%s\n' "$out" | tr -d '\r' | grep -o 'WSH_SITUATE_HOST=.*' | tail -n1 | cut -d= -f2-)
+  remote_host=$(printf '%s\n' "$out" | tr -d '\r' | grep -o '^WSH_SITUATE_HOST=.*' | tail -n1 | cut -d= -f2-)
   # Only act on a genuine mismatch, and only if nothing (e.g. `spawn --pre
   # <host>`, run just before this) already primed remote mode for real — a
   # session already in remote mode has either been pre-pushed or already had
@@ -360,7 +360,10 @@ cmd_output() {
   # tmux clamps -S to the actual history available, so a generous ask here is
   # safe and cheap (local capture) — the whole point of `output` is to never
   # guess a line count, including for the scrollback lookback itself.
-  pane=$(mux_capture "$sess" 100000)
+  # Strip ANSI color escapes (as wait-done already does) — the zellij
+  # backend's dump-screen output can include them, which would otherwise
+  # prevent the marker regex below from ever matching.
+  pane=$(mux_capture "$sess" 100000 | sed $'s/\x1b\\[[0-9;]*m//g')
   # `|| true`: awk deliberately exits 1 when the markers aren't found (see
   # END below) — under `set -e` that would abort the whole script right here,
   # before the explicit not-found message below ever gets a chance to print.
@@ -789,14 +792,17 @@ remote-init)
     set -e
     RHOME=""
     if [ "$HRC" -eq 0 ]; then
-      RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o 'WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
+      RHOME=$("$0" read "$SESS" 40 2>&1 | tr -d '\r' | grep -o '^WSH_REMOTE_HOME=.*' | tail -n1 | cut -d= -f2-)
     fi
     if [ -z "$RHOME" ]; then
       echo "warn: could not resolve \$HOME on '$HOST' — falling back to inline-only remote mode" >&2
     else
       REMOTE_DIR="${RHOME}/.cache/wsh-cockpit/helpers"
+      # $RHOME can legally contain a single quote; escape it before embedding
+      # inside the single-quoted `mkdir -p` sent to the remote pane.
+      REMOTE_DIR_Q=${REMOTE_DIR//\'/\'\\\'\'}
       set +e
-      WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR}'" "$SESS" >/dev/null 2>&1
+      WSH_LIVE_SEP_REINIT=1 "$0" send "mkdir -p '${REMOTE_DIR_Q}'" "$SESS" >/dev/null 2>&1
       "$0" wait-done "$SESS" 30 >/dev/null 2>&1
       MKRC=$?
       set -e
