@@ -102,10 +102,11 @@ local_size() { wc -c <"$1" 2>/dev/null | tr -d '[:space:]'; }
 
 try_wsh_cp() {
   command -v wsh >/dev/null 2>&1 || return 1
-  local id local_abs
+  local id local_abs local_dir
   id=$(conn_id "$CONN")
   mkdir -p "$(dirname "$LOCAL")" 2>/dev/null || true
-  local_abs=$(cd "$(dirname "$LOCAL")" 2>/dev/null && pwd)/$(basename "$LOCAL")
+  local_dir=$(cd "$(dirname "$LOCAL")" 2>/dev/null && pwd) || return 1
+  local_abs="${local_dir}/$(basename "$LOCAL")"
   if [ "$PULL" -eq 1 ]; then
     wsh file cp -f "wsh://${CONN}/${REMOTE}" "$local_abs" 2>/dev/null \
       || wsh file cp -f "wsh://${id}/${REMOTE}" "$local_abs" 2>/dev/null
