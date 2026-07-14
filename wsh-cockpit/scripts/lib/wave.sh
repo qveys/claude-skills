@@ -120,8 +120,8 @@ resolve_live_tab_cached() {
   fi
   tab=$(resolve_live_tab) || return 1
   if [ -n "$sess" ]; then
-    mkdir -p "$STATE_DIR"
-    printf '%s\n' "$tab" >"$cache"
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    printf '%s\n' "$tab" >"$cache" 2>/dev/null || true
   fi
   printf '%s\n' "$tab"
 }
@@ -138,8 +138,8 @@ block_id_file() { printf '%s/block-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -
 block_id_store() {
   local sess="$1" id="$2"
   [ -n "$sess" ] && [ -n "$id" ] || return 0
-  mkdir -p "$STATE_DIR"
-  printf '%s\n' "$id" >"$(block_id_file "$sess")"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s\n' "$id" >"$(block_id_file "$sess")" 2>/dev/null || true
 }
 
 # Best-effort close of the block remembered for $sess, called from
