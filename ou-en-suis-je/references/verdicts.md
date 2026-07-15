@@ -4,6 +4,10 @@ Le verdict se décide sur la **sortie de `collect.sh`** (colonnes FIN, TYPE_DERN
 jamais sur l'intuition d'un agent. En cas de doute sur une ligne : `tail -n 120 <fichier> | jq …` pour
 relire la vraie fin — ne jamais lire le fichier entier.
 
+Les lignes commençant par `# AGG|` sont déjà agrégées par `collect.sh` (VIDE, AUTO_SECREVIEW,
+PREWARM) : ne jamais les redécomposer session par session, lire directement leurs compteurs.
+`--raw` désactive ce pré-tri (une ligne par session) si l'on doit déboguer `collect.sh` lui-même.
+
 ## Règle 0 — les dispositions de Quentin priment sur tout
 
 Si `~/.claude/ou-en-suis-je/dispositions.tsv` contient une ligne pour la session
@@ -16,12 +20,30 @@ verdict contredisant une disposition — c'est le feedback explicite de l'utilis
 
 ### VIDE
 - Pas de sujet ET pas de texte assistant, ou fichier < ~30 Ko sans conversation réelle.
+- Depuis `collect.sh` v2 : ces sessions sont **déjà retirées** de la sortie par défaut et
+  remontées en une seule ligne `# AGG|VIDE|total=N|ids=id1,id2,…` ; ne rien rejuger, lire le
+  compteur (et les ids si un `dispose.sh` groupé est utile). `--raw` retrouve le détail
+  session par session.
 
 ### AUTO (agrégée, jamais une ligne de tableau par session)
 - TAG = `AUTO_SECREVIEW` (reviews sécurité CI) ou `SIDECHAIN`.
-- Agréger en une ligne par repo : « N reviews — X conclues, Y interrompues ».
+- Depuis `collect.sh` v2 : les `AUTO_SECREVIEW` sans finding survivant sont **déjà
+  pré-agrégées** par projet en
+  `# AGG|AUTO_SECREVIEW|<projet>|total=N|conclues=X|a_examiner=Y|findings_listes=Z` ; ne pas
+  les rejuger une par une, lire directement les compteurs. `--raw` désactive ce pré-tri pour
+  déboguer `collect.sh` lui-même. `SIDECHAIN`, lui, n'est PAS pré-agrégé par le script (reste
+  en lignes individuelles quand `--include-sidechains` est actif) et continue à s'agréger à la
+  main en une ligne par repo : « N reviews — X conclues, Y interrompues ».
 - **Exception à remonter individuellement** : un finding sécurité qui « survit » (« the finding
-  survives », vulnérabilité confirmée) → à mettre dans la section ⚠️.
+  survives », vulnérabilité confirmée) → `collect.sh` la laisse en ligne individuelle (comptée
+  aussi dans `findings_listes` de l'agrégat de son projet) ; à mettre dans la section ⚠️.
+
+### PREWARM (hors verdicts)
+- Sessions générées par le LaunchAgent de préchauffage (sujet commençant par « Réponds
+  uniquement: ok ») : `collect.sh` ne les liste jamais individuellement, seulement
+  `# AGG|PREWARM|total=N`. Ne pas leur appliquer les règles ci-dessous, ne pas les faire
+  figurer dans le tableau des sessions — elles sont TERMINÉE par construction (aucune action
+  humaine possible dessus).
 
 ### À_REPRENDRE (🔴)
 Au moins un de ces signaux :

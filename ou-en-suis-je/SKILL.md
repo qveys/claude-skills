@@ -41,11 +41,22 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
    scripts/collect.sh --days 7 --exclude <id8>
    ```
    Une ligne par session : `PROJET|ID8|DERNIERE_ACTIVITE|TAILLE|TYPE_DERNIERE_ENTREE|intr=N|TAG|SUJET|…FIN`.
-   Options : `--project SUBSTR` (filtrer un projet), `--exclude ID8` (écarter la session
-   courante : son UUID apparaît dans le chemin du scratchpad de session), `--include-sidechains`.
+   La sortie est **pré-triée** : les reviews CI (`AUTO_SECREVIEW`), les préchauffages
+   (`PREWARM`, LaunchAgent) et les sessions vides (ni sujet ni texte assistant) ne sortent plus
+   en lignes individuelles — elles sont comptées et regroupées en lignes d'agrégat `# AGG|…` en
+   fin de sortie ; seuls les findings sécurité qui « survivent » restent en ligne individuelle
+   (à reporter dans la section ⚠️). Options : `--project SUBSTR` (filtrer un projet), `--exclude
+   ID8` (écarter la session courante : son UUID apparaît dans le chemin du scratchpad de
+   session), `--include-sidechains`, `--raw` (désactive le pré-tri : une ligne par session,
+   aucune ligne `# AGG` — utile pour déboguer `collect.sh` lui-même).
 
-3. **Verdicts.** Lire `references/verdicts.md` et appliquer les règles sur chaque ligne, dans
-   l'ordre (VIDE → AUTO → À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE).
+3. **Verdicts.** Lire `references/verdicts.md` et appliquer les règles sur chaque **ligne de
+   données restante** (celles qui ne commencent pas par `# AGG|`), dans l'ordre (VIDE → AUTO →
+   À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE). Les lignes `# AGG|AUTO_SECREVIEW|…` et
+   `# AGG|VIDE|…` sont déjà pré-agrégées par `collect.sh` : ne pas les rejuger une par une, se
+   recopier telles quelles dans les sections AUTO/vides du rendu avec leurs compteurs
+   (total/conclues/a_examiner/findings_listes ou total/ids) ; `# AGG|PREWARM|…` n'entre dans
+   aucun tableau de sessions.
    - ≤ ~60 lignes HUMAIN : juger soi-même directement.
    - Au-delà : déléguer par lots à **2 scouts maximum en parallèle**, en collant dans leur prompt
      les règles VERBATIM et leurs lignes brutes (jamais les chemins de fichiers seuls) ; consolider
