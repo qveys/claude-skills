@@ -80,8 +80,15 @@ cmd_gc() {
       elif teardown_session "$nm"; then
         killed=$((killed + 1))
         echo "killed: $nm (idle $((now - act))s >= ${IDLE}s)"
+      elif ! mux_has "$nm"; then
+        # teardown_session failed because the session is already gone -- a
+        # concurrent gc/stop (e.g. spawn's background auto-sweep, or another
+        # agent's own gc) won the race. The outcome we wanted still holds, so
+        # it counts as killed rather than vanishing from both tallies.
+        killed=$((killed + 1))
+        echo "killed: $nm (already gone -- raced with a concurrent sweep)"
       else
-        echo "gc: failed to kill '$nm' (already gone?)" >&2
+        echo "gc: failed to kill '$nm' (still present)" >&2
       fi
     else
       kept=$((kept + 1))
