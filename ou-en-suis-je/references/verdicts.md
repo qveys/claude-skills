@@ -4,6 +4,14 @@ Le verdict se décide sur la **sortie de `collect.sh`** (colonnes FIN, TYPE_DERN
 jamais sur l'intuition d'un agent. En cas de doute sur une ligne : `tail -n 120 <fichier> | jq …` pour
 relire la vraie fin — ne jamais lire le fichier entier.
 
+## Règle 0 — les dispositions de Quentin priment sur tout
+
+Si `~/.claude/ou-en-suis-je/dispositions.tsv` contient une ligne pour la session
+(`ID8 <tab> STATUT <tab> date <tab> note`), ce statut l'emporte sur toute déduction :
+`CLOS` = ne jamais lister (déjà filtré par collect.sh) ; `ATTEND`/`REPRENDRE` = verdict
+imposé, la note de Quentin remplace le « reste à faire » déduit. Ne JAMAIS re-déduire un
+verdict contredisant une disposition — c'est le feedback explicite de l'utilisateur.
+
 ## Verdicts (dans cet ordre de test)
 
 ### VIDE

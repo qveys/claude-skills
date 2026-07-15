@@ -101,7 +101,20 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
    ligne par session terminée ; et il veut repartir avec des propositions d'action immédiates,
    pas seulement un état des lieux.
 
-7. **Clôture.** Proposer (sans le faire d'office) de mettre à jour la fiche mémoire
+7. **Feedback (partie intégrante du skill).** Après le rendu, inviter Quentin à statuer sur
+   chaque 🟡/⏸️/❌ (AskUserQuestion ou réponse libre), et enregistrer CHAQUE retour :
+   ```bash
+   scripts/dispose.sh ID8 CLOS|ATTEND|REPRENDRE "note"
+   ```
+   - `CLOS` (fait, caduc, abandonné, traité hors Claude) → filtré dès `collect.sh`, ne
+     réapparaîtra plus jamais dans un récap.
+   - `ATTEND` / `REPRENDRE` → la session reste listée, avec la note de Quentin en contexte.
+   Avant de juger (étape 3), lire `~/.claude/ou-en-suis-je/dispositions.tsv` s'il existe :
+   les dispositions priment sur les règles de verdict (les notes ATTEND/REPRENDRE remplacent
+   le « reste à faire » déduit). C'est cette boucle qui empêche le récap de se tromper deux
+   fois sur la même session.
+
+8. **Clôture.** Proposer (sans le faire d'office) de mettre à jour la fiche mémoire
    `tableau-de-bord-chantiers` avec les 🔴/🟡. Si Quentin veut aussi l'angle coûts/tokens,
    proposer le plugin `session-report` (rapport HTML d'usage) — ne pas le lancer d'office.
 

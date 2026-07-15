@@ -44,6 +44,11 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
   fi
   id=$(basename "$f" .jsonl | cut -c1-8)
   if [ -n "$EXCLUDE" ] && [ "$id" = "$EXCLUDE" ]; then continue; fi
+  # dispositions de Quentin (scripts/dispose.sh) : une session CLOSE ne remonte plus jamais
+  DISP="$HOME/.claude/ou-en-suis-je/dispositions.tsv"
+  if [ -f "$DISP" ] && awk -F'\t' -v i="$id" '$1==i && $2=="CLOS"{f=1} END{exit !f}' "$DISP"; then
+    continue
+  fi
   tag=""
 
   if head -c 4000 "$f" | grep -Eq '"isSidechain":[[:space:]]*true'; then
