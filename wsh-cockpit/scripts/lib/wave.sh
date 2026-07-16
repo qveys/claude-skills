@@ -92,6 +92,71 @@ resolve_live_tab() {
   return 1
 }
 
+# Per-session cache of a resolved live tab id: normalized slug of the session
+# name, same convention as session.sh's seq_file/pane_file. The session→tab
+# mapping is stable for the life of a cockpit session, so repeated `open`
+# calls don't need to re-run resolve_live_tab's 5-6 sqlite3 round-trips.
+tab_cache_file() { printf '%s/tab-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# Cached wrapper around resolve_live_tab(), keyed by cockpit session name
+# ($1). A cache hit still costs one read-only sqlite3 query to confirm the
+# cached tab still exists in Wave's DB (it can vanish if the tab was closed);
+# a stale entry is dropped and resolve_live_tab runs its full strategy.
+# Call with no session name (or an empty one) to behave exactly like the
+# uncached resolve_live_tab — used by `doctor`, which must never write state.
+resolve_live_tab_cached() {
+  local sess="$1" cache tab ro
+  if [ -n "$sess" ]; then
+    cache=$(tab_cache_file "$sess")
+    if [ -f "$cache" ]; then
+      tab=$(tr -d '[:space:]' <"$cache" 2>/dev/null || true)
+      if [ -n "$tab" ] && ro=$(wave_db_ro) && [ "$(sqlite3 "$ro" \
+            "SELECT count(*) FROM db_tab WHERE oid='${tab//\'/}';" 2>/dev/null)" = "1" ]; then
+        printf '%s\n' "$tab"
+        return 0
+      fi
+      rm -f "$cache" 2>/dev/null || true
+    fi
+  fi
+  tab=$(resolve_live_tab) || return 1
+  if [ -n "$sess" ]; then
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    printf '%s\n' "$tab" >"$cache" 2>/dev/null || true
+  fi
+  printf '%s\n' "$tab"
+}
+
+# Drop a session's cached tab — called from teardown_session (stop/gc) so a
+# closed cockpit never hands a future `open` a stale/recycled tab id.
+tab_cache_invalidate() { rm -f "$(tab_cache_file "$1")" 2>/dev/null || true; }
+
+# Per-session state of the Wave block-id `open` last created, same slug
+# convention as tab_cache_file. Lets teardown_session close the block itself
+# instead of leaving it to a manual `wsh deleteblock` the agent can forget.
+block_id_file() { printf '%s/block-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+block_id_store() {
+  local sess="$1" id="$2"
+  [ -n "$sess" ] && [ -n "$id" ] || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s\n' "$id" >"$(block_id_file "$sess")" 2>/dev/null || true
+}
+
+# Best-effort close of the block remembered for $sess, called from
+# teardown_session. Never fails the caller: no state file, no `wsh`, or a
+# block that already auto-closed ("not found") are all silently fine — only
+# the specific id `open` recorded is ever targeted, never a pane scan.
+block_id_close() {
+  local sess="$1" bf id
+  bf=$(block_id_file "$sess")
+  [ -f "$bf" ] || return 0
+  id=$(tr -d '[:space:]' <"$bf" 2>/dev/null || true)
+  rm -f "$bf" 2>/dev/null || true
+  [ -n "$id" ] || return 0
+  command -v wsh >/dev/null 2>&1 || return 0
+  wsh deleteblock -b "$id" >/dev/null 2>&1 || true
+}
+
 # Print "NAME|COUNT" for a tab oid: its display name (e.g. "T2") and the TOTAL
 # number of tabs in Wave. Used so `open` can tell the human EXACTLY which tab to
 # click — critical because Wave does NOT persist the active-tab switch to the
