@@ -42,6 +42,14 @@ Comportement :
    crée la session tmux et ouvre le bloc Wave — et collecte du nom de session retourné.
    Les flags propres au wrapper (`--keep`, `--tab`) sont extraits ; tout le reste est
    relayé tel quel à `spawn` (pass-through futur-proof).
+   **Isolation de clé obligatoire** : chaque spawn du wrapper tourne sous
+   `WSH_COCKPIT_AGENT=user-preopen-<n>` (n = index du groupe), **portée limitée à
+   l'appel de spawn — jamais exportée vers claude**. Sans cela, le wrapper écrirait
+   `last-session-default`, et le premier `spawn` de l'agent principal (clé `default`
+   elle aussi) trouverait la session par la voie 1 — court-circuitant claim ET sonde
+   systématique. Effet secondaire assumé : relancer `claude-cockpit` réutilise un
+   cockpit encore vivant d'un run précédent au même index (`--force` en pass-through
+   pour s'en défaire).
 2. `export WSH_COCKPIT_ADOPT=sess1[,sess2...]` puis `exec claude [args après --]`.
 3. **Un spawn échoue → claude n'est pas lancé.** Message d'erreur clair ; les cockpits
    déjà ouverts restent visibles pour diagnostic (pas de rollback automatique).
@@ -52,9 +60,16 @@ Comportement :
 sinon un agent qui re-spawne alors que sa `last-session` est déjà une session adoptée
 en adopterait une deuxième) :
 
-1. **Réutilisation existante** : la `last-session-<key>` de l'agent, si vivante —
-   comportement actuel inchangé (couvre le re-spawn après une adoption : `remember_session`
-   aura enregistré la session adoptée).
+1. **Réutilisation existante, rendue sensible au préfixe** : la `last-session-<key>`
+   de l'agent, si vivante ET compatible avec le préfixe demandé — c'est-à-dire si
+   aucun préfixe n'est demandé, ou si son nom matche
+   `^cockpit-<prefix>-[0-9]{6}(-[0-9]+)?$`. **Changement de comportement vérifié le
+   2026-07-27 et voulu** : aujourd'hui `last_session()` (session.sh:76-89) retourne la
+   session mémorisée sans regarder le préfixe — `spawn audit-nas` puis `spawn local`
+   rend deux fois la première session, ce qui rendrait le multi-cockpit inutilisable
+   par un même agent. En cas d'incompatibilité de préfixe → voies 2/3. La voie 1
+   couvre le re-spawn après adoption (`remember_session` aura enregistré la session
+   adoptée).
 2. **Adoption** : sessions de `WSH_COCKPIT_ADOPT` vivantes et non réclamées.
 3. **Logique actuelle** : scan `cockpit-<prefix>-*` puis création.
 
@@ -119,7 +134,9 @@ Aucun marqueur ne doit survivre à sa session — même après un crash de claud
 - `gc` gagne une passe d'hygiène : tout marqueur `adopt-claim-*` ou `keep-*` dont la
   session tmux correspondante est morte est supprimé (la session keep elle-même n'est
   jamais tuée par `gc` tant qu'elle vit — seul son marqueur orphelin est balayé après
-  fermeture manuelle par l'utilisateur).
+  fermeture manuelle par l'utilisateur). Correspondance marqueur↔session : slugifier
+  les noms des sessions vivantes (même fonction de slug que l'écriture) et supprimer
+  tout marqueur dont le slug n'apparaît pas — jamais de dé-slugification.
 - Un claim dont l'agent a disparu (claude crashé) est couvert par ces deux voies : la
   session finit soit `stop`-ée par un autre agent, soit balayée par `gc` (idle 24 h),
   et le claim part avec elle.
@@ -163,8 +180,10 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 | Toutes les sessions déjà réclamées | Fallback logique normale |
 | Session listée = tmux hébergeant claude | Refus d'adoption, warning, fallback |
 | `--tab` introuvable | Warning + fallback onglet courant |
-| Plusieurs onglets portant le nom `--tab` | Premier match + warning listant les candidats |
+| Plusieurs onglets portant le nom `--tab` | Premier match + warning listant les candidats (le nom peut résoudre vers une autre fenêtre Wave — assumé, la requête unionne tous les workspaces) |
 | Claim perdu (course entre deux agents) | Passage atomique à la candidate suivante |
+| `last-session` vivante mais préfixe incompatible | Voies 2/3 (nouveau comportement, cf. §2 voie 1) |
+| Session `--keep` relâchée (`release_session`) puis re-demandée | Ré-adoptable via voie 2 (claim libéré), y compris par l'agent qui l'a relâchée |
 | Échec d'un `spawn` dans le wrapper | claude non lancé, erreur claire, pas de rollback |
 
 ## 6. Docs et tests
@@ -177,7 +196,9 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
   atomique, hygiène des marqueurs par `gc`).
 - Nouveau `selftest-adopt` dans la lignée des selftests existants : adoption simple,
   claim multi-agents (course atomique), `--keep` vs défaut, session morte, fallback
-  `--tab`, **sonde systématique effectivement exécutée à l'adoption**.
+  `--tab`, **sonde systématique effectivement exécutée à l'adoption**, **voie 1
+  sensible au préfixe** (deux `spawn` de préfixes différents → deux sessions ; même
+  préfixe → réutilisation).
 - **`selftest-wrapper`** : le wrapper lui-même — parsing des groupes `--and`,
   extraction `--keep`/`--tab` vs pass-through, contenu de `WSH_COCKPIT_ADOPT`, abort
   sans lancement de claude si un spawn échoue (claude mocké par un stub dans le PATH).
