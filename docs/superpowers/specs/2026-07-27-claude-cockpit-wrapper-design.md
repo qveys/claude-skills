@@ -21,6 +21,7 @@ Code adopte alors ce(s) cockpit(s) pré-ouvert(s) au lieu d'en spawner de nouvea
 | Autorité de résolution | **Le registre des claims** (sessions créées ET adoptées, claim posé à la création) ; `last-session` = simple mémo « dernière utilisée », jamais l'autorité |
 | Situation du shell | **Sonde `hostname; pwd; whoami` systématique et non optionnelle à l'adoption** (comportement `--situate` appliqué d'office) |
 | Cycle de vie côté wrapper | **`--force` systématique** : chaque run crée des cockpits neufs, jamais de réutilisation inter-runs (dissout claims orphelins post-crash et collisions entre deux claude parallèles) |
+| Clé agent | Le wrapper exporte `WSH_COCKPIT_AGENT=claude-<runid>` vers claude → registre par run (crash isolé, claudes parallèles disjoints) ; claude lancé sans wrapper = clé `default` héritée, garanties réduites (§5) |
 
 ## 1. Le wrapper `claude-cockpit`
 
@@ -70,7 +71,16 @@ Comportement :
    Limite de parsing assumée : une valeur d'option contenant littéralement `--and`
    ou `--` casserait le découpage des groupes — le parseur refuse ces valeurs avec
    une erreur claire.
-2. `export WSH_COCKPIT_ADOPT=sess1[,sess2...]` puis `exec claude [args après --]`.
+2. `export WSH_COCKPIT_ADOPT=sess1[,sess2...]` **et
+   `export WSH_COCKPIT_AGENT=claude-<runid>`** (runid = horodatage+pid du wrapper),
+   puis `exec claude [args après --]`. La clé de run unique donne à l'agent
+   principal (et aux sous-agents qui n'exportent pas la leur) un **registre par
+   run** : les claims d'un claude crashé restent sous la clé du run mort — jamais
+   revus à l'étape 1 — et deux claude parallèles ont des registres disjoints. Le
+   wrapper **neutralise aussi `WSH_COCKPIT_PREFIX`** (unset, pour ses spawns comme
+   dans l'environnement transmis) : `normalize_prefix` la consulte AVANT
+   `WSH_COCKPIT_AGENT` (session.sh:47-49) et un préfixe ambiant de l'utilisateur
+   fausserait les préfixes enregistrés.
 3. **Un spawn échoue → claude n'est pas lancé.** Message d'erreur clair ; les cockpits
    déjà ouverts restent visibles pour diagnostic (pas de rollback automatique).
 
@@ -89,16 +99,20 @@ créée par `spawn`/`start` reçoit un claim de son créateur** (le wrapper pose
 1. **Mes sessions (registre)** : parmi les sessions vivantes dont le claim porte ma
    clé — préfixe demandé → celle dont le préfixe enregistré (`prefix-<slug>`) est
    égal ; aucun préfixe demandé → la `last-session` si elle appartient au registre,
-   sinon l'unique session du registre s'il n'y en a qu'une. Couvre l'alternance
+   sinon l'unique session du registre s'il n'y en a qu'une — **N>1 sans préfixe ni
+   `last-session` au registre → erreur explicite** demandant un préfixe (jamais de
+   (N+1)-ième cockpit silencieux). Couvre l'alternance
    multi-cockpit sans misroute : `spawn audit-nas` → `spawn local` →
    `spawn audit-nas` retrouve chaque fois la bonne session.
 2. **Adoption** : parmi les sessions de `WSH_COCKPIT_ADOPT` vivantes portant un
    pré-claim (clé `user-preopen-*` du wrapper, ou `released` après un
    `release_session`) — ciblée (préfixe enregistré égal au demandé), sinon nominale
-   (première libre de la liste). **Adopter = transfert atomique du
-   pré-claim** : écriture du nouveau claim dans un fichier temporaire puis `mv`
-   (rename(2), atomique sur le même FS) par-dessus le pré-claim ; le perdant d'une
-   course relit le claim, voit une clé étrangère, passe à la candidate suivante.
+   (première libre de la liste). **Adopter = consommation atomique du pré-claim par
+   rename de la SOURCE** : `mv adopt-claim-<slug> adopt-claim-<slug>.won-<pid>` —
+   la source disparaît, un seul rename réussit ; le gagnant écrit alors son claim
+   définitif (O_EXCL) et supprime le `.won-<pid>`, le perdant (ENOENT) passe à la
+   candidate suivante. (Un `mv` PAR-DESSUS le pré-claim serait du last-writer-wins :
+   deux adoptants pourraient chacun relire leur propre clé et « gagner ».)
    Une candidate libre **prime** sur toute `last-session` résiduelle hors registre
    (session d'un run précédent encore vivante) — le cockpit que l'utilisateur vient
    de pré-ouvrir gagne toujours contre l'état résiduel.
@@ -107,16 +121,23 @@ créée par `spawn`/`start` reçoit un claim de son créateur** (le wrapper pose
    autre claude pourrait saisir un cockpit pré-ouvert pendant la fenêtre
    pré-adoption ; et deux agents entrelacés dans un même pane partagent un seul
    compteur `seq`) ; extension naturelle de la `session_safe_to_reuse` réintroduite
-   au lot 1. La création pose le claim du créateur.
+   au lot 1. La création pose le claim du créateur — et la **réutilisation d'une
+   session legacy non claimée trouvée au scan pose ce claim aussi** : toute session
+   utilisée entre au registre, le parc antérieur cesse d'être partageable dès sa
+   première réutilisation.
 
 Précisions sur l'étape 1 :
    **« Aucun préfixe demandé »** = argument positionnel absent **avant**
-   `normalize_prefix` (qui, lui, retombe sur `WSH_COCKPIT_AGENT`/`WSH_COCKPIT_PREFIX`
-   puis `live` et ne produit jamais de vide, session.sh:53). Un groupe wrapper sans
+   `normalize_prefix` — qui, lui, retombe sur `WSH_COCKPIT_PREFIX` **puis**
+   `WSH_COCKPIT_AGENT` puis `live` et ne produit jamais de vide (session.sh:47-53 ;
+   d'où la neutralisation de `WSH_COCKPIT_PREFIX` par le wrapper, §1). Un groupe
+   wrapper sans
    préfixe produit donc un préfixe enregistré `user-preopen-<n>`, atteignable
    uniquement en adoption nominale.
-   **Préfixe enregistré, pas parsé** : `spawn` ET `start` écrivent le préfixe
-   normalisé dans `~/.cache/wsh-cockpit/prefix-<slug>` à la création ; le test de
+   **Préfixe enregistré, pas parsé** : `spawn` écrit le préfixe normalisé dans
+   `~/.cache/wsh-cockpit/prefix-<slug>` à la création ; `start` (qui reçoit un nom
+   complet, pas un préfixe) écrit la sentinelle `(named)`, jamais matchable — ses
+   sessions ne sont atteignables que par nom explicite ou scan. Le test de
    compatibilité lit ce fichier. Le parsing de nom
    (`^cockpit-(.+)-[0-9]{6}(-[0-9]+)?$`) ne sert que de fallback pour les sessions
    antérieures à ce chantier — il est ambigu par construction (un préfixe finissant
@@ -135,8 +156,13 @@ Règles d'adoption :
   pid (debug uniquement). Le test de propriété = égalité de la clé — avec des clés
   `default` partagées, la propriété est partagée aussi (même caveat que ci-dessous).
   **Écritures atomiques uniquement** : création d'un claim neuf (étape 3, pré-claim
-  wrapper) en `set -o noclobber` (O_EXCL) ; transfert à l'adoption (étape 2) par
-  fichier temporaire + `mv` — jamais de test-puis-écriture. Triple rôle : registre
+  wrapper) en `set -o noclobber` (O_EXCL) ; consommation à l'adoption par rename de
+  la source (étape 2) ; rétrogradation `released` par le seul propriétaire
+  (mono-écrivain, temp + `mv`) — jamais de test-puis-écriture. **Collision de nom
+  recyclé** (les `HHMMSS` se répètent d'un jour à l'autre, l'hygiène est
+  asynchrone) : O_EXCL qui échoue à la création sur un claim orphelin dont la
+  session est morte → remplacement par rename ; session homonyme vivante →
+  `unique_session_name` suffixe déjà (`-n`). Triple rôle : registre
   de résolution (étape 1), verrou anti-double-adoption (étapes 2 et 3), preuve de
   propriété (`release_session`, exclusion au scan).
 - **La variable étant héritée par tous les shells de la session claude, les sous-agents
@@ -148,23 +174,26 @@ Règles d'adoption :
   préexistant du skill que l'adoption n'aggrave ni ne corrige. Le SKILL.md devra
   durcir la recommandation : tout sous-agent qui spawne un cockpit **doit** exporter
   un `WSH_COCKPIT_AGENT` distinct.
+- **Espace de clés réservé** : `spawn`/`start` refusent avec une erreur claire une
+  `WSH_COCKPIT_AGENT` commençant par `user-preopen-` ou valant `released` — sinon un
+  agent mal configuré rendrait ses sessions adoptables par n'importe qui à
+  l'étape 2.
 - Session morte dans la liste → warning stderr **au premier constat seulement** +
-  fallback sur la suite de l'ordre de résolution. Mémo par agent :
-  `~/.cache/wsh-cockpit/adopt-warned-<key>`, contenu = noms de sessions déjà
-  signalées (une par ligne). **Hygiène par âge (mtime > 24 h), PAS par le critère
-  slug** : le fichier est keyé par clé agent, pas par session — le balayage par slug
-  le supprimerait à chaque `gc` (qui tourne en arrière-plan à chaque spawn,
-  wsh-live.sh:417) et le warning « unique » se répéterait à l'infini.
+  fallback sur la suite de l'ordre de résolution. Mémo : un fichier par couple
+  `~/.cache/wsh-cockpit/adopt-warned-<key>-<slug>` (un mémo unique par clé aurait
+  son mtime rafraîchi à chaque ajout — jamais purgé). Hygiène : slug mort ET âge
+  > 24 h ; edge assumé : un nom recyclé après >24 h re-warne — bénin.
 - **`--force` = création directe** : saute les étapes 1 et 2 ET le scan de l'étape 3
   — cockpit neuf garanti, jamais celui de l'utilisateur. (C'est déjà la sémantique
   actuelle : `--force` court-circuite `find_reusable_session` en entier — mémo ET
   scan — et crée directement, wsh-live.sh:432-454 ; la spec étend ce contournement à
   l'adoption.) Les claims existants de l'agent restent en place : les sessions déjà
   possédées restent au registre pour les spawns suivants — pas de claim orphelin.
-- **Un sous-agent qui adopte doit relâcher** : la règle de cleanup du skill s'étend —
-  en fin de tâche, un sous-agent `stop`/`release_session` ce qu'il a créé **ou
-  adopté** ; sinon son claim ne se libère jamais et le cockpit pré-ouvert est consommé
-  définitivement. Consigne SKILL.md + selftest.
+- **Un sous-agent qui adopte doit relâcher** : en fin de tâche, `stop` ce qu'il a
+  **créé** (destruction — pleine propriété) et `release` ce qu'il a **adopté**
+  (préservation de la fenêtre de l'utilisateur) ; sinon son claim ne se libère
+  jamais et le cockpit pré-ouvert est consommé définitivement. Consigne SKILL.md +
+  selftest.
 - **Sonde auto-portante** : la sonde systématique d'adoption utilise le framing
   auto-porté (`WSH_LIVE_SEP_REINIT=1`, même mécanique que le probe de `remote-init`,
   wsh-live.sh:789). Scénario visé : une session `--keep` relâchée puis ré-adoptée
@@ -172,6 +201,12 @@ Règles d'adoption :
   entre-temps — elle n'a pas le flag sticky remote-mode, et une sonde en framing
   normal y vomirait des erreurs de helpers dans la fenêtre de l'utilisateur. (Le
   scénario inter-runs n'existe plus : `--force` systématique du wrapper, §1.)
+- **Garde busy-pane + rollback** : avant la sonde, `mux_pane_command` (mux.sh:93)
+  doit rapporter un shell nu — même critère que la garde du lot 1 ; sinon (vim,
+  less, commande en cours de frappe dans un pane keep) l'adoption de cette candidate
+  est abandonnée : le claim gagné est re-rétrogradé en pré-claim et on passe à la
+  suivante. Idem si la sonde échoue après la consommation du pré-claim — jamais de
+  claim conservé sans sonde réussie.
 - Garde-fou : ne jamais adopter la session tmux qui héberge claude lui-même.
   **Constat re-vérifié le 2026-07-27 (deux revues indépendantes) : RÉGRESSION.** La
   garde `own_tmux_session` / `session_safe_to_reuse` a été mergée sur `main`
@@ -180,10 +215,12 @@ Règles d'adoption :
   session.sh** — son message n'en dit rien — en laissant un appel résiduel dans
   wsh-live.sh (`|| own=""`), nettoyé ensuite par `e7d09a6` ; `gc.sh:25` la cite
   encore en commentaire ; `mux_pane_command` (mux.sh:93) a survécu. **Prérequis de ce
-  chantier (lot 1)** : la réintroduire par réimplémentation sur la base actuelle (le
-  cherry-pick de `a920197` ne s'applique plus proprement), appliquée à l'adoption ET
-  à `find_reusable_session`, avec un message de commit nommant la régression
-  (`9863c07`) et le nettoyage résiduel (`e7d09a6`).
+  chantier (lot 1)** : la réintroduire — le hunk session.sh de `a920197` se
+  cherry-pickerait en fait proprement (`git apply --check` OK, précisément parce que
+  `9863c07` a restauré l'état antérieur de `find_reusable_session`), mais les hunks
+  SKILL.md/mux.sh échouent : réimplémentation ciblée plutôt que cherry-pick aveugle
+  — appliquée à l'adoption ET à `find_reusable_session`, avec un message de commit
+  nommant la régression (`9863c07`) et le nettoyage résiduel (`e7d09a6`).
 - À l'adoption : **sonde de situation systématique** (`hostname; pwd; whoami` +
   `remote-init` auto best-effort si hôte distant détecté — le comportement `--situate`
   est appliqué même sans le flag). Une session pré-ouverte est d'état inconnu pour
@@ -198,13 +235,15 @@ Règles d'adoption :
   pré-ouverte disparaît immédiatement au `stop`, sans linger — contrairement au bloc
   `rexec` et ses 60 s.
 - **`--keep`** : le wrapper pose `~/.cache/wsh-cockpit/keep-<slug>` ; `stop` passe par
-  un **nouveau chemin de nettoyage partiel `release_session()`** (session.sh, à côté de
-  `teardown_session()`) : supprime `last-session-<key>` (si elle pointe cette session)
-  et **rétrograde le claim en pré-claim** (réécriture atomique par `mv` avec la clé
-  réservée `released` ; l'étape 2 accepte les claims de clé `user-preopen-*` ou
-  `released`) — la session redevient adoptable par un autre agent de la même session
-  claude (`WSH_COCKPIT_ADOPT` est toujours dans l'environnement), **via l'étape 2
-  uniquement** — donc avec sonde systématique, jamais par le scan — mais ne
+  une **nouvelle sous-commande `release [session]`** (le chemin `stop`-sur-keep
+  l'appelle ; les sous-agents l'invoquent directement) : supprime `last-session-<key>`
+  (si elle pointe cette session) et, pour une session issue de `WSH_COCKPIT_ADOPT`,
+  **rétrograde le claim en pré-claim** (clé réservée `released`, réécriture
+  mono-écrivain temp+`mv` ; l'étape 2 accepte `user-preopen-*` et `released`) — elle
+  redevient adoptable par un autre agent de la même session claude, **via l'étape 2
+  uniquement** (donc avec sonde), jamais par le scan. Pour une session **créée**
+  (hors `WSH_COCKPIT_ADOPT`), `release` supprime le claim : retour au pool
+  scannable (étape 3). Dans les deux cas, `release` ne
   touche ni le tmux, ni le bloc Wave, ni `keep-<slug>`, **ni `seq-<slug>` /
   `oneshot-ssh-<slug>`** : ces fichiers sont *par session* (pas « de l'agent ») et le
   compteur de framing doit rester continu — le remettre à zéro ferait matcher au
@@ -227,7 +266,8 @@ Aucun marqueur ne doit survivre à sa session — même après un crash de claud
   tout marqueur dont le slug n'apparaît pas — jamais de dé-slugification. La même
   passe balaie les `last-session-user-preopen-*` du wrapper pointant une session
   morte (inoffensifs — `last_session()` vérifie la vivacité — mais autant les tenir
-  propres), ainsi que les `tab-`, `block-`, `cm-` et `prefix-` de sessions mortes —
+  propres), ainsi que les `seq-`, `oneshot-ssh-`, `pane-` (zellij), `tab-`,
+  `block-`, `cm-` et `prefix-` de sessions mortes —
   aujourd'hui nettoyés uniquement par `teardown_session`, donc jamais pour une
   session keep fermée à la main par l'utilisateur. **Pas de `rm` sec pour `block-`
   et `cm-`** : avant suppression, tenter respectivement `block_id_close` (fermer un
@@ -235,7 +275,11 @@ Aucun marqueur ne doit survivre à sa session — même après un crash de claud
   `mux_kill` échoue, session.sh:267-268) et `ssh -O exit` (best-effort). Le cas
   `adopt-warned-<key>` est à part : hygiène par âge, cf. §2. **Placement** : la
   passe s'exécute AVANT les early-returns de `cmd_gc` (backend zellij, aucun serveur
-  tmux — gc.sh:58-67), sinon elle ne tournerait jamais dans ces deux cas.
+  tmux — gc.sh:58-67), sinon elle ne tournerait jamais dans ces deux cas. **Seuil
+  d'âge anti-course** : la passe ignore tout marqueur de moins de 5 min — `gc` part
+  en arrière-plan à chaque spawn (wsh-live.sh:417), y compris pendant la rafale
+  `--and` du wrapper, et un claim/`prefix-`/`keep-` tout frais peut précéder la
+  visibilité de sa session.
 - Un claim dont l'agent a disparu (claude crashé) : la session reste vivante tant que
   son bloc Wave est attaché (`gc` ne tue jamais une session attachée, gc.sh:26) — le
   claim orphelin est **inoffensif** (le run suivant du wrapper n'offre que des
@@ -250,8 +294,9 @@ nom** via la DB SQLite Wave déjà lue en lecture seule par `resolve_live_tab_ca
 **Faisabilité vérifiée le 2026-07-27** — avec un piège découvert par la revue
 indépendante : la DB vivante est celle que **`wsh wavepath data` désigne**
 (aujourd'hui `~/.local/share/waveterm/db/waveterm.db`) ;
-`~/Library/Application Support/waveterm/` héberge un snapshot périmé qui a faussé une
-première vérification. **Le chemin est donc résolu dynamiquement via
+`~/Library/Application Support/waveterm/` héberge une DB au contenu divergent —
+encore écrite récemment : la caractérisation « snapshot périmé » n'est PAS prouvée —
+qui a faussé une première vérification. **Le chemin est donc résolu dynamiquement via
 `wsh wavepath data` — jamais codé en dur.** Requête re-validée sur la DB vivante
 (accès `?mode=ro`) :
 
@@ -260,19 +305,26 @@ première vérification. **Le chemin est donc résolu dynamiquement via
 -- (la validation actuelle de wave.sh:113 ne teste que l'existence dans db_tab —
 --  insuffisant pour une résolution par nom.)
 WITH workspace_tabs AS (
-  SELECT DISTINCT json_each.value AS tabid
+  SELECT json_each.value AS tabid
   FROM db_workspace, json_each(db_workspace.data, '$.tabids')
+  UNION
+  SELECT json_each.value
+  FROM db_workspace, json_each(db_workspace.data, '$.pinnedtabids')
 )
 SELECT oid FROM db_tab
 WHERE json_extract(data, '$.name') = :nom
   AND oid IN (SELECT tabid FROM workspace_tabs);
 ```
 
-`$.pinnedtabids` **n'existe pas** dans `db_workspace` (vérifié sur la DB vivante) —
-pas d'union à faire. `wsh` CLI n'offre pas de listing nom→tab id (`wsh blocks list`
+`$.pinnedtabids` est absent des blobs actuels, mais **absence de clé ≠ absence du
+champ** (pattern Go `omitempty` — Wave a une fonction « Pin tab » ; un onglet épinglé
+sortirait vraisemblablement de `$.tabids`) : d'où l'union défensive ci-dessus — sans
+elle, épingler un onglet le ferait passer pour mort. `wsh` CLI n'offre pas de listing nom→tab id (`wsh blocks list`
 ne montre que les ids) ; la DB est donc la seule voie. **Périmètre v1 : la fenêtre
-Wave courante uniquement** — `open` exporte `WAVETERM_TABID` avec le workspace
-courant (wsh-live.sh:696), un onglet d'une autre fenêtre ferait échouer `wsh run`.
+Wave courante uniquement** — `open` n'exporte que `WAVETERM_TABID` (le tab résolu, wsh-live.sh:696) ; le
+comportement de `wsh run` vers un onglet d'une autre fenêtre n'a **pas été testé** :
+le périmètre est un choix prudent, à valider par un test dédié si l'inter-fenêtres
+devient un besoin.
 Conséquences d'implémentation : (a) la CTE ci-dessus doit être **jointe au workspace
 courant** (résolu via `WAVETERM_WORKSPACEID` / le workspace du tab courant), pas
 agrégée sur tous les workspaces ; (b) hors de Wave (`WAVETERM_WORKSPACEID` absent),
@@ -291,7 +343,8 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 
 | Situation | Comportement |
 |---|---|
-| `WSH_COCKPIT_ADOPT` absent/vide | Comportement actuel strictement inchangé |
+| `WSH_COCKPIT_ADOPT` absent/vide | Pas d'étape 2 ; le registre, l'exclusion des claims au scan et la garde (lot 1) s'appliquent à TOUS — la réutilisation change aussi hors wrapper (amendements docs, §6) |
+| claude lancé SANS le wrapper (clé `default` héritée) | Garanties réduites, documentées : registres partagés entre runs `default` — la sonde systématique d'adoption reste le filet |
 | Session listée morte | Warning stderr au premier constat (mémorisé, pas répété), fallback logique normale |
 | Toutes les sessions déjà réclamées | Étape 3 (scan excluant toute session claimée, puis création) |
 | Session listée = tmux hébergeant claude | Refus d'adoption, warning, fallback |
@@ -330,14 +383,21 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
   **continuité du compteur `seq` après `release_session` + ré-adoption** (aucun match
   de footer périmé, ré-acquisition via l'étape 2 avec sonde), **`--force` saute
   l'adoption sans orpheliner les claims**, **release par un sous-agent** (claim
-  rétrogradé `released` en fin de tâche).
+  rétrogradé `released` en fin de tâche), **exclusion mutuelle de la consommation
+  prouvée sous rafale** (N adoptants simultanés → exactement un gagnant, vérifié par
+  comptage — pas par absence de symptôme), **hygiène gc** (seuil d'âge : aucun
+  marqueur frais mangé ; orphelins balayés), **`gc` épargne une session keep**
+  (`gc_should_kill` modifié, lot 2).
 - **`selftest-wrapper`** : le wrapper lui-même — parsing des groupes `--and`,
   extraction `--keep` vs pass-through (dont `--tab`), contenu de `WSH_COCKPIT_ADOPT`,
   abort sans lancement de claude si un spawn échoue (claude mocké par un stub dans le
   PATH).
-- `SKILL.md` (rappel du §2) : durcir la consigne `WSH_COCKPIT_AGENT` — tout sous-agent
-  qui spawne un cockpit doit exporter une clé distincte — et ajouter la règle « un
-  sous-agent relâche en fin de tâche ce qu'il a créé ou adopté ».
+- `SKILL.md` (rappel du §2) : durcir la consigne `WSH_COCKPIT_AGENT` (clé distincte
+  par sous-agent, espace réservé interdit) ; règle « `stop` ce qu'on a créé,
+  `release` ce qu'on a adopté, en fin de tâche » ; et consigne d'adoption ciblée :
+  quand l'utilisateur a nommé ses cockpits, reprendre ces préfixes dans `spawn` —
+  l'adoption nominale peut sinon mettre le travail NAS dans le cockpit « local »
+  (la sonde l'affiche, mais autant viser juste).
 
 ## 7. Découpage de l'implémentation
 
@@ -349,5 +409,7 @@ prérequis autonome :
    réimplémentation sur la base actuelle (`mux_pane_command` a survécu, mux.sh:93),
    appliquée à `find_reusable_session`, selftest dédié, message de commit nommant la
    régression. Rien d'autre ne bouge.
-2. **Lot 2 — le reste** : `release_session()`, adoption dans `spawn`, wrapper,
-   `open --tab`, hygiène `gc`, docs, `selftest-adopt` + `selftest-wrapper`.
+2. **Lot 2 — le reste** : registre/claims dans `spawn`+`start`, sous-commande
+   `release`, wrapper, `open --tab`, modification de `gc_should_kill` (sessions
+   keep) + passe d'hygiène (seuil d'âge), docs, `selftest-adopt` +
+   `selftest-wrapper`.
