@@ -48,24 +48,37 @@ Comportement :
 
 ## 2. Adoption côté skill (`spawn`)
 
-`spawn [prefix]` consulte `WSH_COCKPIT_ADOPT` **en priorité**, avant sa logique
-actuelle (`find_reusable_session`) :
+**Ordre de résolution de `spawn [prefix]`** (l'adoption s'insère en 2, pas en tête —
+sinon un agent qui re-spawne alors que sa `last-session` est déjà une session adoptée
+en adopterait une deuxième) :
 
-- Candidates : sessions de la liste, vivantes, non encore réclamées par un autre agent.
-  Claim par session via marqueur `~/.cache/wsh-cockpit/adopt-claim-<slug>` (contenu :
-  clé agent), pour que des agents parallèles se répartissent les cockpits ; un même
-  agent qui re-spawn retrouve la sienne. **Le claim est atomique** : création en
+1. **Réutilisation existante** : la `last-session-<key>` de l'agent, si vivante —
+   comportement actuel inchangé (couvre le re-spawn après une adoption : `remember_session`
+   aura enregistré la session adoptée).
+2. **Adoption** : sessions de `WSH_COCKPIT_ADOPT` vivantes et non réclamées.
+3. **Logique actuelle** : scan `cockpit-<prefix>-*` puis création.
+
+Règles d'adoption :
+
+- Claim par session via marqueur `~/.cache/wsh-cockpit/adopt-claim-<slug>` (contenu :
+  clé agent + pid, pour le debug). **Le claim est atomique** : création en
   `set -o noclobber` (O_EXCL) — jamais de test-puis-écriture ; le perdant de la course
-  passe à la candidate suivante.
+  passe à la candidate suivante. Le claim n'a pas de rôle de re-reconnaissance (c'est
+  la voie 1 qui s'en charge) : c'est un verrou one-shot anti-double-adoption.
 - **La variable étant héritée par tous les shells de la session claude, les sous-agents
   (scout/builder/mech…) peuvent aussi adopter** : premier arrivé, premier servi via le
   claim atomique. C'est voulu — les sous-agents travaillent pour le compte de la même
-  session ; le claim garantit qu'un cockpit en cours d'usage n'est jamais volé.
+  session. **Limite connue et assumée** : la clé agent par défaut est `"default"`
+  (session.sh:26) ; un sous-agent qui n'exporte pas son propre `WSH_COCKPIT_AGENT`
+  partage la clé — et donc la `last-session` — de l'agent principal (voie 1), défaut
+  préexistant du skill que l'adoption n'aggrave ni ne corrige. Le SKILL.md devra
+  durcir la recommandation : tout sous-agent qui spawne un cockpit **doit** exporter
+  un `WSH_COCKPIT_AGENT` distinct.
 - Choix : **chemin nominal = première session libre de la liste** (le préfixe de
-  l'agent ne matchera généralement pas tes noms). Exception prioritaire : si le
-  `prefix` demandé est exactement le segment `<prefix>` d'un nom `cockpit-<prefix>-*`
-  adoptable, cette session-là est choisie. Aucune adoptable → comportement actuel
-  inchangé.
+  l'agent ne matchera généralement pas tes noms). Exception prioritaire : match
+  **ancré** du préfixe demandé sur le motif `^cockpit-<prefix>-[0-9]{6}(-[0-9]+)?$`
+  (forme produite par `unique_session_name`, session.sh:7-18 — le motif reste exact
+  même avec des tirets dans le préfixe). Aucune adoptable → voie 3.
 - Session morte dans la liste → warning stderr + fallback sur la logique normale.
 - Garde-fou : ne jamais adopter la session tmux qui héberge claude lui-même.
   **Constat vérifié le 2026-07-27 : la garde `own_tmux_session` /
@@ -87,9 +100,14 @@ actuelle (`find_reusable_session`) :
   existantes. **Conséquence UX assumée** (décision explicite de Quentin) : la fenêtre
   pré-ouverte disparaît immédiatement au `stop`, sans linger — contrairement au bloc
   `rexec` et ses 60 s.
-- **`--keep`** : le wrapper pose `~/.cache/wsh-cockpit/keep-<slug>` ; `stop` oublie
-  l'état agent (state files) mais ne tue ni le tmux ni le bloc Wave ; `gc` ignore la
-  session. L'utilisateur ferme lui-même quand il veut.
+- **`--keep`** : le wrapper pose `~/.cache/wsh-cockpit/keep-<slug>` ; `stop` passe par
+  un **nouveau chemin de nettoyage partiel `release_session()`** (session.sh, à côté de
+  `teardown_session()`) : supprime les state files de l'agent (`last-session-<key>` si
+  elle pointe cette session, `seq-<slug>`, `oneshot-ssh-<slug>`) **et le claim** — la
+  session redevient adoptable par un autre agent de la même session claude
+  (`WSH_COCKPIT_ADOPT` est toujours dans l'environnement) — mais ne touche ni le tmux,
+  ni le bloc Wave, ni `keep-<slug>`. `gc` ignore la session. L'utilisateur ferme
+  lui-même quand il veut.
 
 ### Cycle de vie des marqueurs (`adopt-claim-<slug>`, `keep-<slug>`)
 
@@ -115,14 +133,25 @@ nom** via la DB SQLite Wave déjà lue en lecture seule par `resolve_live_tab_ca
 (`~/Library/Application Support/waveterm/db/waveterm.db`, accès `?mode=ro`) :
 
 ```sql
-SELECT oid FROM db_tab WHERE json_extract(data, '$.name') = 'T46';
--- → ae9dc6f9-05bb-4145-a2ee-b730b95ff4bd
+-- Vivacité OBLIGATOIRE : ne retenir que les onglets référencés par un workspace.
+-- (db_tab seule ne garantit rien ; la validation actuelle de wave.sh:113 ne teste
+--  que l'existence dans db_tab — insuffisant pour une résolution par nom.)
+WITH workspace_tabs AS (
+  SELECT DISTINCT json_each.value AS tabid
+  FROM db_workspace, json_each(db_workspace.data, '$.tabids')
+)
+SELECT oid FROM db_tab
+WHERE json_extract(data, '$.name') = 'T46'
+  AND oid IN (SELECT tabid FROM workspace_tabs);
+-- → ae9dc6f9-05bb-4145-a2ee-b730b95ff4bd   (requête testée le 2026-07-27)
 ```
 
-`wsh` CLI n'offre pas de listing nom→tab id (`wsh blocks list` ne montre que les ids) ;
-la DB est donc la seule voie. **Pas de contrainte d'unicité sur les noms** : en cas de
-doublon, premier match + warning listant les candidats. Onglet introuvable → warning +
-fallback sur le comportement actuel (onglet courant/vivant). Bénéfice collatéral : les
+À l'implémentation, vérifier si `$.pinnedtabids` existe dans `db_workspace` et
+l'ajouter à l'union le cas échéant (onglets épinglés). `wsh` CLI n'offre pas de listing
+nom→tab id (`wsh blocks list` ne montre que les ids) ; la DB est donc la seule voie.
+**Pas de contrainte d'unicité sur les noms** : en cas de doublon, premier match +
+warning listant les candidats. Onglet introuvable → warning + fallback sur le
+comportement actuel (onglet courant/vivant). Bénéfice collatéral : les
 agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 
 ## 5. Gestion d'erreurs (récapitulatif)
@@ -152,3 +181,16 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 - **`selftest-wrapper`** : le wrapper lui-même — parsing des groupes `--and`,
   extraction `--keep`/`--tab` vs pass-through, contenu de `WSH_COCKPIT_ADOPT`, abort
   sans lancement de claude si un spawn échoue (claude mocké par un stub dans le PATH).
+- `SKILL.md` (rappel du §2) : durcir la consigne `WSH_COCKPIT_AGENT` — tout sous-agent
+  qui spawne un cockpit doit exporter une clé distincte.
+
+## 7. Découpage de l'implémentation
+
+Le chantier a grossi ; l'ordre d'implémentation est en deux lots, le premier étant un
+prérequis autonome :
+
+1. **Lot 1 — garde `own_tmux_session`** (commit isolé, testable seul) : portage de
+   `a920197` (ou réimplémentation) sur `main`, appliqué à `find_reusable_session`,
+   avec son selftest. Rien d'autre ne bouge.
+2. **Lot 2 — le reste** : `release_session()`, adoption dans `spawn`, wrapper,
+   `open --tab`, hygiène `gc`, docs, `selftest-adopt` + `selftest-wrapper`.
