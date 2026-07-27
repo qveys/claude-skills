@@ -54,13 +54,26 @@ actuelle (`find_reusable_session`) :
 - Candidates : sessions de la liste, vivantes, non encore réclamées par un autre agent.
   Claim par session via marqueur `~/.cache/wsh-cockpit/adopt-claim-<slug>` (contenu :
   clé agent), pour que des agents parallèles se répartissent les cockpits ; un même
-  agent qui re-spawn retrouve la sienne.
-- Choix : si le `prefix` demandé matche le nom d'une session adoptable → celle-là ;
-  sinon la première libre ; sinon comportement actuel inchangé.
+  agent qui re-spawn retrouve la sienne. **Le claim est atomique** : création en
+  `set -o noclobber` (O_EXCL) — jamais de test-puis-écriture ; le perdant de la course
+  passe à la candidate suivante.
+- **La variable étant héritée par tous les shells de la session claude, les sous-agents
+  (scout/builder/mech…) peuvent aussi adopter** : premier arrivé, premier servi via le
+  claim atomique. C'est voulu — les sous-agents travaillent pour le compte de la même
+  session ; le claim garantit qu'un cockpit en cours d'usage n'est jamais volé.
+- Choix : **chemin nominal = première session libre de la liste** (le préfixe de
+  l'agent ne matchera généralement pas tes noms). Exception prioritaire : si le
+  `prefix` demandé est exactement le segment `<prefix>` d'un nom `cockpit-<prefix>-*`
+  adoptable, cette session-là est choisie. Aucune adoptable → comportement actuel
+  inchangé.
 - Session morte dans la liste → warning stderr + fallback sur la logique normale.
-- Garde-fou : ne jamais adopter la session tmux qui héberge claude lui-même
-  (comparaison avec `$TMUX` / session courante). Vérifier au passage l'état réel de la
-  garde `own_tmux_session` mentionnée en mémoire mais introuvable dans le code installé.
+- Garde-fou : ne jamais adopter la session tmux qui héberge claude lui-même.
+  **Constat vérifié le 2026-07-27 : la garde `own_tmux_session` /
+  `session_safe_to_reuse` n'existe PAS sur `main`** — elle vit sur la branche non
+  mergée `feat/wsh-cockpit-session-workflow` (commit `a920197`) ; `gc.sh:25` la
+  mentionne en commentaire comme si elle existait. **Prérequis de ce chantier** : la
+  porter (cherry-pick ou réimplémentation) sur `main` et l'appliquer à l'adoption ET à
+  `find_reusable_session`.
 - À l'adoption : **sonde de situation systématique** (`hostname; pwd; whoami` +
   `remote-init` auto best-effort si hôte distant détecté — le comportement `--situate`
   est appliqué même sans le flag). Une session pré-ouverte est d'état inconnu pour
@@ -71,18 +84,46 @@ actuelle (`find_reusable_session`) :
 
 - **Défaut** : la session adoptée devient une session claude à part entière — `stop` la
   ferme (bloc Wave inclus via `teardown_session`), `gc` la balaie selon les règles
-  existantes.
+  existantes. **Conséquence UX assumée** (décision explicite de Quentin) : la fenêtre
+  pré-ouverte disparaît immédiatement au `stop`, sans linger — contrairement au bloc
+  `rexec` et ses 60 s.
 - **`--keep`** : le wrapper pose `~/.cache/wsh-cockpit/keep-<slug>` ; `stop` oublie
   l'état agent (state files) mais ne tue ni le tmux ni le bloc Wave ; `gc` ignore la
   session. L'utilisateur ferme lui-même quand il veut.
+
+### Cycle de vie des marqueurs (`adopt-claim-<slug>`, `keep-<slug>`)
+
+Aucun marqueur ne doit survivre à sa session — même après un crash de claude :
+
+- `teardown_session()` (session.sh, déjà point de passage unique du nettoyage cache)
+  supprime `adopt-claim-<slug>` avec les autres state files. `keep-<slug>` n'y passe
+  pas (par définition, `teardown_session` ne tourne pas sur une session keep).
+- `gc` gagne une passe d'hygiène : tout marqueur `adopt-claim-*` ou `keep-*` dont la
+  session tmux correspondante est morte est supprimé (la session keep elle-même n'est
+  jamais tuée par `gc` tant qu'elle vit — seul son marqueur orphelin est balayé après
+  fermeture manuelle par l'utilisateur).
+- Un claim dont l'agent a disparu (claude crashé) est couvert par ces deux voies : la
+  session finit soit `stop`-ée par un autre agent, soit balayée par `gc` (idle 24 h),
+  et le claim part avec elle.
 
 ## 4. `open --tab <nom>`
 
 Nouvelle option de `open`, relayée par `spawn` : résolution de l'onglet Wave **par
 nom** via la DB SQLite Wave déjà lue en lecture seule par `resolve_live_tab_cached`.
-Onglet introuvable → warning + fallback sur le comportement actuel (onglet
-courant/vivant). Bénéfice collatéral : les agents peuvent aussi cibler un onglet (ex.
-la discipline « ops sur T5 »).
+
+**Faisabilité vérifiée le 2026-07-27** sur la DB réelle
+(`~/Library/Application Support/waveterm/db/waveterm.db`, accès `?mode=ro`) :
+
+```sql
+SELECT oid FROM db_tab WHERE json_extract(data, '$.name') = 'T46';
+-- → ae9dc6f9-05bb-4145-a2ee-b730b95ff4bd
+```
+
+`wsh` CLI n'offre pas de listing nom→tab id (`wsh blocks list` ne montre que les ids) ;
+la DB est donc la seule voie. **Pas de contrainte d'unicité sur les noms** : en cas de
+doublon, premier match + warning listant les candidats. Onglet introuvable → warning +
+fallback sur le comportement actuel (onglet courant/vivant). Bénéfice collatéral : les
+agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 
 ## 5. Gestion d'erreurs (récapitulatif)
 
@@ -93,13 +134,21 @@ la discipline « ops sur T5 »).
 | Toutes les sessions déjà réclamées | Fallback logique normale |
 | Session listée = tmux hébergeant claude | Refus d'adoption, warning, fallback |
 | `--tab` introuvable | Warning + fallback onglet courant |
+| Plusieurs onglets portant le nom `--tab` | Premier match + warning listant les candidats |
+| Claim perdu (course entre deux agents) | Passage atomique à la candidate suivante |
 | Échec d'un `spawn` dans le wrapper | claude non lancé, erreur claire, pas de rollback |
 
 ## 6. Docs et tests
 
 - `SKILL.md` : section « Cockpit pré-ouvert par l'utilisateur » (wrapper, adoption,
-  sonde systématique, propriété).
-- `docs/session-lifecycle.md` : règles de cycle de vie de l'adoption (`--keep`, claim,
-  gc).
+  sonde systématique, propriété). **Amendement obligatoire de la règle existante**
+  « Only delete blocks/sessions **you** created » → « …you created **or adopted
+  without `--keep`** » — sinon deux consignes contradictoires cohabitent.
+- `docs/session-lifecycle.md` : règles de cycle de vie de l'adoption (`--keep`, claim
+  atomique, hygiène des marqueurs par `gc`).
 - Nouveau `selftest-adopt` dans la lignée des selftests existants : adoption simple,
-  claim multi-agents, `--keep` vs défaut, session morte, fallback `--tab`.
+  claim multi-agents (course atomique), `--keep` vs défaut, session morte, fallback
+  `--tab`, **sonde systématique effectivement exécutée à l'adoption**.
+- **`selftest-wrapper`** : le wrapper lui-même — parsing des groupes `--and`,
+  extraction `--keep`/`--tab` vs pass-through, contenu de `WSH_COCKPIT_ADOPT`, abort
+  sans lancement de claude si un spawn échoue (claude mocké par un stub dans le PATH).
