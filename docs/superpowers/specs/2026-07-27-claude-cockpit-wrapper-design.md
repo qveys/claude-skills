@@ -63,7 +63,11 @@ en adopterait une deuxième) :
 1. **Réutilisation existante, rendue sensible au préfixe** : la `last-session-<key>`
    de l'agent, si vivante ET compatible avec le préfixe demandé — c'est-à-dire si
    aucun préfixe n'est demandé, ou si son nom matche
-   `^cockpit-<prefix>-[0-9]{6}(-[0-9]+)?$`. **Changement de comportement vérifié le
+   `^cockpit-<prefix>-[0-9]{6}(-[0-9]+)?$`, **ou si la session porte un `adopt-claim`
+   de cet agent** : une session adoptée est exempte du filtre de préfixe (tes noms ne
+   matcheront jamais les préfixes des agents, par conception — sans cette exemption,
+   tout re-spawn avec préfixe évincerait la session adoptée vers la voie 3 ; caveat
+   des clés `default` partagées inchangé). **Changement de comportement vérifié le
    2026-07-27 et voulu** : aujourd'hui `last_session()` (session.sh:76-89) retourne la
    session mémorisée sans regarder le préfixe — `spawn audit-nas` puis `spawn local`
    rend deux fois la première session, ce qui rendrait le multi-cockpit inutilisable
@@ -136,7 +140,10 @@ Aucun marqueur ne doit survivre à sa session — même après un crash de claud
   jamais tuée par `gc` tant qu'elle vit — seul son marqueur orphelin est balayé après
   fermeture manuelle par l'utilisateur). Correspondance marqueur↔session : slugifier
   les noms des sessions vivantes (même fonction de slug que l'écriture) et supprimer
-  tout marqueur dont le slug n'apparaît pas — jamais de dé-slugification.
+  tout marqueur dont le slug n'apparaît pas — jamais de dé-slugification. La même
+  passe balaie les `last-session-user-preopen-*` du wrapper pointant une session
+  morte (inoffensifs — `last_session()` vérifie la vivacité — mais autant les tenir
+  propres).
 - Un claim dont l'agent a disparu (claude crashé) est couvert par ces deux voies : la
   session finit soit `stop`-ée par un autre agent, soit balayée par `gc` (idle 24 h),
   et le claim part avec elle.
@@ -182,7 +189,7 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 | `--tab` introuvable | Warning + fallback onglet courant |
 | Plusieurs onglets portant le nom `--tab` | Premier match + warning listant les candidats (le nom peut résoudre vers une autre fenêtre Wave — assumé, la requête unionne tous les workspaces) |
 | Claim perdu (course entre deux agents) | Passage atomique à la candidate suivante |
-| `last-session` vivante mais préfixe incompatible | Voies 2/3 (nouveau comportement, cf. §2 voie 1) |
+| `last-session` vivante mais préfixe incompatible | Voies 2/3 — sauf session adoptée par cet agent (`adopt-claim`), qui reste en voie 1 |
 | Session `--keep` relâchée (`release_session`) puis re-demandée | Ré-adoptable via voie 2 (claim libéré), y compris par l'agent qui l'a relâchée |
 | Échec d'un `spawn` dans le wrapper | claude non lancé, erreur claire, pas de rollback |
 
@@ -198,7 +205,8 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
   claim multi-agents (course atomique), `--keep` vs défaut, session morte, fallback
   `--tab`, **sonde systématique effectivement exécutée à l'adoption**, **voie 1
   sensible au préfixe** (deux `spawn` de préfixes différents → deux sessions ; même
-  préfixe → réutilisation).
+  préfixe → réutilisation ; **re-spawn avec un autre préfixe après adoption → la
+  session adoptée est conservée, pas évincée**).
 - **`selftest-wrapper`** : le wrapper lui-même — parsing des groupes `--and`,
   extraction `--keep`/`--tab` vs pass-through, contenu de `WSH_COCKPIT_ADOPT`, abort
   sans lancement de claude si un spawn échoue (claude mocké par un stub dans le PATH).
