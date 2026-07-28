@@ -924,6 +924,22 @@ cmd_selftest_guard() {
   if [ "$rc" -ne 0 ] && [ -z "$found" ]; then report_guard_case "7 unsafe remembered session not reused" 0
   else report_guard_case "7 unsafe remembered session not reused" 1 "rc=$rc found='$found'"; fi
 
+  # 8. start --reuse on the caller's own session must refuse with exit 8.
+  #    Confined under GUARD_KEY so the red phase can never pollute the real
+  #    agent state (remember_session on the caller's own session is exactly
+  #    the original incident).
+  if [ -n "${TMUX:-}" ]; then
+    own=$(tmux display-message -p '#S')
+    set +e
+    WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$own" --reuse >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ]; then report_guard_case "8 start --reuse refuses own session (exit 8)" 0
+    else report_guard_case "8 start --reuse refuses own session (exit 8)" 1 "rc=$rc (expected 8)"; fi
+  else
+    echo "note: case 8 skipped (not inside tmux)"
+  fi
+
   selftest_guard_cleanup
   trap - EXIT
   if [ "$failures" -eq 0 ]; then echo "selftest-guard: all cases passed"; return 0
