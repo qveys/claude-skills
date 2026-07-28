@@ -55,10 +55,12 @@ Comportement :
    systématique.
    **`--force` systématique** : le wrapper passe toujours `--force` à ses spawns —
    chaque run crée des cockpits neufs, **jamais de réutilisation d'un run précédent**.
-   C'est ce qui rend structurellement impossibles le cockpit zombie inadoptable
-   (claim orphelin d'un claude crashé sur une session ré-offerte) et le vol de
-   cockpit entre deux claude parallèles (un run n'offre que des sessions qu'il vient
-   de créer).
+   C'est ce qui écarte le cockpit zombie inadoptable (claim orphelin d'un claude
+   crashé sur une session ré-offerte) et le vol de cockpit entre deux claude
+   parallèles (un run n'offre que des sessions qu'il vient de créer). Nuance : une
+   session `--keep` relâchée d'un run précédent reste inadoptable par quiconque
+   tant qu'elle vit (claim `released`, absente des `WSH_COCKPIT_ADOPT` suivants) —
+   propriété-utilisateur voulue, pas un zombie.
    **Pré-claim immédiat** : sitôt la session créée, le spawn du wrapper pose le
    claim sous sa clé `user-preopen-<n>` (c'est le comportement général « la création
    pose le claim du créateur », §2 étape 3) — aucune fenêtre entre création et
@@ -75,10 +77,19 @@ Comportement :
    préfixe** (l'étape 1 du registre ne saurait les distinguer).
 2. `export WSH_COCKPIT_ADOPT=sess1[,sess2...]` **et
    `export WSH_COCKPIT_AGENT=claude-<runid>`** (runid = horodatage+pid du wrapper),
-   puis `exec claude [args après --]`. La clé de run unique donne à l'agent
+   puis lance `claude [args après --]` **en avant-plan — pas `exec`** : à la
+   sortie normale de claude, le wrapper balaie ses sessions (`stop` de toute
+   session vivante au claim `claude-<runid>` ou `user-preopen-<n>` non-keep,
+   `release` des keep) — sans quoi les fenêtres s'accumuleraient run après run, un
+   bloc attaché n'étant jamais gc-é (gc.sh:26). Un crash du wrapper équivaut à un
+   crash de claude : mêmes restes, même coût. La clé de run unique donne à l'agent
    principal (et aux sous-agents qui n'exportent pas la leur) un **registre par
    run** : les claims d'un claude crashé restent sous la clé du run mort — jamais
-   revus à l'étape 1 — et deux claude parallèles ont des registres disjoints. Le
+   revus à l'étape 1 — et deux claude parallèles ont des registres disjoints.
+   Revers assumé : cette clé partagée intra-run fait qu'à l'étape 1, deux agents de
+   même clé « possèdent » les mêmes sessions sans arbitrage atomique (le claim
+   n'arbitre que les étapes 2-3) — d'où la consigne SKILL.md de clé distincte par
+   sous-agent. Le
    wrapper **neutralise aussi `WSH_COCKPIT_PREFIX`** (unset, pour ses spawns comme
    dans l'environnement transmis) : `normalize_prefix` la consulte AVANT
    `WSH_COCKPIT_AGENT` (session.sh:50,53) et un préfixe ambiant de l'utilisateur
@@ -113,19 +124,24 @@ créée par `spawn`/`start` reçoit un claim de son créateur** (le wrapper pose
    `release_session`) — **ciblée** quand un préfixe est demandé (préfixe enregistré
    égal ; non matché → étape 3, création : un préfixe explicite ne va JAMAIS vers un
    cockpit arbitraire) ; **nominale** (première libre de la liste) uniquement pour un
-   `spawn` sans préfixe. **Adopter = consommation atomique du pré-claim par
-   rename de la SOURCE** : `mv adopt-claim-<slug> adopt-claim-<slug>.won-<pid>` —
-   la source disparaît, un seul rename réussit ; le gagnant écrit alors son claim
-   définitif (O_EXCL) et supprime le `.won-<pid>`, le perdant (ENOENT) passe à la
-   candidate suivante. (Un `mv` PAR-DESSUS le pré-claim serait du last-writer-wins :
-   deux adoptants pourraient chacun relire leur propre clé et « gagner ».)
+   `spawn` sans préfixe. **Adopter = consommation du pré-claim par rename de la source, PLUS vérification
+   de contenu** : `mv adopt-claim-<slug> adopt-claim-<slug>.won-<pid>`, puis
+   relecture du `.won` — son contenu DOIT être un pré-claim
+   (`user-preopen-*`/`released`), sinon rename inverse et abandon.
+   **L'anti-ré-armement est indispensable** : le rename seul n'est PAS une
+   exclusion mutuelle — après que A a écrit son claim définitif au même chemin, le
+   rename de B « réussirait » aussi (sur le claim de A) ; seule la vérification de
+   contenu le détecte. Le gagnant exécute la sonde, écrit son claim définitif
+   (O_EXCL), supprime le `.won` ; le perdant (ENOENT ou contenu non-pré-claim)
+   passe à la candidate suivante. La table d'états ci-dessous fait foi.
    Une candidate libre **prime** sur toute `last-session` résiduelle hors registre
    (session d'un run précédent encore vivante) — le cockpit que l'utilisateur vient
    de pré-ouvrir gagne toujours contre l'état résiduel.
 3. **Scan/création** : scan `cockpit-<prefix>-*` puis création — **en excluant toute
-   session « claimée »**, où « claimée » = **existence de tout fichier
-   `adopt-claim-<slug>*` (glob)**, pré-claims du wrapper ET consommations en cours
-   `.won-<pid>` inclus : ni la fenêtre pré-adoption ni la fenêtre de transfert ne
+   session « claimée »**, où « claimée » = existence du fichier
+   `adopt-claim-<slug>` **exact** OU d'un `adopt-claim-<slug>.won-*` (pas un glob
+   `<slug>*` nu — il sur-matcherait le claim d'une session sœur suffixée `-1`),
+   pré-claims du wrapper ET consommations en cours incluses : ni la fenêtre pré-adoption ni la fenêtre de transfert ne
    rendent jamais la session saisissable (sinon un autre claude pourrait la voler,
    et deux agents entrelacés dans un même pane partageraient un seul compteur
    `seq`) ; extension naturelle de la `session_safe_to_reuse` réintroduite
@@ -147,7 +163,9 @@ Précisions sur l'étape 1 :
    **Préfixe enregistré, pas parsé** : `spawn` écrit le préfixe normalisé dans
    `~/.cache/wsh-cockpit/prefix-<slug>` à la création ; `start` (qui reçoit un nom
    complet, pas un préfixe) écrit la sentinelle `(named)`, jamais matchable — ses
-   sessions ne sont atteignables que par nom explicite ou scan. Le test de
+   sessions ne sont atteignables que par nom explicite ou scan ; `start` refuse en
+   outre un nom dont le slug collisionne avec celui d'une session vivante
+   différente (deux noms distincts peuvent slugifier identique). Le test de
    compatibilité lit ce fichier. Le parsing de nom
    (`^cockpit-(.+)-[0-9]{6}(-[0-9]+)?$`) ne sert que de fallback pour les sessions
    antérieures à ce chantier — il est ambigu par construction (un préfixe finissant
@@ -158,6 +176,23 @@ Précisions sur l'étape 1 :
    `spawn audit-nas` puis `spawn local` rend deux fois la première session, ce qui
    rendrait le multi-cockpit inutilisable par un même agent. Le registre remplace ce
    mémo-autorité ; préfixe sans possession → étapes 2 puis 3.
+
+### Table d'états du claim (`adopt-claim-<slug>`) — fait foi
+
+| État | Forme | Transitions sortantes (primitive ; garde) |
+|---|---|---|
+| ABSENT | aucun fichier | → PRÉ-CLAIM : création wrapper (`--preopen`, O_EXCL). → POSSÉDÉ : création étape 3, ou reprise-au-scan d'une legacy (O_EXCL ; sonde pour la reprise) |
+| PRÉ-CLAIM | `adopt-claim-<slug>`, clé `user-preopen-<n>` ou `released` | → EN-COURS : rename vers `.won-<pid>` (un seul rename réussit ; vérif de contenu ensuite, I2) |
+| EN-COURS | `adopt-claim-<slug>.won-<pid>` (contenu = pré-claim d'origine) | → POSSÉDÉ : contenu vérifié pré-claim + sonde OK → claim définitif O_EXCL + `rm .won`. → PRÉ-CLAIM : rollback rename inverse no-clobber (busy-pane, sonde KO, ou contenu non-pré-claim). Hygiène gc (pid mort ET âge > 2×`WSH_WAIT_TIMEOUT`) : session vivante → PRÉ-CLAIM (no-clobber) ; morte → ABSENT |
+| POSSÉDÉ | `adopt-claim-<slug>`, clé de l'agent | → PRÉ-CLAIM `released` : `release <session>` (propriétaire seul ; temp+`mv`). → ABSENT : `stop`/`teardown_session`, ou hygiène gc (session morte) |
+
+Invariants : **I1** toute écriture vers `adopt-claim-<slug>` est O_EXCL ou
+no-clobber — jamais de `mv` écrasant (un rollback/une restauration qui trouve un
+claim définitif en place supprime le `.won` au lieu d'écraser) ; **I2** après tout
+rename gagnant, le contenu du `.won` est vérifié = pré-claim, sinon rename inverse
+(anti-ré-armement) ; **I3** « claimée » pour l'exclusion au scan =
+`adopt-claim-<slug>` exact OU `adopt-claim-<slug>.won-*` ; **I4** seule la clé
+propriétaire écrit `release`.
 
 Règles d'adoption :
 
@@ -216,16 +251,29 @@ Règles d'adoption :
   normal y vomirait des erreurs de helpers dans la fenêtre de l'utilisateur. (Le
   scénario inter-runs n'existe plus : `--force` systématique du wrapper, §1.)
 - **Garde busy-pane + rollback** : avant la sonde, `mux_pane_command` (mux.sh:93)
-  doit rapporter un shell nu — même critère que la garde du lot 1 ; sinon (vim,
-  less, commande en cours de frappe dans un pane keep) l'adoption de cette candidate
-  est abandonnée : **rollback = rename inverse du `.won-<pid>` vers
+  doit rapporter un état adoptable — **shell nu OU hop SSH (`ssh`, `tailscale`,
+  `mosh`)**. Contrairement à la garde de réutilisation du lot 1 (shell nu strict),
+  un pane déjà hoppé est PRÉCISÉMENT un cas d'usage du wrapper (FIDO2 déjà donné) :
+  la sonde auto-portante + `remote-init` auto le prennent en charge — sans cet
+  élargissement, le scénario visé par la sonde auto-portante serait inatteignable
+  et un cockpit pré-hoppé serait inadoptable. Une commande en cours de frappe est
+  INDÉTECTABLE par `pane_current_command` (qui rapporte toujours le shell) —
+  mitigation best-effort : capturer la dernière ligne du pane et refuser si du
+  texte suit le prompt ; limite documentée. Autres états (vim, less, …) →
+  l'adoption de cette candidate
+  est abandonnée : **rollback = rename inverse no-clobber du `.won-<pid>` vers
   `adopt-claim-<slug>`** (le `.won` EST l'ancien pré-claim — clé et contenu
-  d'origine intacts) et on passe à la suivante. Idem si la sonde échoue après la
+  d'origine intacts ; un claim définitif apparu entre-temps n'est jamais écrasé :
+  on supprime alors le `.won` — invariant I1) et on passe à la suivante. Idem si la sonde échoue après la
   consommation — jamais de claim conservé sans sonde réussie. Famine bornée et
-  assumée : pendant une fenêtre `.won` (quelques secondes), les concurrents passent
-  leur chemin ; si TOUTES les candidates sont en fenêtre au même instant, un
-  cockpit surnuméraire peut naître — le re-spawn suivant retrouvera la candidate
-  restaurée.
+  assumée : une fenêtre `.won` dure jusqu'au pire cas de la sonde
+  (`WSH_WAIT_TIMEOUT`, 300 s par défaut — wsh-live.sh:645 ; PAS « quelques
+  secondes ») ; les concurrents passent leur chemin, et si TOUTES les candidates
+  sont en fenêtre au même instant un cockpit surnuméraire peut naître — le re-spawn
+  suivant retrouvera la candidate restaurée.
+- **Bloc et audit à l'adoption** : ne pas re-`open` si un client est déjà attaché
+  (même logique que la réutilisation actuelle, wsh-live.sh:436-441) ;
+  `audit_log_start` est émis pour la session adoptée.
 - Garde-fou : ne jamais adopter la session tmux qui héberge claude lui-même.
   **Constat re-vérifié le 2026-07-27 (deux revues indépendantes) : RÉGRESSION.** La
   garde `own_tmux_session` / `session_safe_to_reuse` a été introduite sur `main`
@@ -255,8 +303,10 @@ Règles d'adoption :
   pré-ouverte disparaît immédiatement au `stop`, sans linger — contrairement au bloc
   `rexec` et ses 60 s.
 - **`--keep`** : le wrapper pose `~/.cache/wsh-cockpit/keep-<slug>` ; `stop` passe par
-  une **nouvelle sous-commande `release [session]`** (le chemin `stop`-sur-keep
-  l'appelle ; les sous-agents l'invoquent directement) : supprime `last-session-<key>`
+  une **nouvelle sous-commande `release <session>`** (argument OBLIGATOIRE — pas
+  de défaut `last-session` : avec une clé de run partagée, un sous-agent
+  relâcherait sans le savoir la session courante de l'agent principal ; fonction
+  interne `release_session()`, appelée aussi par le chemin `stop`-sur-keep) : supprime `last-session-<key>`
   (si elle pointe cette session) et, pour une session issue de `WSH_COCKPIT_ADOPT`,
   **rétrograde le claim en pré-claim** (clé réservée `released`, réécriture
   mono-écrivain temp+`mv` ; l'étape 2 accepte `user-preopen-*` et `released`) — elle
@@ -268,8 +318,11 @@ Règles d'adoption :
   `oneshot-ssh-<slug>`** : ces fichiers sont *par session* (pas « de l'agent ») et le
   compteur de framing doit rester continu — le remettre à zéro ferait matcher au
   prochain adoptant un footer `└─[#N] exit` périmé du scrollback (`wait-done`
-  menteur, `output` extrayant le mauvais segment). `gc` ignore la session.
-  L'utilisateur ferme lui-même quand il veut.
+  menteur, `output` extrayant le mauvais segment). `gc` ignore la session **tant
+  qu'un client y est attaché** ; une keep **détachée** (bloc Wave fermé — le geste
+  naturel de fin) ET idle > 24 h retombe dans le balayage normal, sinon deadlock :
+  une session que « seul l'utilisateur ferme », via un bloc dont la fermeture ne la
+  ferme pas, ne mourrait jamais. Documenté dans SKILL.md.
 
 ### Cycle de vie des marqueurs (`adopt-claim-<slug>`, `keep-<slug>`)
 
@@ -291,24 +344,31 @@ Aucun marqueur ne doit survivre à sa session — même après un crash de claud
   `last-session-claude-*` (clés de run — un fichier par run, sinon accumulation
   sans borne) pointant une session morte (inoffensifs — `last_session()` vérifie la vivacité — mais autant les tenir
   propres), ainsi que les `seq-`, `oneshot-ssh-`, `pane-` (zellij), `tab-`,
-  `block-`, `cm-` et `prefix-` de sessions mortes —
-  aujourd'hui nettoyés uniquement par `teardown_session`, donc jamais pour une
-  session keep fermée à la main par l'utilisateur. **Pas de `rm` sec pour `block-`
+  `block-`, `cm-` et `prefix-` de sessions mortes. Le lot 2 ajoute `prefix-` et
+  les claims au nettoyage de `teardown_session` (sinon orphelins après chaque
+  `stop`) ; les autres y sont déjà — mais aucun n'est nettoyé pour une session
+  keep fermée à la main par l'utilisateur, d'où cette passe. **Pas de `rm` sec pour `block-`
   et `cm-`** : avant suppression, tenter respectivement `block_id_close` (fermer un
   bloc Wave orphelin — même chance que `teardown_session`, qui l'appelle même quand
   `mux_kill` échoue, session.sh:267-268) et `ssh -O exit` (best-effort). Le cas
-  `adopt-warned-<key>` est à part : hygiène par âge, cf. §2. **Placement** : la
-  passe s'exécute AVANT les early-returns de `cmd_gc` (backend zellij, aucun serveur
-  tmux — gc.sh:58-67), sinon elle ne tournerait jamais dans ces deux cas. **Seuil
-  d'âge anti-course** : la passe ignore tout marqueur de moins de 5 min — `gc` part
-  en arrière-plan à chaque spawn (wsh-live.sh:417), y compris pendant la rafale
-  `--and` du wrapper, et un claim/`prefix-`/`keep-` tout frais peut précéder la
-  visibilité de sa session. **Passe dédiée aux `.won-<pid>`** (orphelins d'un
-  adoptant crashé entre rename et écriture) : session vivante → restauration en
-  pré-claim par rename inverse ; session morte → suppression — même seuil d'âge.
-  Le balayage générique `adopt-claim-*` **ignore les `.won-*`** : leur « slug »
-  apparent (`<slug>.won-<pid>`) ne matche aucune session, un `rm` naïf
-  dé-claimerait une session vivante.
+  `adopt-warned-<key>` est à part : hygiène par âge, cf. §2. **Placement
+  fail-safe** : la passe exige un listing FIABLE — `mux_list_sessions` avec rc=0
+  (un échec transitoire du mux ≠ zéro session : agir sur un listing en échec
+  raserait les claims de sessions vivantes ; même philosophie que gc.sh:51 « never
+  act on uncertain state ») ; sous tmux, serveur joignable requis ; sous zellij
+  sans serveur, la passe ne tourne pas et les marqueurs attendent — assumé.
+  **Seuil d'âge anti-course** : la passe ignore tout marqueur de moins de 5 min —
+  marge générale contre les fenêtres transitoires d'écriture multi-fichiers
+  (claim/`prefix-`/`tab-`…), `gc` partant en arrière-plan à chaque spawn
+  (wsh-live.sh:417), y compris pendant la rafale `--and` du wrapper. **Passe
+  dédiée aux `.won-<pid>`** (orphelins d'un adoptant crashé entre rename et
+  écriture) — conditions CUMULATIVES : **pid mort (`kill -0` en échec) ET âge >
+  2×`WSH_WAIT_TIMEOUT`** (600 s par défaut ; une sonde légitime peut durer 300 s,
+  wsh-live.sh:645 — le seuil générique de 5 min serait exactement la fenêtre de
+  course). Session vivante → restauration en pré-claim par rename inverse
+  **no-clobber** (I1) ; morte → suppression. Le balayage générique `adopt-claim-*`
+  **ignore les `.won-*`** : leur « slug » apparent ne matche aucune session, un
+  `rm` naïf dé-claimerait une session vivante.
 - Un claim dont l'agent a disparu (claude crashé) : la session reste vivante tant que
   son bloc Wave est attaché (`gc` ne tue jamais une session attachée, gc.sh:26) — le
   claim orphelin est **inoffensif** (le run suivant du wrapper n'offre que des
@@ -393,7 +453,8 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 - `SKILL.md` : section « Cockpit pré-ouvert par l'utilisateur » (wrapper, adoption,
   sonde systématique, propriété). **Amendement obligatoire de la règle existante**
   « Only delete blocks/sessions **you** created » → « …you created **or adopted
-  without `--keep`** » — sinon deux consignes contradictoires cohabitent.
+  without `--keep`** » — sinon deux consignes contradictoires cohabitent ; même
+  amendement dans `docs/session-lifecycle.md:176`, qui répète la règle.
 - `docs/session-lifecycle.md` : règles de cycle de vie de l'adoption (`--keep`, claim
   atomique, hygiène des marqueurs par `gc`) — **et amender le passage décrivant la
   réutilisation inconditionnelle de `spawn`**, désormais filtrée par préfixe.
@@ -418,7 +479,10 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
   marqueur frais mangé ; orphelins balayés), **`gc` épargne une session keep**
   (`gc_should_kill` modifié, lot 2), **préfixe explicite non matché → création,
   jamais d'adoption nominale**, **restauration d'un `.won` orphelin** (session
-  vivante re-pré-claimée, morte purgée).
+  vivante re-pré-claimée, morte purgée), **anti-ré-armement prouvé** (B rename
+  APRÈS le claim définitif de A → détecté par la vérif de contenu, rename inverse,
+  aucune double adoption), **invariants I1-I4 tenus sous course + gc simultanés**
+  (aucun `mv` écrasant observé).
 - `doctor` : signaler (informatif) les claims dont la clé n'a plus d'activité
   récente — candidats au `release` oublié d'un sous-agent.
 - **`selftest-wrapper`** : le wrapper lui-même — parsing des groupes `--and`,
