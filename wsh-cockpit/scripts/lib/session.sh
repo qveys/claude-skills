@@ -84,9 +84,34 @@ own_tmux_session() {
   tmux display-message -p '#S' 2>/dev/null
 }
 
+# Whether <sess> designates the tmux session the caller is itself running
+# inside — not just by the name it was given (a plain name comparison is
+# fooled two ways, both proven on this machine):
+#   1. exact name match (the obvious case: caller passed its own name back);
+#   2. alias-by-prefix: tmux's `-t` resolves exact -> prefix -> fnmatch, so a
+#      strict prefix of the caller's session name can also name it — closed
+#      by comparing the CANONICAL name (mux_session_name), not the raw string;
+#   3. grouped session: `tmux new-session -t <own>` creates a session with a
+#      DIFFERENT name sharing the caller's own pane (this is how Wave wraps
+#      blocks) — closed by comparing the target's active pane id to
+#      $TMUX_PANE, the one identity that stays pinned to the caller's actual
+#      pane regardless of what any session happens to be named.
+# Silent: it only tests. Callers write the refusal message.
+# rc 1 outside tmux and under zellij (own_tmux_session is a no-op there),
+# same as before this function existed.
+session_is_own() {
+  local sess="$1" own pane
+  if ! own=$(own_tmux_session); then return 1; fi
+  [ "$sess" = "$own" ] && return 0
+  [ "$(mux_session_name "$sess")" = "$own" ] && return 0
+  pane=$(mux_pane_id "$sess") || true
+  [ -n "$pane" ] && [ "$pane" = "${TMUX_PANE:-}" ] && return 0
+  return 1
+}
+
 # A session is safe to silently reuse only if BOTH hold:
-#   1. it is not the tmux session the caller is itself running inside
-#      (absolute, unconditional block — see own_tmux_session);
+#   1. it is not the tmux session the caller is itself running inside, by any
+#      alias (absolute, unconditional block — see session_is_own);
 #   2. its foreground process is a bare shell, not some other interactive
 #      program left running in an otherwise-orphaned cockpit (most
 #      dangerously another CLI: `send` would TYPE into its input).
@@ -95,9 +120,15 @@ own_tmux_session() {
 # NOTE (spec claude-cockpit §2): lot 2 extends check 2 for ADOPTION with
 # ssh/tailscale/mosh as adoptable states — reuse stays bare-shell strict.
 session_safe_to_reuse() {
-  local sess="$1" cmd own
-  if own=$(own_tmux_session) && [ "$sess" = "$own" ]; then
-    echo "⚠️  session '$sess' IS the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2
+  local sess="$1" cmd own canon
+  if session_is_own "$sess"; then
+    own=$(own_tmux_session 2>/dev/null || true)
+    canon=$(mux_session_name "$sess" 2>/dev/null || true)
+    if [ -n "$canon" ] && [ "$canon" != "$sess" ]; then
+      echo "⚠️  session '$sess' resolves to '$canon', the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2
+    else
+      echo "⚠️  session '$sess' IS the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2
+    fi
     return 1
   fi
   cmd=$(mux_pane_command "$sess")

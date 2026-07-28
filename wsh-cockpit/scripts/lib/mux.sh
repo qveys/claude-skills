@@ -97,6 +97,18 @@ mux_pane_command() {  # foreground process name in the pane's active pane, best-
   if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
   else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
 }
+mux_session_name() {  # canonical name the target actually resolves to, best-effort
+  # tmux resolves `-t` by exact name, then prefix, then fnmatch — so a bare
+  # prefix of a session name can still name that session. Round-tripping
+  # through `#{session_name}` closes that alias: it reports the ACTUAL
+  # session behind whatever the caller passed, not the string they passed.
+  if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{session_name}' 2>/dev/null
+  else printf '%s' "$1"; fi  # zellij: no alias resolution to worry about — pass through
+}
+mux_pane_id() {  # id of the target session's ACTIVE pane, best-effort
+  if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null
+  else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
+}
 
 # Audit trail: pipe the pane's rendered output to a per-session log file.
 # WSH_LIVE_LOG=0 disables. Best-effort by design (`|| return 0` everywhere):

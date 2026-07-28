@@ -849,7 +849,9 @@ cmd_selftest_guard() {
   GUARD_BUSY="cockpit-selftest-guard-busy-$$"
   GUARD_IDLE="cockpit-selftest-guard-idle-$$"
   GUARD_KEY="selftest-guard-$$"
-  local rc failures=0 own cmd tries found
+  GUARD_GROUP="cockpit-selftest-guard-group-$$"
+  GUARD_DECOY="cockpit-selftest-guard-decoy-$$"
+  local rc failures=0 own cmd tries found pfx resolved canon
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
     if [ "$2" -eq 0 ]; then
@@ -860,9 +862,15 @@ cmd_selftest_guard() {
     fi
   }
 
+  # Anchored with "=" (exact-name match only): without it, kill-session
+  # resolves -t by exact match, then prefix, then fnmatch — a stray session
+  # whose name only PREFIXES one of these could be killed by mistake. See
+  # cases 9-10 below for the same hazard hitting session_safe_to_reuse.
   selftest_guard_cleanup() {
-    tmux kill-session -t "$GUARD_BUSY" 2>/dev/null || true
-    tmux kill-session -t "$GUARD_IDLE" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_BUSY" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_IDLE" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_GROUP" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
@@ -938,6 +946,66 @@ cmd_selftest_guard() {
     else report_guard_case "8 start --reuse refuses own session (exit 8)" 1 "rc=$rc (expected 8)"; fi
   else
     echo "note: case 8 skipped (not inside tmux)"
+  fi
+
+  # 9. alias by prefix: tmux resolves -t by exact name, then prefix, then
+  #    fnmatch — a strict prefix of the caller's own session name that
+  #    still resolves (unambiguously) to that same session must be refused
+  #    just like the exact name (case 3). Skip if the prefix is empty or
+  #    resolves ambiguously/not-at-all in this environment: no proof either
+  #    way, not a failure.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    pfx=${own%?}
+    resolved=$(tmux display-message -p -t "$pfx" '#{session_name}' 2>/dev/null || true)
+    if [ -z "$pfx" ] || [ "$resolved" != "$own" ]; then
+      echo "note: case 9 skipped (prefix '$pfx' of '$own' resolved to '$resolved', not unambiguous)"
+    else
+      set +e; session_safe_to_reuse "$pfx" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -ne 0 ]; then report_guard_case "9 prefix alias of own session refused" 0
+      else report_guard_case "9 prefix alias of own session refused" 1 "rc=0 on prefix '$pfx' (resolves to own session '$own')"; fi
+    fi
+  else
+    echo "note: case 9 skipped (not inside tmux)"
+  fi
+
+  # 10. grouped session: `tmux new-session -t <own>` creates a session with
+  #     a DIFFERENT name that shares the caller's pane (Wave wraps blocks
+  #     this way) — session_safe_to_reuse must catch the shared pane, not
+  #     just a name match. Skip if the grouped session can't be created.
+  #
+  #     Gotcha discovered empirically on this machine (tmux 3.7b): unqualified
+  #     `tmux display-message -p '#S'` (what own_tmux_session() calls) does
+  #     NOT stay pinned to the session's original name once a grouped session
+  #     shares its pane — it drifts to the MOST RECENTLY CREATED session
+  #     within that share group. So right after `new-session -t "$own"
+  #     -s "$GUARD_GROUP"`, own_tmux_session() already returns "$GUARD_GROUP"
+  #     itself, and the pre-existing exact-name check would match BY
+  #     ACCIDENT — passing whether or not session_is_own's new pane-identity
+  #     check exists. A throwaway decoy grouped session created right after
+  #     shifts that drift away from GUARD_GROUP (confirmed: current becomes
+  #     the decoy), so the exact-name AND canonical-name checks both
+  #     genuinely fail here and only the pane-identity check (mux_pane_id ==
+  #     $TMUX_PANE) can still catch it.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    tmux new-session -d -s "$GUARD_GROUP" -t "$own" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 10 skipped (could not create a grouped session on '$own')"
+    else
+      set +e
+      tmux new-session -d -s "$GUARD_DECOY" -t "$own" 2>/dev/null
+      set -e
+      set +e; session_safe_to_reuse "$GUARD_GROUP" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -ne 0 ]; then report_guard_case "10 grouped session sharing own pane refused" 0
+      else report_guard_case "10 grouped session sharing own pane refused" 1 "rc=0 on '$GUARD_GROUP' (own_tmux_session now resolves to '$(own_tmux_session 2>/dev/null || true)')"; fi
+      tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 10 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup
