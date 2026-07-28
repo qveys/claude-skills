@@ -4,6 +4,27 @@ Pièges classiques et erreurs fréquentes en mode `live` et `rexec`. Voir
 `SKILL.md` pour les règles impératives (celles-là ne se discutent pas) ; ce qui
 suit est le détail et le "pourquoi" derrière chacune.
 
+- **A reused session can turn out to be your OWN Claude Code terminal —
+  `spawn` guards automatically, but know the failure mode.**
+  `find_reusable_session` looks up the last-remembered session **for the
+  agent/prefix key**, not for the exact positional name you passed — if that
+  key was ever recorded against a tmux session that got repurposed later
+  (e.g. a human attached it and started an interactive program, including
+  another `claude` CLI), a bare `spawn` would hand it back with zero content
+  check. `send`ing into that pane doesn't run a command — it types text into
+  whatever's running there; against a live Claude Code REPL, your "situate"
+  probe (`hostname; pwd; whoami`) gets submitted as a **new chat message**
+  instead of executing, and you only notice from the confused reply.
+  `session_safe_to_reuse()` (`lib/session.sh`) guards on two checks before
+  any reuse: (1) an unconditional block on the exact tmux session the caller
+  is itself running inside (`$TMUX` + `tmux display-message -p '#S'`, via
+  `own_tmux_session`) — this catches the incident above, since
+  `pane_current_command` alone would report "bash" from inside the check
+  itself; (2) a `pane_current_command` heuristic that rejects any OTHER
+  session whose foreground isn't a bare shell. `start <name> --reuse` refuses
+  the caller's own session with exit 8. History: guard introduced by
+  `a920197` (#7), silently lost in the `9863c07` regression, reintroduced
+  with `selftest-guard`.
 - **Never `start cockpit` blindly.** Another agent may already own that tmux
   session. Use `spawn` to open/continue your cockpit; it reuses an alive session
   automatically. Only `spawn --force` creates a duplicate window.
