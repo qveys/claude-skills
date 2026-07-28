@@ -119,6 +119,11 @@
 #                              Mac doesn't accept passwordless ssh to itself); push/pull's
 #                              own "no remote host recorded" error path on a real session;
 #                              rc 0/1
+#   selftest-guard             own_tmux_session/session_safe_to_reuse cases: own session
+#                              refused, non-shell foreground refused, bare shell ok, empty
+#                              pane_current_command safe, find_reusable_session never hands
+#                              back an unsafe remembered session, start --reuse exit 8;
+#                              tmux-only; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -858,6 +863,9 @@ selftest-output)
   ;;
 selftest-transfer)
   cmd_selftest_transfer
+  ;;
+selftest-guard)
+  cmd_selftest_guard
   ;;
 push)
   have_mux

@@ -837,3 +837,95 @@ cmd_selftest_output() {
   fi
   echo "selftest-output: ok"
 }
+
+cmd_selftest_guard() {
+  have_mux
+  if [ "$MUX" != tmux ]; then
+    echo "selftest-guard: skip (tmux-only — the guard rests on tmux display-message)"
+    return 0
+  fi
+  # NOT local: cleanup runs from the EXIT trap after this function returned
+  # (same rationale as cmd_selftest_gc's SESS).
+  GUARD_BUSY="cockpit-selftest-guard-busy-$$"
+  GUARD_IDLE="cockpit-selftest-guard-idle-$$"
+  GUARD_KEY="selftest-guard-$$"
+  local rc failures=0 own cmd tries found
+
+  report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  selftest_guard_cleanup() {
+    tmux kill-session -t "$GUARD_BUSY" 2>/dev/null || true
+    tmux kill-session -t "$GUARD_IDLE" 2>/dev/null || true
+    rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
+  }
+  trap selftest_guard_cleanup EXIT
+
+  # 1. outside tmux, own_tmux_session must fail cleanly (rc != 0).
+  set +e
+  ( unset TMUX; own_tmux_session >/dev/null 2>&1 )
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then report_guard_case "1 own_tmux_session outside tmux -> rc!=0" 0
+  else report_guard_case "1 own_tmux_session outside tmux -> rc!=0" 1 "rc=0 without TMUX"; fi
+
+  # 2+3. only meaningful when THIS test itself runs inside tmux.
+  if [ -n "${TMUX:-}" ]; then
+    set +e; own=$(own_tmux_session); rc=$?; set -e
+    if [ "$rc" -eq 0 ] && [ -n "$own" ]; then report_guard_case "2 own_tmux_session names current session" 0
+    else report_guard_case "2 own_tmux_session names current session" 1 "rc=$rc own='$own'"; fi
+    set +e; session_safe_to_reuse "$own" 2>/dev/null; rc=$?; set -e
+    if [ "$rc" -ne 0 ]; then report_guard_case "3 own session refused" 0
+    else report_guard_case "3 own session refused" 1 "rc=0 on '$own'"; fi
+  else
+    echo "note: cases 2-3 skipped (not inside tmux)"
+  fi
+
+  # 4. a session whose foreground is NOT a bare shell is refused.
+  tmux new-session -d -s "$GUARD_BUSY" 'exec top'
+  tries=0; cmd=""
+  while [ "$tries" -lt 20 ]; do
+    cmd=$(mux_pane_command "$GUARD_BUSY")
+    [ "$cmd" = top ] && break
+    tries=$((tries + 1)); sleep 0.2
+  done
+  set +e; session_safe_to_reuse "$GUARD_BUSY" 2>/dev/null; rc=$?; set -e
+  if [ "$rc" -ne 0 ]; then report_guard_case "4 non-shell foreground refused" 0
+  else report_guard_case "4 non-shell foreground refused" 1 "rc=0 (cmd='$cmd')"; fi
+
+  # 5. a bare-shell session is accepted.
+  tmux new-session -d -s "$GUARD_IDLE"
+  set +e; session_safe_to_reuse "$GUARD_IDLE" 2>/dev/null; rc=$?; set -e
+  if [ "$rc" -eq 0 ]; then report_guard_case "5 bare shell accepted" 0
+  else report_guard_case "5 bare shell accepted" 1 "rc=$rc"; fi
+
+  # 6. empty pane_current_command (zellij / transient) = unverifiable-but-SAFE.
+  set +e
+  ( mux_pane_command() { printf ''; }; session_safe_to_reuse "$GUARD_IDLE" 2>/dev/null )
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then report_guard_case "6 empty pane command treated safe" 0
+  else report_guard_case "6 empty pane command treated safe" 1 "rc=$rc"; fi
+
+  # 7. find_reusable_session must NOT hand back a remembered-but-unsafe session.
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$GUARD_BUSY" > "$STATE_DIR/last-session-$GUARD_KEY"
+  set +e
+  found=$( WSH_COCKPIT_AGENT="$GUARD_KEY"; export WSH_COCKPIT_AGENT
+           find_reusable_session "selftest-guard-none" 2>/dev/null )
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && [ -z "$found" ]; then report_guard_case "7 unsafe remembered session not reused" 0
+  else report_guard_case "7 unsafe remembered session not reused" 1 "rc=$rc found='$found'"; fi
+
+  selftest_guard_cleanup
+  trap - EXIT
+  if [ "$failures" -eq 0 ]; then echo "selftest-guard: all cases passed"; return 0
+  else echo "selftest-guard: $failures failure(s)" >&2; return 1; fi
+}

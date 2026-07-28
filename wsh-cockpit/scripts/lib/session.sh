@@ -72,16 +72,53 @@ newest_session_for_prefix() {
   printf '%s\n' "$best"
 }
 
+# The tmux session CURRENTLY running the calling process itself, if any.
+# `$TMUX` is set by tmux in every process spawned inside a pane — including
+# the Bash tool call whose shell lives inside the Claude Code CLI's own
+# wrapping tmux session (Wave wraps every terminal in tmux, one block = one
+# session). `tmux display-message` asks the tmux server, not the pane
+# content, so it's authoritative regardless of what's drawn on screen.
+own_tmux_session() {
+  [ "$MUX" = tmux ] || return 1
+  [ -n "${TMUX:-}" ] || return 1
+  tmux display-message -p '#S' 2>/dev/null
+}
+
+# A session is safe to silently reuse only if BOTH hold:
+#   1. it is not the tmux session the caller is itself running inside
+#      (absolute, unconditional block — see own_tmux_session);
+#   2. its foreground process is a bare shell, not some other interactive
+#      program left running in an otherwise-orphaned cockpit (most
+#      dangerously another CLI: `send` would TYPE into its input).
+# Empty pane_current_command (zellij: unsupported, or transient read
+# failure) is treated unverifiable-but-safe, not unsafe.
+# NOTE (spec claude-cockpit §2): lot 2 extends check 2 for ADOPTION with
+# ssh/tailscale/mosh as adoptable states — reuse stays bare-shell strict.
+session_safe_to_reuse() {
+  local sess="$1" cmd own
+  if own=$(own_tmux_session) && [ "$sess" = "$own" ]; then
+    echo "⚠️  session '$sess' IS the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2
+    return 1
+  fi
+  cmd=$(mux_pane_command "$sess")
+  case "$cmd" in
+    ""|bash|zsh|sh|fish|-bash|-zsh|-sh|-fish) return 0 ;;
+    *)
+      echo "⚠️  session '$sess' has foreground process '$cmd', not a bare shell — refusing silent reuse (pass --force for a fresh cockpit, or 'read' it manually first)" >&2
+      return 1 ;;
+  esac
+}
+
 # Prefer last remembered session; else newest alive session for the spawn prefix.
 find_reusable_session() {
   local prefix="${1:-}"
   local norm remembered newest
   norm=$(normalize_prefix "$prefix")
-  if remembered=$(last_session 2>/dev/null); then
+  if remembered=$(last_session 2>/dev/null) && session_safe_to_reuse "$remembered"; then
     printf '%s\n' "$remembered"
     return 0
   fi
-  if newest=$(newest_session_for_prefix "$norm" 2>/dev/null); then
+  if newest=$(newest_session_for_prefix "$norm" 2>/dev/null) && session_safe_to_reuse "$newest"; then
     printf '%s\n' "$newest"
     return 0
   fi
