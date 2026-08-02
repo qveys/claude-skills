@@ -1075,23 +1075,29 @@ cmd_selftest_guard() {
     echo "note: case 12 skipped (not inside tmux)"
   fi
 
-  # 13-17. mux_has/mux_kill anchor targets with "=" (exact match) — Task 6.
+  # 13-18. mux_has/mux_kill anchor targets with "=" (exact match) — Task 6.
   # tmux's default target resolution tries exact name, THEN session-name
   # prefix, THEN fnmatch, in that order; unanchored, a bare prefix or glob
   # silently resolves to a DIFFERENT, unrelated session. That is what let a
   # dead remembered session "come back to life" via a same-prefixed homonym
   # (session.sh:42) and what would let mux_kill tear down the wrong sibling
-  # session on a prefix collision. Every check below asserts BOTH the rc
-  # mux_has/mux_kill return AND the session's real presence via
-  # mux_list_sessions — asserting rc alone would let rc=127 (function
-  # missing) pass for the wrong reason.
+  # session on a prefix collision. What each check asserts varies by case:
+  # 13/16 (mux_has must REJECT) and 17 (mux_kill must SPARE) assert BOTH the
+  # rc AND the session's real presence via mux_list_sessions — rc alone
+  # would let rc=127 (function missing/renamed) pass for the wrong reason.
+  # 14/15 (mux_has must ACCEPT) assert rc == 0 only — a missing function's
+  # rc=127 already fails that check on its own, so state isn't needed there.
+  # 18 (mux_kill must still ACTUALLY kill) asserts BOTH rc == 0 AND the
+  # session's real absence — the positive control that proves 17's "sibling
+  # spared" result isn't just mux_kill failing on everything (see
+  # task-6b-report.md for the RED proof that 18 catches that).
   if [ -n "${TMUX:-}" ]; then
     set +e
     tmux new-session -d -s "$GUARD_T6_SESS" 2>/dev/null
     rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
-      echo "note: cases 13-17 skipped (could not create '$GUARD_T6_SESS')"
+      echo "note: cases 13-18 skipped (could not create '$GUARD_T6_SESS')"
     else
       # 13 (RED case A). "$GUARD_T6_PREFIX" is a STRICT prefix of
       # "$GUARD_T6_SESS" (not the name itself) — must NOT resolve.
@@ -1114,7 +1120,13 @@ cmd_selftest_guard() {
 
       # 15. Caller-supplied "=name" must still resolve — mux_has must strip
       # any leading "=" before re-anchoring (double "==" matches nothing),
-      # same guard session_is_own already applies (lib/session.sh).
+      # same guard session_is_own already applies (lib/session.sh). This
+      # contract is proven under tmux only: zellij's mux_has/mux_kill
+      # branches don't strip a leading "=" the way the tmux branch does, so
+      # under zellij `mux_has "=X"` would be false for a live session X. The
+      # divergence stays silent because this whole case (and cmd_selftest_guard
+      # entirely) never runs under zellij — see the `[ "$MUX" != tmux ]`
+      # early return at the top of this function.
       set +e; mux_has "=$GUARD_T6_SESS" 2>/dev/null; rc=$?; set -e
       if [ "$rc" -eq 0 ]; then
         report_guard_case "15 mux_has: caller-anchored name still resolves" 0
@@ -1135,22 +1147,40 @@ cmd_selftest_guard() {
       fi
 
       # 17 (RED case D). mux_kill on the strict prefix must NOT kill this
-      # sibling session — check the session is STILL LISTED afterwards.
-      # Cleanup by exact name follows regardless of outcome (kept out of
-      # selftest_guard_cleanup's anchored kill so a failure here can't
-      # leave an orphan behind either).
-      set +e; mux_kill "$GUARD_T6_PREFIX" >/dev/null 2>&1; set -e
+      # sibling session — check BOTH that mux_kill itself reports failure
+      # (rc != 0: a rejected/no-op target, not a silent success) AND that
+      # the session is STILL LISTED afterwards. rc alone was not enough: a
+      # missing/renamed mux_kill (rc=127, message swallowed by 2>&1) would
+      # leave the session present and pass for the wrong reason.
+      set +e; mux_kill "$GUARD_T6_PREFIX" >/dev/null 2>&1; rc=$?; set -e
       present=no
       mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
-      if [ "$present" = yes ]; then
+      if [ "$rc" -ne 0 ] && [ "$present" = yes ]; then
         report_guard_case "17 mux_kill: strict prefix spares sibling session" 0
       else
-        report_guard_case "17 mux_kill: strict prefix spares sibling session" 1 "session '$GUARD_T6_SESS' is gone after mux_kill '$GUARD_T6_PREFIX'"
+        report_guard_case "17 mux_kill: strict prefix spares sibling session" 1 "rc=$rc (expected !=0), session '$GUARD_T6_SESS' present=$present (expected yes)"
       fi
+
+      # 18 (positive control for 13-17, esp. 17). mux_kill on the EXACT name
+      # must still kill: proves mux_kill isn't just "always fails" — which
+      # would make case 17 pass for the wrong reason. Asserts BOTH rc == 0
+      # AND the session's real absence from mux_list_sessions afterwards.
+      set +e; mux_kill "$GUARD_T6_SESS" >/dev/null 2>&1; rc=$?; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$rc" -eq 0 ] && [ "$present" = no ]; then
+        report_guard_case "18 mux_kill: exact name still kills" 0
+      else
+        report_guard_case "18 mux_kill: exact name still kills" 1 "rc=$rc (expected 0), session '$GUARD_T6_SESS' present=$present (expected no)"
+      fi
+
+      # Safety-net cleanup regardless of outcome above (kept out of
+      # selftest_guard_cleanup's anchored kill so a failure in 17/18 can't
+      # leave an orphan behind either) — harmless no-op if 18 already killed it.
       tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
     fi
   else
-    echo "note: cases 13-17 skipped (not inside tmux)"
+    echo "note: cases 13-18 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup

@@ -30,23 +30,48 @@ suit est le détail et le "pourquoi" derrière chacune.
   `a920197` (#7), silently lost in the `9863c07` regression, reintroduced
   with `selftest-guard`.
 - **A session name is now taken literally — abbreviations by prefix are no
-  longer accepted.** `mux_has`/`mux_kill` (`lib/mux.sh`) anchor their tmux
-  target with `=` (`-t "=$1"`), forcing an exact match. Before this, an
-  unanchored `-t "$1"` let tmux fall back from exact match to session-name
-  prefix, then to fnmatch — so `mux_has "cockpit-foo"` could silently
-  resolve to `cockpit-foo-bar-123456` and a remembered dead session could
-  "come back to life" via a same-prefixed homonym. This was never a designed
-  shortcut: `resolve_session` (`lib/session.sh`) is a pure passthrough with no
-  resolution logic of its own, so the old fallback was tmux's default
-  behavior leaking through, not a feature. The one place this changes visible
-  behavior is argument disambiguation in `wsh-live.sh` (`output`/`step-run`
-  parsing "is this token a session name or something else?"): a prefix typed
-  by a caller now falls through to the other category instead of matching.
-  Covered by `selftest-guard` cases 13-17. Anchoring stops at `mux_has`/
-  `mux_kill` — target-PANE tmux commands (`send-keys`, `capture-pane`,
-  `split-window`, `pipe-pane`, `list-clients`) reject `=` outright (measured);
-  fixing prefix ambiguity for those means canonicalizing the name once via
-  `mux_session_name` and propagating only that, a separate piece of work.
+  longer accepted.** `mux_has`/`mux_kill`/`mux_clients` (`lib/mux.sh`) anchor
+  their tmux target with `=` (`-t "=$1"`), forcing an exact match. Before
+  this, an unanchored `-t "$1"` let tmux fall back from exact match to
+  session-name prefix, then to fnmatch — so `mux_has "cockpit-foo"` could
+  silently resolve to `cockpit-foo-bar-123456` and a remembered dead session
+  could "come back to life" via a same-prefixed homonym. This was never a
+  designed shortcut: `resolve_session` (`lib/session.sh`) is a pure
+  passthrough with no resolution logic of its own, so the old fallback was
+  tmux's default behavior leaking through, not a feature. The one place this
+  changes visible behavior is argument disambiguation in `wsh-live.sh`
+  (`output`/`step-run` parsing "is this token a session name or something
+  else?"): a prefix typed by a caller now falls through to the other
+  category instead of matching. Covered by `selftest-guard` cases 13-17 (18
+  adds a positive control — see `lib/selftests.sh`).
+  Whether a tmux command honors `=` is **not** predictable from "target-session
+  vs target-pane" alone — measure per command:
+  - Honor `=` (target-session): `has-session`, `kill-session`, and
+    `list-clients` (measured: `list-clients -t "=beta"` → rc=0, `-t "=bet"` →
+    `can't find session: bet`, rc=1). `mux_clients` is anchored the same way
+    as `mux_has`/`mux_kill` — free to add, since its 4 callers
+    (`wsh-live.sh:441,477,727,730`) only ever receive names already
+    validated by `need_session`/`last_session`. `set-option`/`show-option`
+    honor it too (used by `teardown_session`, `lib/session.sh:363-368`).
+  - Reject `=` outright (target-pane, measured): `send-keys`,
+    `capture-pane`, `split-window`, `pipe-pane`. Fixing prefix ambiguity for
+    these means canonicalizing the name once via `mux_session_name` and
+    propagating only that — a separate piece of work.
+  A session literally named `=foo` is not addressable through this code: the
+  `${1#=}` strip in `mux_has`/`mux_kill`/`mux_clients` treats a leading `=`
+  as the anchor marker, not as part of the name. Unreachable via generated
+  names (`cockpit-<prefix>-<ts>`, `[a-z0-9-]`), but reachable via a
+  free-form name passed to `start`.
+- **Anchoring turned an implicit "current session" target into a safe
+  no-op.** Measured: `tmux has-session -t ""` → rc=0, resolving to whatever
+  session is CURRENT on the server; `tmux has-session -t "="` → rc=1 ("no
+  mouse target" — sic). So before this lot's `=` anchoring, `mux_has ""` was
+  true and `mux_kill ""` targeted a real, implicit session — the server's
+  current one. After anchoring, the same empty argument is a safe no-op.
+  Unreachable today (`teardown_session` only ever receives canonical names,
+  `resolve_session` falls back to `SESS_DEFAULT` rather than passing an
+  empty string through) — but it is exactly the failure mode this lot exists
+  to close.
 - **A cockpit left mid-`ssh`/`tailscale ssh` no longer looks reusable.** Once
   hopped, the pane's foreground isn't a bare shell anymore, so
   `session_safe_to_reuse` refuses it and `spawn` opens a fresh session —

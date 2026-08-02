@@ -75,7 +75,11 @@ mux_capture() {  # $1 sess  $2 lines of scrollback to look back
   fi
 }
 mux_clients() {  # attached client lines (empty output = nobody watching)
-  if [ "$MUX" = tmux ]; then tmux list-clients -t "$1" 2>/dev/null
+  # "list-clients" takes a target-SESSION and honors "=" (measured; see
+  # docs/gotchas.md) — same anchoring as mux_has/mux_kill, same rationale.
+  # Free to add: all 4 callers (wsh-live.sh:441,477,727,730) only ever pass
+  # names already validated by need_session/last_session.
+  if [ "$MUX" = tmux ]; then local s="${1#=}"; tmux list-clients -t "=$s" 2>/dev/null
   else "$(zellij_bin)" --session "$1" action list-clients 2>/dev/null | tail -n +2; fi
 }
 mux_kill() {
