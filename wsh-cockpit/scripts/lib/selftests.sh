@@ -852,7 +852,9 @@ cmd_selftest_guard() {
   GUARD_GROUP="cockpit-selftest-guard-group-$$"
   GUARD_DECOY="cockpit-selftest-guard-decoy-$$"
   GUARD_PANES="cockpit-selftest-guard-panes-$$"
-  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count
+  GUARD_T6_PREFIX="cockpit-t6anchor-$$"
+  GUARD_T6_SESS="${GUARD_T6_PREFIX}-1"
+  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
     if [ "$2" -eq 0 ]; then
@@ -873,6 +875,7 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_GROUP" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_PANES" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
@@ -1070,6 +1073,84 @@ cmd_selftest_guard() {
     fi
   else
     echo "note: case 12 skipped (not inside tmux)"
+  fi
+
+  # 13-17. mux_has/mux_kill anchor targets with "=" (exact match) — Task 6.
+  # tmux's default target resolution tries exact name, THEN session-name
+  # prefix, THEN fnmatch, in that order; unanchored, a bare prefix or glob
+  # silently resolves to a DIFFERENT, unrelated session. That is what let a
+  # dead remembered session "come back to life" via a same-prefixed homonym
+  # (session.sh:42) and what would let mux_kill tear down the wrong sibling
+  # session on a prefix collision. Every check below asserts BOTH the rc
+  # mux_has/mux_kill return AND the session's real presence via
+  # mux_list_sessions — asserting rc alone would let rc=127 (function
+  # missing) pass for the wrong reason.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_T6_SESS" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: cases 13-17 skipped (could not create '$GUARD_T6_SESS')"
+    else
+      # 13 (RED case A). "$GUARD_T6_PREFIX" is a STRICT prefix of
+      # "$GUARD_T6_SESS" (not the name itself) — must NOT resolve.
+      set +e; mux_has "$GUARD_T6_PREFIX" 2>/dev/null; rc=$?; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$rc" -ne 0 ] && [ "$present" = yes ]; then
+        report_guard_case "13 mux_has: strict prefix does not resolve" 0
+      else
+        report_guard_case "13 mux_has: strict prefix does not resolve" 1 "rc=$rc (expected !=0), session present=$present (expected yes)"
+      fi
+
+      # 14. Exact name still resolves — non-regression.
+      set +e; mux_has "$GUARD_T6_SESS" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -eq 0 ]; then
+        report_guard_case "14 mux_has: exact name resolves" 0
+      else
+        report_guard_case "14 mux_has: exact name resolves" 1 "rc=$rc"
+      fi
+
+      # 15. Caller-supplied "=name" must still resolve — mux_has must strip
+      # any leading "=" before re-anchoring (double "==" matches nothing),
+      # same guard session_is_own already applies (lib/session.sh).
+      set +e; mux_has "=$GUARD_T6_SESS" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -eq 0 ]; then
+        report_guard_case "15 mux_has: caller-anchored name still resolves" 0
+      else
+        report_guard_case "15 mux_has: caller-anchored name still resolves" 1 "rc=$rc"
+      fi
+
+      # 16 (RED case, fnmatch). A glob pattern must NOT resolve either —
+      # session still alive at this point, so a false pass here could only
+      # come from fnmatch fallback, not from the session being absent.
+      set +e; mux_has "${GUARD_T6_PREFIX}*" 2>/dev/null; rc=$?; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$rc" -ne 0 ] && [ "$present" = yes ]; then
+        report_guard_case "16 mux_has: fnmatch pattern does not resolve" 0
+      else
+        report_guard_case "16 mux_has: fnmatch pattern does not resolve" 1 "rc=$rc (expected !=0), session present=$present (expected yes)"
+      fi
+
+      # 17 (RED case D). mux_kill on the strict prefix must NOT kill this
+      # sibling session — check the session is STILL LISTED afterwards.
+      # Cleanup by exact name follows regardless of outcome (kept out of
+      # selftest_guard_cleanup's anchored kill so a failure here can't
+      # leave an orphan behind either).
+      set +e; mux_kill "$GUARD_T6_PREFIX" >/dev/null 2>&1; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$present" = yes ]; then
+        report_guard_case "17 mux_kill: strict prefix spares sibling session" 0
+      else
+        report_guard_case "17 mux_kill: strict prefix spares sibling session" 1 "session '$GUARD_T6_SESS' is gone after mux_kill '$GUARD_T6_PREFIX'"
+      fi
+      tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
+    fi
+  else
+    echo "note: cases 13-17 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup

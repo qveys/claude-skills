@@ -29,6 +29,24 @@ suit est le détail et le "pourquoi" derrière chacune.
   the caller's own session with exit 8. History: guard introduced by
   `a920197` (#7), silently lost in the `9863c07` regression, reintroduced
   with `selftest-guard`.
+- **A session name is now taken literally — abbreviations by prefix are no
+  longer accepted.** `mux_has`/`mux_kill` (`lib/mux.sh`) anchor their tmux
+  target with `=` (`-t "=$1"`), forcing an exact match. Before this, an
+  unanchored `-t "$1"` let tmux fall back from exact match to session-name
+  prefix, then to fnmatch — so `mux_has "cockpit-foo"` could silently
+  resolve to `cockpit-foo-bar-123456` and a remembered dead session could
+  "come back to life" via a same-prefixed homonym. This was never a designed
+  shortcut: `resolve_session` (`lib/session.sh`) is a pure passthrough with no
+  resolution logic of its own, so the old fallback was tmux's default
+  behavior leaking through, not a feature. The one place this changes visible
+  behavior is argument disambiguation in `wsh-live.sh` (`output`/`step-run`
+  parsing "is this token a session name or something else?"): a prefix typed
+  by a caller now falls through to the other category instead of matching.
+  Covered by `selftest-guard` cases 13-17. Anchoring stops at `mux_has`/
+  `mux_kill` — target-PANE tmux commands (`send-keys`, `capture-pane`,
+  `split-window`, `pipe-pane`, `list-clients`) reject `=` outright (measured);
+  fixing prefix ambiguity for those means canonicalizing the name once via
+  `mux_session_name` and propagating only that, a separate piece of work.
 - **A cockpit left mid-`ssh`/`tailscale ssh` no longer looks reusable.** Once
   hopped, the pane's foreground isn't a bare shell anymore, so
   `session_safe_to_reuse` refuses it and `spawn` opens a fresh session —

@@ -20,7 +20,11 @@ pane_file()  { printf '%s/pane-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs '
 zellij_pane() { cat "$(pane_file "$1")" 2>/dev/null || true; }
 
 mux_has() {
-  if [ "$MUX" = tmux ]; then tmux has-session -t "$1" 2>/dev/null
+  # "=" anchors on exact session name (tmux tries exact -> prefix -> fnmatch
+  # otherwise — measured; see docs/gotchas.md). Strip any leading "=" the
+  # caller may already have supplied before re-anchoring: "==name" matches
+  # nothing (same guard session_is_own already applies in lib/session.sh).
+  if [ "$MUX" = tmux ]; then local s="${1#=}"; tmux has-session -t "=$s" 2>/dev/null
   else mux_list_sessions | grep -Fqx -- "$1"; fi
 }
 mux_list_sessions() {
@@ -75,7 +79,10 @@ mux_clients() {  # attached client lines (empty output = nobody watching)
   else "$(zellij_bin)" --session "$1" action list-clients 2>/dev/null | tail -n +2; fi
 }
 mux_kill() {
-  if [ "$MUX" = tmux ]; then tmux kill-session -t "$1" 2>/dev/null
+  # Anchored exact match — same rationale as mux_has above: an unanchored
+  # kill-session honors tmux's prefix/fnmatch fallback too, so a prefix
+  # collision would tear down the wrong (unrelated) session.
+  if [ "$MUX" = tmux ]; then local s="${1#=}"; tmux kill-session -t "=$s" 2>/dev/null
   else
     local zb rc; zb=$(zellij_bin)
     "$zb" kill-session "$1" >/dev/null 2>&1; rc=$?
