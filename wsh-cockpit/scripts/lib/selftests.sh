@@ -844,6 +844,11 @@ cmd_selftest_guard() {
     echo "selftest-guard: skip (tmux-only — the guard rests on tmux display-message)"
     return 0
   fi
+  # M4 (docs/gotchas.md): this runs on the DEFAULT tmux server, not an
+  # isolated one — case 10 groups a throwaway session onto whatever real
+  # session is currently running this selftest. Warn up front so a reader
+  # of the output (not just the source) sees it before it happens.
+  echo "selftest-guard: note — runs on the default tmux server; case 10 briefly groups a throwaway session onto this call's own live session (see docs/gotchas.md)"
   # NOT local: cleanup runs from the EXIT trap after this function returned
   # (same rationale as cmd_selftest_gc's SESS).
   GUARD_BUSY="cockpit-selftest-guard-busy-$$"
@@ -854,7 +859,9 @@ cmd_selftest_guard() {
   GUARD_PANES="cockpit-selftest-guard-panes-$$"
   GUARD_T6_PREFIX="cockpit-t6anchor-$$"
   GUARD_T6_SESS="${GUARD_T6_PREFIX}-1"
-  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present
+  GUARD_NB_PREFIX="cockpit-t7nb-$$"
+  GUARD_NB_SESS="${GUARD_NB_PREFIX}-full"
+  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
     if [ "$2" -eq 0 ]; then
@@ -876,6 +883,7 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_PANES" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_NB_SESS" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
@@ -1181,6 +1189,45 @@ cmd_selftest_guard() {
     fi
   else
     echo "note: cases 13-18 skipped (not inside tmux)"
+  fi
+
+  # 19 (I2, Task 7). `stop` hands its raw argument straight to
+  # teardown_session with no mux_has check of its own — before the fix,
+  # its six unanchored `tmux set-option -u -t "$sess"` calls resolved a bare
+  # PREFIX just like `set-option` always does (see docs/gotchas.md), so a
+  # prefix that only happens to match a live NEIGHBOUR session silently
+  # wiped that neighbour's remote-mode options while the anchored
+  # `mux_kill` right after correctly refused to kill anything. Reproduces
+  # the end-to-end measurement in task-7-brief.md I2: arm a session with
+  # all three option kinds teardown_session clears, call teardown_session
+  # with a STRICT prefix of its name (never the name itself), then assert
+  # the neighbour is both still ALIVE and all three options are UNCHANGED.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_NB_SESS" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 19 skipped (could not create '$GUARD_NB_SESS')"
+    else
+      remote_mode_set "$GUARD_NB_SESS" 1
+      remote_host_set "$GUARD_NB_SESS" "selftest-guard-nb-host"
+      remote_helper_path_set "$GUARD_NB_SESS" sep "/selftest/guard/nb/sep-path"
+      set +e; teardown_session "$GUARD_NB_PREFIX" >/dev/null 2>&1; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_NB_SESS" && present=yes
+      mode=$( (remote_mode_get "$GUARD_NB_SESS") && echo 1 || echo "" )
+      host=$(remote_host_get "$GUARD_NB_SESS")
+      sep=$(remote_helper_path_get "$GUARD_NB_SESS" sep)
+      if [ "$present" = yes ] && [ "$mode" = 1 ] && [ "$host" = "selftest-guard-nb-host" ] && [ "$sep" = "/selftest/guard/nb/sep-path" ]; then
+        report_guard_case "19 teardown_session: prefix arg spares a neighbour session's options" 0
+      else
+        report_guard_case "19 teardown_session: prefix arg spares a neighbour session's options" 1 "present=$present mode='$mode' host='$host' sep='$sep' (expected yes/1/selftest-guard-nb-host/…/sep-path)"
+      fi
+      tmux kill-session -t "=$GUARD_NB_SESS" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 19 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup

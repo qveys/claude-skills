@@ -360,12 +360,30 @@ teardown_session() {
   rm -f "$(oneshot_ssh_file "$sess")" 2>/dev/null || true
   tab_cache_invalidate "$sess"
   if [ "$MUX" = tmux ]; then
-    tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
+    # `stop` (wsh-live.sh) hands its raw argument straight to this function
+    # with no mux_has check of its own — so $sess can be a bare PREFIX, not
+    # the exact session name. `set-option` rejects "=" and resolves by
+    # PREFIX instead (measured — see docs/gotchas.md's I1/I2 gotchas), so
+    # unlike the anchored `mux_kill` below, the six set-option calls used to
+    # run against whatever session $sess happened to prefix-match — wiping
+    # a live NEIGHBOUR's remote-mode options while `mux_kill` correctly (and
+    # silently) refused to kill anything. `mux_has` is anchored ("=", exact
+    # match only), so gate on it FIRST: only when an EXACT session really
+    # exists do we resolve its canonical name (mux_session_name, same
+    # round-trip session_is_own uses, for the rare grouped-session alias)
+    # and let these calls proceed. If nothing matches exactly, leave $sess
+    # untouched and skip the whole block — closes the hole for whatever
+    # tmux target command gets added here next, not just today's six lines.
+    if mux_has "$sess"; then
+      local canon; canon=$(mux_session_name "$sess" 2>/dev/null || true)
+      [ -n "$canon" ] && sess="$canon"
+      tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
+    fi
   fi
   # Close and remove the session's ControlMaster socket, if any (orphaned
   # otherwise — see control_path_for_session). "-O exit" needs a host

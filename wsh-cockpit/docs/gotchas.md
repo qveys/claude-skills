@@ -51,12 +51,74 @@ suit est le détail et le "pourquoi" derrière chacune.
     `can't find session: bet`, rc=1). `mux_clients` is anchored the same way
     as `mux_has`/`mux_kill` — free to add, since its 4 callers
     (`wsh-live.sh:441,477,727,730`) only ever receive names already
-    validated by `need_session`/`last_session`. `set-option`/`show-option`
-    honor it too (used by `teardown_session`, `lib/session.sh:363-368`).
-  - Reject `=` outright (target-pane, measured): `send-keys`,
-    `capture-pane`, `split-window`, `pipe-pane`. Fixing prefix ambiguity for
-    these means canonicalizing the name once via `mux_session_name` and
-    propagating only that — a separate piece of work.
+    validated by `need_session`/`last_session`.
+  - Reject `=` outright and resolve by PREFIX instead (measured, tmux 3.7b):
+    `set-option`/`show-option`, along with `send-keys`, `capture-pane`,
+    `split-window`, `pipe-pane`. Previously misclassified in this file as
+    honoring `=` — measured wrong, by deduction, not by running it (see the
+    I2 gotcha below for what that cost). Measured on an isolated server with
+    only a session named `soptlong`: `set-option -t "=sopt" @m 1` → rc=1
+    `no such session: =sopt` (the anchor is rejected), but `set-option -t
+    "sopt" @m 7` → rc=0, and `show-option -v -t soptlong @m` → `7` — the
+    unanchored write landed on `soptlong` via prefix resolution, the exact
+    opposite of what an anchored command would do. Piège associé :
+    `show-option -qv -t "=X" @opt` still returns rc=0 with an EMPTY value
+    when `X` doesn't exactly exist (`-q` swallows the "no such session"
+    error) — a quiet empty result is not proof the target was rejected, nor
+    that it doesn't exist. Fixing prefix ambiguity for these commands means
+    canonicalizing the name once via `mux_session_name` and propagating
+    only that — a separate piece of work (`send-keys`/`capture-pane`/
+    `split-window`/`pipe-pane` still need it; `set-option`/`show-option` in
+    `teardown_session` got a narrower fix — see the next gotcha).
+- **`stop <prefix>` used to silently corrupt a LIVE neighbour session
+  instead of doing nothing.** `stop` (`wsh-live.sh`) passes its raw argument
+  straight to `teardown_session` (`lib/session.sh`) with no `mux_has` check
+  of its own. `teardown_session`'s six `tmux set-option -u -t "$sess"` calls
+  are unanchored, and `set-option` resolves by PREFIX (see the gotcha
+  above) — so `stop cockpit-nb`, with no session exactly named
+  `cockpit-nb` but a live `cockpit-nb-222222` next to it, used to wipe that
+  neighbour's `@wsh_remote_mode`/`@wsh_remote_host`/helper-path options
+  while the anchored `mux_kill` right after correctly (and silently)
+  refused to kill anything — measured end to end: `stop cockpit-nb` prints
+  `no session 'cockpit-nb' to kill` (rc=1) and the neighbour's three
+  options come back empty immediately after, with the neighbour itself
+  still alive and never mentioned. Concretely dangerous for a neighbour
+  mid-SSH-hop with `remote-init` done: its next `send` loses remote mode
+  and tries to source a helper path local to the Mac on the remote host;
+  `push`/`pull` lose the recorded host. Not a new hole — before the "="
+  anchoring (Task 6), the same call used to actually KILL the neighbour
+  (loud, at least visible); anchoring `mux_kill` alone turned that into a
+  silent partial corruption instead. Fixed by gating the six set-option
+  calls on an anchored `mux_has "$sess"` check at the top of
+  `teardown_session` (`lib/session.sh:357`): only once that confirms an
+  EXACT session exists does the function resolve its canonical name
+  (`mux_session_name`) and touch its options; a bare prefix with no exact
+  match now leaves the block untouched entirely. Closing `stop`/`gc`
+  themselves against acting on a prefix at all (rather than just this one
+  function's internal consistency) is deferred to
+  `docs/plans/2026-08-02-desambiguisation-argument-session.md`.
+- **`gc` has NO own-session guard.** Unlike `spawn`'s reuse path
+  (`session_is_own`/`session_safe_to_reuse`), `gc_should_kill`
+  (`lib/gc.sh`) only checks idle age and attached-client count — nothing in
+  it recognizes "this is the session the sweep is itself running inside".
+  `gc` runs automatically, best-effort, in the background on every `spawn`
+  and every `start`. Measured: running `gc --idle=0` from inside a
+  detached `cockpit-*` session kills that session out from under itself.
+  Conditions to self-kill: the calling session is named `cockpit-*`,
+  detached (no attached tmux client), and idle for at least the threshold
+  (default 86400s, override with `--idle=`). Closing this (a real
+  `session_is_own` guard on `gc`'s destroy path) is deferred to
+  `docs/plans/2026-08-02-desambiguisation-argument-session.md`.
+- **`selftest-guard` creates sessions on the DEFAULT tmux server, some of
+  them GROUPED onto the caller's own live session.** Case 10 (grouped
+  session sharing the caller's pane) runs `tmux new-session -t "=$own"`
+  against whatever real tmux session is currently running the selftest
+  itself — not an isolated `-L` socket. It cleans up after itself
+  (`tmux kill-session` on its own throwaway names, plus the EXIT trap), but
+  it is operating directly on the tmux server that also holds the user's
+  real Wave-wrapped sessions for the duration of the run. Never invoke it
+  from inside a session you cannot afford to see momentarily grouped, and
+  never edit it without re-reading the cleanup trap.
   A session literally named `=foo` is not addressable through this code: the
   `${1#=}` strip in `mux_has`/`mux_kill`/`mux_clients` treats a leading `=`
   as the anchor marker, not as part of the name. Unreachable via generated

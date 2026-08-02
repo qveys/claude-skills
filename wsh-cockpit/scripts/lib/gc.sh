@@ -20,9 +20,14 @@
 # Returns 0 (yes — kill it) or 1 (no — keep it).
 gc_should_kill() {
   local now="$1" activity="$2" attached="$3" idle="$4"
-  # Non-negotiable guard: an attached session is never a GC candidate,
-  # regardless of age — mirrors the "never touch a session in use" spirit of
-  # the own_tmux_session guard elsewhere in this skill.
+  # This checks idle age and the attached-client count ONLY — it does NOT
+  # know or care whether the session being evaluated is the one the sweep
+  # itself is running inside. There is no own_tmux_session-style guard here:
+  # measured, `gc --idle=0` run from inside a detached cockpit-* session
+  # kills that session out from under itself. See the "gc has NO
+  # own-session guard" gotcha in docs/gotchas.md; closing this (a real
+  # session_is_own check on gc's destroy path) is deferred to
+  # docs/plans/2026-08-02-desambiguisation-argument-session.md.
   [ "$attached" = "0" ] || return 1
   local age=$((now - activity))
   [ "$age" -ge "$idle" ]
