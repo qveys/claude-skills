@@ -516,13 +516,7 @@ start)
     if mux_has "$SESS"; then
       if [ "$REUSE" -eq 1 ]; then
         if session_is_own "$SESS"; then
-          own=$(own_tmux_session 2>/dev/null || true)
-          canon=$(mux_session_name "$SESS" 2>/dev/null || true)
-          if [ -n "$canon" ] && [ "$canon" != "$SESS" ]; then
-            echo "⚠️  refusing: '$SESS' resolves to '$canon', the tmux session this call is running inside (your own controlling terminal) — pick a different name" >&2
-          else
-            echo "⚠️  refusing: '$SESS' is the tmux session this call is running inside (your own controlling terminal) — pick a different name" >&2
-          fi
+          session_own_refusal "$SESS"
           exit 8
         fi
         echo "session '$SESS' already exists — reusing it (--reuse)"

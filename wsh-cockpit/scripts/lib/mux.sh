@@ -109,6 +109,16 @@ mux_pane_id() {  # id of the target session's ACTIVE pane, best-effort
   if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null
   else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
 }
+mux_session_panes() {  # ALL pane ids of the target session, one per line
+  # mux_pane_id only ever sees the ACTIVE pane — a caller sitting in a
+  # non-active pane of a multi-pane (or grouped) session would be invisible
+  # to a check built on that alone. list-panes is a target-SESSION command
+  # (unlike display-message, which targets a pane), so the "=" anchor here
+  # is correct and necessary: $1 is already a canonical session name by the
+  # time this is called.
+  if [ "$MUX" = tmux ]; then tmux list-panes -s -t "=$1" -F '#{pane_id}' 2>/dev/null
+  else printf ''; fi  # zellij: no per-pane enumeration — background sessions are single-pane
+}
 
 # Audit trail: pipe the pane's rendered output to a per-session log file.
 # WSH_LIVE_LOG=0 disables. Best-effort by design (`|| return 0` everywhere):

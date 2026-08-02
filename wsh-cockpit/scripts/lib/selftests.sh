@@ -851,7 +851,8 @@ cmd_selftest_guard() {
   GUARD_KEY="selftest-guard-$$"
   GUARD_GROUP="cockpit-selftest-guard-group-$$"
   GUARD_DECOY="cockpit-selftest-guard-decoy-$$"
-  local rc failures=0 own cmd tries found pfx resolved canon
+  GUARD_PANES="cockpit-selftest-guard-panes-$$"
+  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
     if [ "$2" -eq 0 ]; then
@@ -871,6 +872,7 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_IDLE" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_GROUP" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_PANES" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
@@ -990,22 +992,84 @@ cmd_selftest_guard() {
   if [ -n "${TMUX:-}" ]; then
     own=$(own_tmux_session)
     set +e
-    tmux new-session -d -s "$GUARD_GROUP" -t "$own" 2>/dev/null
+    tmux new-session -d -s "$GUARD_GROUP" -t "=$own" 2>/dev/null
     rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
       echo "note: case 10 skipped (could not create a grouped session on '$own')"
     else
       set +e
-      tmux new-session -d -s "$GUARD_DECOY" -t "$own" 2>/dev/null
+      tmux new-session -d -s "$GUARD_DECOY" -t "=$own" 2>/dev/null
       set -e
       set +e; session_safe_to_reuse "$GUARD_GROUP" 2>/dev/null; rc=$?; set -e
       if [ "$rc" -ne 0 ]; then report_guard_case "10 grouped session sharing own pane refused" 0
       else report_guard_case "10 grouped session sharing own pane refused" 1 "rc=0 on '$GUARD_GROUP' (own_tmux_session now resolves to '$(own_tmux_session 2>/dev/null || true)')"; fi
+      # Kill both grouped sessions right away (not just at the end via the
+      # EXIT trap): leaving GUARD_GROUP alive would keep dragging
+      # own_tmux_session's drift (see block comment above) into the cases
+      # that follow, which need a clean read of the caller's real session.
       tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
+      tmux kill-session -t "=$GUARD_GROUP" 2>/dev/null || true
     fi
   else
     echo "note: case 10 skipped (not inside tmux)"
+  fi
+
+  # 11. `=NAME` alias: tmux honours `=` as an exact-match anchor for
+  #     target-SESSION commands (has-session) but NOT for target-PANE ones
+  #     (display-message, capture-pane) — those silently return empty with
+  #     rc=0 instead of erroring. So today `session_safe_to_reuse "=$own"`
+  #     falls through every check blind and reports 0 (reusable): a caller
+  #     holding "=<own>" would slip straight past the guard, and mux_kill
+  #     (which DOES honour "=") would then tear down the caller's own
+  #     session.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e; session_safe_to_reuse "=$own" 2>/dev/null; rc=$?; set -e
+    if [ "$rc" -ne 0 ]; then report_guard_case "11 =own alias refused" 0
+    else report_guard_case "11 =own alias refused" 1 "rc=0 on '=$own' (mux_session_name/mux_pane_id are blind to a '=' target-pane)"; fi
+  else
+    echo "note: case 11 skipped (not inside tmux)"
+  fi
+
+  # 12. pane-membership primitive: mux_pane_id only ever reports a target's
+  #     ACTIVE pane — a caller sitting in a NON-active pane of a multi-pane
+  #     session would be invisible to a check built on mux_pane_id alone.
+  #     mux_session_panes must enumerate ALL panes so session_is_own can
+  #     test membership instead of identity. This covers only the
+  #     primitive (mux_session_panes sees both panes where mux_pane_id
+  #     sees one) — NOT the end-to-end "caller sits in a non-active pane
+  #     of the target" scenario, which would require splitting the LIVE
+  #     window the user is watching. Do not do that here.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_PANES" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 12 skipped (could not create '$GUARD_PANES')"
+    else
+      # split-window is a target-PANE/window command, not target-session —
+      # unlike list-panes just below, "=" is NOT honoured here (measured:
+      # "can't find pane" on this tmux, swallowed by `|| true` the first
+      # time this test was written, which silently left the session at
+      # ONE pane and made the case fail for the wrong reason).
+      tmux split-window -d -t "$GUARD_PANES" 2>/dev/null || true
+      set +e
+      panes=$(mux_session_panes "$GUARD_PANES" 2>/dev/null)
+      active=$(mux_pane_id "$GUARD_PANES" 2>/dev/null)
+      set -e
+      pane_count=$(printf '%s\n' "$panes" | grep -c . || true)
+      active_count=$(printf '%s\n' "$active" | grep -c . || true)
+      if [ "$pane_count" -eq 2 ] && [ "$active_count" -eq 1 ]; then
+        report_guard_case "12 mux_session_panes sees both panes, mux_pane_id only the active one" 0
+      else
+        report_guard_case "12 mux_session_panes sees both panes, mux_pane_id only the active one" 1 "panes='$panes' (count=$pane_count) active='$active' (count=$active_count)"
+      fi
+      tmux kill-session -t "=$GUARD_PANES" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 12 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup

@@ -16,8 +16,10 @@ suit est le détail et le "pourquoi" derrière chacune.
   probe (`hostname; pwd; whoami`) gets submitted as a **new chat message**
   instead of executing, and you only notice from the confused reply.
   `session_safe_to_reuse()` (`lib/session.sh`) guards on two checks before
-  any reuse: (1) an unconditional block on the exact tmux session the caller
-  is itself running inside (`$TMUX` + `tmux display-message -p '#S'`, via
+  any reuse: (1) an unconditional block on any tmux session that resolves to,
+  or shares a pane with, the one the caller is itself running inside — exact
+  name, prefix, fnmatch, anchored `=name`, or a grouped session under another
+  name are all caught (`$TMUX` + `tmux display-message -p '#S'`, via
   `own_tmux_session`) — this catches the incident above, since
   `pane_current_command` alone would report "bash" from inside the check
   itself; (2) a `pane_current_command` heuristic that rejects any OTHER
@@ -25,6 +27,16 @@ suit est le détail et le "pourquoi" derrière chacune.
   the caller's own session with exit 8. History: guard introduced by
   `a920197` (#7), silently lost in the `9863c07` regression, reintroduced
   with `selftest-guard`.
+- **A cockpit left mid-`ssh`/`tailscale ssh` no longer looks reusable.** Once
+  hopped, the pane's foreground isn't a bare shell anymore, so
+  `session_safe_to_reuse` refuses it and `spawn` opens a fresh session —
+  new FIDO2 auth and a second Wave block. Not a bug: `pane_current_command`
+  says nothing about what's running at the far end of the tunnel (a remote
+  shell is reusable, a remote `claude` isn't), and that information isn't
+  available locally. Until lot 2 treats `ssh`/`tailscale`/`mosh` as adoptable
+  states (mandatory situate probe — already flagged as a NOTE in
+  `lib/session.sh`), work around it by reusing the existing session
+  explicitly (`SESSION=…`) instead of calling `spawn` again.
 - **Never `start cockpit` blindly.** Another agent may already own that tmux
   session. Use `spawn` to open/continue your cockpit; it reuses an alive session
   automatically. Only `spawn --force` creates a duplicate window.

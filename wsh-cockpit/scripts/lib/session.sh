@@ -85,28 +85,80 @@ own_tmux_session() {
 }
 
 # Whether <sess> designates the tmux session the caller is itself running
-# inside — not just by the name it was given (a plain name comparison is
-# fooled two ways, both proven on this machine):
-#   1. exact name match (the obvious case: caller passed its own name back);
-#   2. alias-by-prefix: tmux's `-t` resolves exact -> prefix -> fnmatch, so a
-#      strict prefix of the caller's session name can also name it — closed
-#      by comparing the CANONICAL name (mux_session_name), not the raw string;
-#   3. grouped session: `tmux new-session -t <own>` creates a session with a
-#      DIFFERENT name sharing the caller's own pane (this is how Wave wraps
-#      blocks) — closed by comparing the target's active pane id to
-#      $TMUX_PANE, the one identity that stays pinned to the caller's actual
-#      pane regardless of what any session happens to be named.
-# Silent: it only tests. Callers write the refusal message.
+# inside. With grouped sessions "my session" has no unique answer: several
+# session names can share the exact same pane, and the two ways tmux gives
+# you to name a session (the string you were handed vs. `#{session_name}`)
+# can disagree (measured on this machine: `$TMUX`'s sid names one session,
+# `#S` names another, same live pane). The pane is the only identity that
+# stays pinned to the caller regardless of naming, so pane membership is
+# the PRIMARY test; name equality is only a fallback for when pane info is
+# unavailable:
+#   1. strip a leading "=" anchor — `=X` and `X` name the same session, but
+#      tmux only resolves "=" for target-SESSION commands (has-session), not
+#      target-PANE ones (display-message, capture-pane): left unstripped,
+#      the canonical-name lookup below goes blind (empty, rc=0) on exactly
+#      the input this function most needs to catch, and `mux_kill` — which
+#      DOES honour "=" — would then tear down the caller's own session;
+#   2. resolve the canonical name (mux_session_name), falling back to the
+#      stripped name itself if that lookup comes back empty;
+#   3. PRIMARY — is $TMUX_PANE non-empty and a member of
+#      mux_session_panes(canonical)? Catches grouped sessions (a different
+#      session name sharing the caller's pane — how Wave wraps blocks) and,
+#      as a side effect, exact/prefix/fnmatch aliases too, since those all
+#      resolve to a session containing that same pane;
+#   4. FALLBACK (only reached when $TMUX_PANE is unset) — raw or canonical
+#      name equal to own_tmux_session().
+# Sets SESSION_OWN_CANON / SESSION_OWN_REASON (exact|alias|shared-pane) /
+# SESSION_OWN_PANE (shared-pane only) for session_own_refusal to build a
+# message from — deliberately NOT `local`: callers read them after return.
+# Silent otherwise: it only tests, callers write the refusal message.
 # rc 1 outside tmux and under zellij (own_tmux_session is a no-op there),
 # same as before this function existed.
+SESSION_OWN_CANON=""
+SESSION_OWN_REASON=""
+SESSION_OWN_PANE=""
 session_is_own() {
-  local sess="$1" own pane
+  local raw="$1" sess canon own panes
+  sess="${raw#=}"
+  canon=$(mux_session_name "$sess" 2>/dev/null || true)
+  [ -n "$canon" ] || canon="$sess"
+  SESSION_OWN_CANON="$canon"
+  SESSION_OWN_REASON=""
+  SESSION_OWN_PANE=""
   if ! own=$(own_tmux_session); then return 1; fi
-  [ "$sess" = "$own" ] && return 0
-  [ "$(mux_session_name "$sess")" = "$own" ] && return 0
-  pane=$(mux_pane_id "$sess") || true
-  [ -n "$pane" ] && [ "$pane" = "${TMUX_PANE:-}" ] && return 0
+
+  if [ -n "${TMUX_PANE:-}" ]; then
+    panes=$(mux_session_panes "$canon")
+    if printf '%s\n' "$panes" | grep -Fqx -- "$TMUX_PANE"; then
+      if [ "$raw" = "$own" ]; then SESSION_OWN_REASON="exact"
+      elif [ "$canon" = "$own" ]; then SESSION_OWN_REASON="alias"
+      else SESSION_OWN_REASON="shared-pane"; SESSION_OWN_PANE="$TMUX_PANE"
+      fi
+      return 0
+    fi
+  fi
+
+  if [ "$raw" = "$own" ]; then SESSION_OWN_REASON="exact"; return 0; fi
+  if [ "$canon" = "$own" ]; then SESSION_OWN_REASON="alias"; return 0; fi
   return 1
+}
+
+# Refusal message for a target session_is_own just confirmed is the
+# caller's own — reads the globals it sets, so always call this right
+# after a session_is_own that returned 0. Factored so session_safe_to_reuse
+# and `start --reuse` (wsh-live.sh) can't re-diverge the way they already
+# had (the ~6-line block used to be duplicated, with slightly different
+# wording in each place).
+session_own_refusal() {
+  local sess="$1"
+  case "$SESSION_OWN_REASON" in
+    shared-pane)
+      echo "⚠️  session '$sess' shares pane $SESSION_OWN_PANE with the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2 ;;
+    alias)
+      echo "⚠️  session '$sess' resolves to '$SESSION_OWN_CANON', the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2 ;;
+    *)
+      echo "⚠️  session '$sess' IS the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2 ;;
+  esac
 }
 
 # A session is safe to silently reuse only if BOTH hold:
@@ -120,15 +172,9 @@ session_is_own() {
 # NOTE (spec claude-cockpit §2): lot 2 extends check 2 for ADOPTION with
 # ssh/tailscale/mosh as adoptable states — reuse stays bare-shell strict.
 session_safe_to_reuse() {
-  local sess="$1" cmd own canon
+  local sess="$1" cmd
   if session_is_own "$sess"; then
-    own=$(own_tmux_session 2>/dev/null || true)
-    canon=$(mux_session_name "$sess" 2>/dev/null || true)
-    if [ -n "$canon" ] && [ "$canon" != "$sess" ]; then
-      echo "⚠️  session '$sess' resolves to '$canon', the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2
-    else
-      echo "⚠️  session '$sess' IS the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2
-    fi
+    session_own_refusal "$sess"
     return 1
   fi
   cmd=$(mux_pane_command "$sess")
