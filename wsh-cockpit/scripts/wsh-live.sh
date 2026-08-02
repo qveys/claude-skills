@@ -592,7 +592,8 @@ banner)
     echo "banner: unknown type '$TYPE' (want header|phase|step|done)" >&2; exit 11 ;;
   esac
   SESS=""
-  # Optional session is only recognized when it is the sole remaining argument.
+  # Optional session is recognized only when it is NOT the sole remaining
+  # argument — otherwise `banner header "cockpit-x"` would lose its text.
   if [ $# -gt 1 ] && mux_has "${!#}"; then
     SESS="${!#}"
     set -- "${@:1:$#-1}"

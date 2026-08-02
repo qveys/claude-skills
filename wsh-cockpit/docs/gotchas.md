@@ -19,8 +19,10 @@ suit est le détail et le "pourquoi" derrière chacune.
   any reuse: (1) an unconditional block on any tmux session that resolves to,
   or shares a pane with, the one the caller is itself running inside — exact
   name, prefix, fnmatch, anchored `=name`, or a grouped session under another
-  name are all caught (`$TMUX` + `tmux display-message -p '#S'`, via
-  `own_tmux_session`) — this catches the incident above, since
+  name are all caught primarily via `$TMUX_PANE` membership in
+  `mux_session_panes` (`tmux list-panes -s`), falling back to
+  `own_tmux_session` (`$TMUX` + `tmux display-message -p '#S'`) only when
+  `$TMUX_PANE` is unset — this catches the incident above, since
   `pane_current_command` alone would report "bash" from inside the check
   itself; (2) a `pane_current_command` heuristic that rejects any OTHER
   session whose foreground isn't a bare shell. `start <name> --reuse` refuses

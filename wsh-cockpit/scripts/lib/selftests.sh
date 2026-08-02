@@ -987,8 +987,8 @@ cmd_selftest_guard() {
   #     check exists. A throwaway decoy grouped session created right after
   #     shifts that drift away from GUARD_GROUP (confirmed: current becomes
   #     the decoy), so the exact-name AND canonical-name checks both
-  #     genuinely fail here and only the pane-identity check (mux_pane_id ==
-  #     $TMUX_PANE) can still catch it.
+  #     genuinely fail here and only the pane-membership check
+  #     (mux_session_panes contains $TMUX_PANE) can still catch it.
   if [ -n "${TMUX:-}" ]; then
     own=$(own_tmux_session)
     set +e
@@ -1027,7 +1027,7 @@ cmd_selftest_guard() {
     own=$(own_tmux_session)
     set +e; session_safe_to_reuse "=$own" 2>/dev/null; rc=$?; set -e
     if [ "$rc" -ne 0 ]; then report_guard_case "11 =own alias refused" 0
-    else report_guard_case "11 =own alias refused" 1 "rc=0 on '=$own' (mux_session_name/mux_pane_id are blind to a '=' target-pane)"; fi
+    else report_guard_case "11 =own alias refused" 1 "rc=0 on '=$own' (mux_session_name/mux_session_panes are blind to a '=' target-pane)"; fi
   else
     echo "note: case 11 skipped (not inside tmux)"
   fi

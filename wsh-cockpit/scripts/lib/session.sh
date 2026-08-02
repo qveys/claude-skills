@@ -128,8 +128,8 @@ session_is_own() {
   if ! own=$(own_tmux_session); then return 1; fi
 
   if [ -n "${TMUX_PANE:-}" ]; then
-    panes=$(mux_session_panes "$canon")
-    if printf '%s\n' "$panes" | grep -Fqx -- "$TMUX_PANE"; then
+    panes=$(mux_session_panes "$canon" || true)
+    if grep -Fqx -- "$TMUX_PANE" <<<"$panes"; then
       if [ "$raw" = "$own" ]; then SESSION_OWN_REASON="exact"
       elif [ "$canon" = "$own" ]; then SESSION_OWN_REASON="alias"
       else SESSION_OWN_REASON="shared-pane"; SESSION_OWN_PANE="$TMUX_PANE"

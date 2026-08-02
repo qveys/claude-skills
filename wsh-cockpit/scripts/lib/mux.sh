@@ -112,10 +112,15 @@ mux_pane_id() {  # id of the target session's ACTIVE pane, best-effort
 mux_session_panes() {  # ALL pane ids of the target session, one per line
   # mux_pane_id only ever sees the ACTIVE pane — a caller sitting in a
   # non-active pane of a multi-pane (or grouped) session would be invisible
-  # to a check built on that alone. list-panes is a target-SESSION command
-  # (unlike display-message, which targets a pane), so the "=" anchor here
-  # is correct and necessary: $1 is already a canonical session name by the
-  # time this is called.
+  # to a check built on that alone. The "=" anchor below is kept but is
+  # INERT here: measured, `list-panes -s -t "=probe-o"` still resolves by
+  # prefix and returns probe-one's panes (an unknown target errors as
+  # "can't find window", not "can't find session"). A looser resolution only
+  # widens the refusal in session_is_own, never narrows it, so this is
+  # harmless — but the pane-membership fix does not rely on the anchor.
+  # Lesson: target-session vs target-pane is NOT a reliable predictor of
+  # whether "=" is honoured (has-session honours it, list-panes doesn't,
+  # split-window rejects it outright) — measure per command, don't assume.
   if [ "$MUX" = tmux ]; then tmux list-panes -s -t "=$1" -F '#{pane_id}' 2>/dev/null
   else printf ''; fi  # zellij: no per-pane enumeration — background sessions are single-pane
 }
