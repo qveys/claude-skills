@@ -515,6 +515,11 @@ start)
     SESS="${ARGS[0]}"
     if mux_has "$SESS"; then
       if [ "$REUSE" -eq 1 ]; then
+        # Deliberate: --reuse applies ONLY the identity block (own session,
+        # by any alias), NOT session_safe_to_reuse's bare-shell foreground
+        # heuristic — --reuse is an explicit "continue THIS session", so a
+        # non-shell foreground the caller presumably knows about is theirs
+        # to own. spawn's silent reuse keeps both checks.
         rc=0; session_is_own "$SESS" || rc=$?
         if [ "$rc" -eq 2 ]; then
           session_indeterminate_refusal "$SESS"
@@ -527,6 +532,16 @@ start)
         echo "session '$SESS' already exists — reusing it (--reuse)"
         remember_session "$SESS"
       else
+        # Same probe before suggesting `--reuse`: pointing the caller at a
+        # command line the guard will then refuse (exit 8 again, on their own
+        # session) is worse than refusing outright here. rc=2 (identity
+        # indeterminable) keeps the generic message — a --reuse retry will
+        # explain the indeterminacy itself.
+        rc=0; session_is_own "$SESS" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+          session_own_refusal "$SESS"
+          exit 8
+        fi
         cat >&2 <<MSG
 session '$SESS' already exists — refusing to reuse it (another agent or an earlier
 cockpit may still be attached).
@@ -1046,5 +1061,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard} [args]" >&2; exit 2 ;;
 esac

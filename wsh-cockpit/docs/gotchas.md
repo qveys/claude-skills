@@ -27,7 +27,10 @@ suit est le détail et le "pourquoi" derrière chacune.
   `pane_current_command` alone would report "bash" from inside the check
   itself; (2) a `pane_current_command` heuristic that rejects any OTHER
   session whose foreground isn't a bare shell. `start <name> --reuse` refuses
-  the caller's own session with exit 8. History: guard introduced by
+  the caller's own session with exit 8 but deliberately applies only check 1:
+  `--reuse` is an explicit "continue THIS session", so a non-shell foreground
+  is presumed known to the caller — only `spawn`'s silent reuse runs the
+  bare-shell heuristic too. History: guard introduced by
   `a920197` (#7), silently lost in the `9863c07` regression, reintroduced
   with `selftest-guard`.
 - **A session name is now taken literally — abbreviations by prefix are no
