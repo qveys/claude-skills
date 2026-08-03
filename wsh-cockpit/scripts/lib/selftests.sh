@@ -1287,6 +1287,33 @@ cmd_selftest_guard() {
     report_guard_case "21 anchored =name still hits the foreground check" 1 "rc=$rc (expected 1) on '=$GUARD_BUSY' (foreground top)"
   fi
 
+  # 22 (Task 1, lot 2, stop). `stop <own session>` must refuse instead of
+  # killing the caller out from under itself — mirrors case 8 (start
+  # --reuse) but guards the stop) block instead of start's REUSE bypass.
+  # Confined under GUARD_KEY like case 8: WSH_COCKPIT_AGENT only matters to
+  # `stop` for the state-file cleanup at the tail of teardown_session, but
+  # keeping the same confinement pattern as case 8 avoids re-diverging.
+  # WARNING FOR ANYONE RUNNING THIS BY HAND: before the guard exists, this
+  # case actually KILLS the tmux session it runs inside — never run
+  # selftest-guard from your real controlling terminal (see the module-wide
+  # note this function prints, and docs/gotchas.md).
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" stop "$own" >/dev/null 2>&1
+    rc=$?
+    set -e
+    present=no
+    mux_list_sessions | grep -Fqx -- "$own" && present=yes
+    if [ "$rc" -eq 8 ] && [ "$present" = yes ]; then
+      report_guard_case "22 stop refuses own session (exit 8), session still alive" 0
+    else
+      report_guard_case "22 stop refuses own session (exit 8), session still alive" 1 "rc=$rc (expected 8), present=$present (expected yes)"
+    fi
+  else
+    echo "note: case 22 skipped (not inside tmux)"
+  fi
+
   selftest_guard_cleanup
   trap - EXIT
   if [ "$failures" -eq 0 ]; then echo "selftest-guard: all cases passed"; return 0

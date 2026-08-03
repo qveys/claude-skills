@@ -1051,6 +1051,26 @@ stop)
     SESS=""; [ -f "$SF" ] && SESS=$(tr -d '[:space:]' <"$SF")
     [ -n "$SESS" ] || SESS="$SESS_DEFAULT"
   fi
+  # Own-session guard (Task 1, lot 2): stop is the other place a raw
+  # caller-supplied session name reaches a destructive call, alongside
+  # start --reuse above — and unlike that reuse path this one is
+  # unconditional, no --force escape hatch. Lives HERE, not inside
+  # resolve_session/teardown_session: resolve_session must stay
+  # mux-agnostic (also used by send/read/current, which never destroy
+  # anything), and teardown_session is shared with `gc`, which gets its
+  # OWN guard below in lib/gc.sh — deliberately different in kind: a sweep
+  # skips its own session and continues on the rest, `stop` refuses
+  # outright since it only ever targets the one session it was given
+  # (plan §3 bis: guard placement follows effect class, not call site).
+  rc=0; session_is_own "$SESS" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    session_indeterminate_refusal "$SESS"
+    exit 8
+  fi
+  if [ "$rc" -eq 0 ]; then
+    session_own_refusal "$SESS"
+    exit 8
+  fi
   # Actual kill + state cleanup (seq file, sep/step helper options, web view,
   # last-session pointer) lives in teardown_session (lib/session.sh) — shared
   # with `gc`, which needs the exact same per-session cleanup on a sweep.
