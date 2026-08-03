@@ -515,7 +515,12 @@ start)
     SESS="${ARGS[0]}"
     if mux_has "$SESS"; then
       if [ "$REUSE" -eq 1 ]; then
-        if session_is_own "$SESS"; then
+        rc=0; session_is_own "$SESS" || rc=$?
+        if [ "$rc" -eq 2 ]; then
+          session_indeterminate_refusal "$SESS"
+          exit 8
+        fi
+        if [ "$rc" -eq 0 ]; then
           session_own_refusal "$SESS"
           exit 8
         fi

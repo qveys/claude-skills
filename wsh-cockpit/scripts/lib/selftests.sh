@@ -861,6 +861,7 @@ cmd_selftest_guard() {
   GUARD_T6_SESS="${GUARD_T6_PREFIX}-1"
   GUARD_NB_PREFIX="cockpit-t7nb-$$"
   GUARD_NB_SESS="${GUARD_NB_PREFIX}-full"
+  GUARD_INDET="cockpit-selftest-guard-indet-$$"
   local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
@@ -884,17 +885,20 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_PANES" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_NB_SESS" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_INDET" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
 
-  # 1. outside tmux, own_tmux_session must fail cleanly (rc != 0).
+  # 1. outside tmux, own_tmux_session must fail cleanly with rc == 1
+  #    precisely — not just "rc != 0", which a missing/renamed function
+  #    (rc=127) would also satisfy.
   set +e
   ( unset TMUX; own_tmux_session >/dev/null 2>&1 )
   rc=$?
   set -e
-  if [ "$rc" -ne 0 ]; then report_guard_case "1 own_tmux_session outside tmux -> rc!=0" 0
-  else report_guard_case "1 own_tmux_session outside tmux -> rc!=0" 1 "rc=0 without TMUX"; fi
+  if [ "$rc" -eq 1 ]; then report_guard_case "1 own_tmux_session outside tmux -> rc==1" 0
+  else report_guard_case "1 own_tmux_session outside tmux -> rc==1" 1 "rc=$rc (expected 1)"; fi
 
   # 2+3. only meaningful when THIS test itself runs inside tmux.
   if [ -n "${TMUX:-}" ]; then
@@ -1228,6 +1232,42 @@ cmd_selftest_guard() {
     fi
   else
     echo "note: case 19 skipped (not inside tmux)"
+  fi
+
+  # 20 (Task 8, C1, RED-first). $TMUX set but $TMUX_PANE unset: own identity
+  # is indeterminable (M-a — anchoring on $TMUX_PANE doesn't help, the
+  # session drifts the same either way), so the guard must refuse outright
+  # rather than fall back to an arbitrary session comparison. Before the
+  # fix: own_tmux_session still returned 0 (display-message picks *some*
+  # session), and session_safe_to_reuse on a harmless bare-shell session
+  # that is NOT the caller's own also returned 0 (reusable) — a false
+  # negative caused by comparing against that arbitrary pick. GUARD_INDET is
+  # a fresh bare-shell session, unrelated to the caller, used only as a
+  # harmless target here.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_INDET" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 20 skipped (could not create '$GUARD_INDET')"
+    else
+      set +e; ( unset TMUX_PANE; own_tmux_session >/dev/null 2>&1 ); rc=$?; set -e
+      if [ "$rc" -eq 2 ]; then
+        report_guard_case "20a own_tmux_session with \$TMUX_PANE unset -> rc==2" 0
+      else
+        report_guard_case "20a own_tmux_session with \$TMUX_PANE unset -> rc==2" 1 "rc=$rc (expected 2)"
+      fi
+      set +e; ( unset TMUX_PANE; session_safe_to_reuse "$GUARD_INDET" ) 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -ne 0 ]; then
+        report_guard_case "20b session_safe_to_reuse refuses a harmless session when \$TMUX_PANE is unset" 0
+      else
+        report_guard_case "20b session_safe_to_reuse refuses a harmless session when \$TMUX_PANE is unset" 1 "rc=0 on harmless '$GUARD_INDET'"
+      fi
+      tmux kill-session -t "=$GUARD_INDET" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 20 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup

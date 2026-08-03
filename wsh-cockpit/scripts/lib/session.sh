@@ -81,6 +81,13 @@ newest_session_for_prefix() {
 own_tmux_session() {
   [ "$MUX" = tmux ] || return 1
   [ -n "${TMUX:-}" ] || return 1
+  # Measured twice (M-a, tmux 3.7b): anchoring on $TMUX_PANE does NOT
+  # stabilise the display-message call below — under a grouped session the
+  # anchored form drifts exactly like the bare '#S' form. Do not "fix" this
+  # by adding -t "$TMUX_PANE" here; it has already been proposed and
+  # measured wrong twice. Instead: without $TMUX_PANE, "my own session" has
+  # no answer worth trusting at all — refuse rather than guess (Task 8).
+  [ -n "${TMUX_PANE:-}" ] || return 2   # under tmux, but identity indeterminable
   tmux display-message -p '#S' 2>/dev/null
 }
 
@@ -106,26 +113,37 @@ own_tmux_session() {
 #      session name sharing the caller's pane — how Wave wraps blocks) and,
 #      as a side effect, exact/prefix/fnmatch aliases too, since those all
 #      resolve to a session containing that same pane;
-#   4. FALLBACK (only reached when $TMUX_PANE is unset) — raw or canonical
-#      name equal to own_tmux_session().
+#   4. FALLBACK — raw or canonical name equal to own_tmux_session(). Reached
+#      whenever $TMUX_PANE is present but not a member of the target's
+#      panes (the ordinary case: a genuinely different session) — NOT only
+#      when $TMUX_PANE is unset, contrary to what this comment used to say.
+#      Since Task 8, an unset $TMUX_PANE is caught earlier: own_tmux_session
+#      returns 2 (indeterminable) and this function propagates that before
+#      ever reaching this fallback.
 # Sets SESSION_OWN_CANON / SESSION_OWN_REASON (exact|alias|shared-pane) /
 # SESSION_OWN_PANE (shared-pane only) for session_own_refusal to build a
 # message from — deliberately NOT `local`: callers read them after return.
 # Silent otherwise: it only tests, callers write the refusal message.
 # rc 1 outside tmux and under zellij (own_tmux_session is a no-op there),
-# same as before this function existed.
+# same as before this function existed; rc 2 under tmux when $TMUX_PANE is
+# unset (identity indeterminable — see own_tmux_session, Task 8).
 SESSION_OWN_CANON=""
 SESSION_OWN_REASON=""
 SESSION_OWN_PANE=""
 session_is_own() {
-  local raw="$1" sess canon own panes
+  local raw="$1" sess canon own panes rc
   sess="${raw#=}"
   canon=$(mux_session_name "$sess" 2>/dev/null || true)
   [ -n "$canon" ] || canon="$sess"
   SESSION_OWN_CANON="$canon"
   SESSION_OWN_REASON=""
   SESSION_OWN_PANE=""
-  if ! own=$(own_tmux_session); then return 1; fi
+  rc=0; own=$(own_tmux_session) || rc=$?
+  # rc=2 (own_tmux_session: $TMUX set, $TMUX_PANE unset — identity
+  # indeterminable) must propagate as-is, not collapse into "not own" (rc=1):
+  # a guard that can't tell must refuse, not guess (Task 8, option A).
+  [ "$rc" -ne 2 ] || return 2
+  [ "$rc" -eq 0 ] || return 1
 
   if [ -n "${TMUX_PANE:-}" ]; then
     panes=$(mux_session_panes "$canon" || true)
@@ -161,9 +179,23 @@ session_own_refusal() {
   esac
 }
 
+# Refusal message for when session_is_own returned 2: $TMUX is set but
+# $TMUX_PANE is not, so the caller's own identity cannot be established at
+# all (own_tmux_session, Task 8). This is NOT "confirmed not yours" — it's
+# "cannot check" — so the guard refuses by principle instead of falling
+# back to an arbitrary name comparison. Companion to session_own_refusal,
+# factored for the same reason: session_safe_to_reuse and `start --reuse`
+# (wsh-live.sh) must not re-diverge on wording.
+session_indeterminate_refusal() {
+  local sess="$1"
+  echo "⚠️  cannot verify whether session '$sess' is the tmux session this call is running inside (\$TMUX is set but \$TMUX_PANE is not — identity indeterminable) — refusing by principle; relaunch from inside a real tmux pane, or pass --force for a fresh cockpit" >&2
+}
+
 # A session is safe to silently reuse only if BOTH hold:
 #   1. it is not the tmux session the caller is itself running inside, by any
-#      alias (absolute, unconditional block — see session_is_own);
+#      alias (absolute, unconditional block — see session_is_own); this also
+#      refuses outright when identity is indeterminable rather than own
+#      (session_is_own rc=2, Task 8);
 #   2. its foreground process is a bare shell, not some other interactive
 #      program left running in an otherwise-orphaned cockpit (most
 #      dangerously another CLI: `send` would TYPE into its input).
@@ -172,8 +204,13 @@ session_own_refusal() {
 # NOTE (spec claude-cockpit §2): lot 2 extends check 2 for ADOPTION with
 # ssh/tailscale/mosh as adoptable states — reuse stays bare-shell strict.
 session_safe_to_reuse() {
-  local sess="$1" cmd
-  if session_is_own "$sess"; then
+  local sess="$1" cmd rc
+  rc=0; session_is_own "$sess" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    session_indeterminate_refusal "$sess"
+    return 1
+  fi
+  if [ "$rc" -eq 0 ]; then
     session_own_refusal "$sess"
     return 1
   fi
