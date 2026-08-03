@@ -191,6 +191,32 @@ session_indeterminate_refusal() {
   echo "⚠️  cannot verify whether session '$sess' is the tmux session this call is running inside (\$TMUX is set but \$TMUX_PANE is not — identity indeterminable) — refusing by principle; relaunch from inside a real tmux pane, or pass --force for a fresh cockpit" >&2
 }
 
+# One-shot own-session guard for a resolved (already existence-checked)
+# session: probe + print the right refusal + return 1, or return 0 to
+# proceed. Factored for the same reason as session_own_refusal itself — 4
+# call sites (wsh-live.sh: send/keys/step-run/banner, Task 2 lot 2) that
+# must not re-diverge on the rc=0/rc=2/set -e dance session_is_own requires
+# (the `rc=0; … || rc=$?` form, not a bare `if session_is_own; then`, so a
+# non-zero rc under `set -e` doesn't abort the caller before this function
+# even gets to inspect it). rc=2 (identity indeterminable) is refused just
+# like rc=0 (confirmed own): "cannot verify" is not "confirmed not yours" —
+# guessing wrong here means typing into a stranger's own terminal, so both
+# non-clear outcomes refuse alike (same principle as session_safe_to_reuse
+# and stop's guard, Task 8 option A).
+deny_own_session() {
+  local sess="$1" rc=0
+  session_is_own "$sess" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    session_indeterminate_refusal "$sess"
+    return 1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    session_own_refusal "$sess"
+    return 1
+  fi
+  return 0
+}
+
 # A session is safe to silently reuse only if BOTH hold:
 #   1. it is not the tmux session the caller is itself running inside, by any
 #      alias (absolute, unconditional block — see session_is_own); this also

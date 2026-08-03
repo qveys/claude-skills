@@ -621,6 +621,12 @@ banner)
   STEP_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-step.sh"
   [ -f "$STEP_SCRIPT" ] || { echo "missing $STEP_SCRIPT" >&2; exit 10; }
   SESS=$(resolve_session "$SESS"); need_session "$SESS"
+  # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
+  # `banner` isn't in plan §3's table, but it writes into the pane through
+  # this same mux_send_line (it sources the banner helper INSIDE the
+  # pane's shell, same as send/step-run) — treated as an omission, not a
+  # deliberate exclusion.
+  deny_own_session "$SESS" || exit 8
   # Explicit WSH_STEP_INLINE always wins (one-off override); otherwise fall
   # back to the session's sticky remote-mode flag (see remote-init).
   REMOTE_STEP_PATH=""
@@ -915,6 +921,28 @@ send)
   have_mux
   CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
   SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  # Own-session guard (Task 2, lot 2): send/keys/step-run/banner all reach
+  # mux_send_line/send-keys on a raw, caller-supplied session name — same
+  # hazard class as stop/gc (Task 1, lot 2), but here the effect is WRITE,
+  # not destruction (plan §3: guard follows effect class). Against your own
+  # pane, "send" doesn't run a command, it TYPES into whatever's running
+  # there — against an interactive foreground (a live CLI REPL, most
+  # dangerously another Claude Code session) the text gets SUBMITTED as a
+  # new prompt instead of executing (measured, see docs/gotchas.md); worse,
+  # since the caller's own shell is still the foreground reader of that
+  # pane, the typed text just queues silently until the caller's own
+  # process eventually returns control — `step-run`'s wait-done then times
+  # out (rc=124) rather than ever seeing the real result. Unlike `stop`,
+  # there is no "kept, continue" here: each of these 4 sites targets
+  # exactly the one session it was given, so refusal is outright (exit 8,
+  # same family as `stop`/`start --reuse`). READ paths (read/output/
+  # wait-done) stay unguarded on purpose (plan §3: lecture = libre).
+  # `banner` writes via this same mux_send_line (it sources the banner
+  # helper INSIDE the pane's shell) even though plan §3's table doesn't
+  # list it — treated as an omission, not a deliberate exclusion, so it
+  # gets the guard too (see banner) below). keys/step-run/banner repeat
+  # only the one-line call, not this rationale.
+  deny_own_session "$SESS" || exit 8
   # One-shot-SSH-in-a-row nudge (stderr only, never blocking) — see lib/session.sh.
   oneshot_ssh_track "$SESS" "$CMD"
   # WSH_LIVE_SEP (default 1): frame the command with header/footer banners so the
@@ -963,6 +991,8 @@ keys)
   have_mux
   K="${1:?usage: wsh-live.sh keys '<tmux-keys>' [session]}"
   SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
+  deny_own_session "$SESS" || exit 8
   [ "$MUX" = tmux ] || {
     echo "keys: tmux-only (raw tmux key names have no zellij equivalent; use send)" >&2; exit 13; }
   # No -l here: tmux key names are meant to be interpreted (C-c, Up, PageUp...).
@@ -1033,6 +1063,11 @@ step-run)
     fi
   done
   SESS=$(resolve_session "${run_sess:-}"); need_session "$SESS"
+  # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
+  # Caught HERE, before step_run() ever fires its internal banner/send/
+  # wait-done subcalls: those would otherwise queue into the caller's own
+  # pane and wait-done would time out (rc=124) rather than ever refuse.
+  deny_own_session "$SESS" || exit 8
   TIMEOUT="${run_timeout:-${WSH_WAIT_TIMEOUT:-300}}"
   step_run "$ID" "$LABEL" "$CMD" "$SESS" "$TIMEOUT"
   ;;

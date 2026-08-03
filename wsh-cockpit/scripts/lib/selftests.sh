@@ -864,11 +864,12 @@ cmd_selftest_guard() {
   GUARD_INDET="cockpit-selftest-guard-indet-$$"
   GUARD_GCOWN="cockpit-selftest-guard-gcown-$$"
   GUARD_GCOTHER="cockpit-selftest-guard-gcother-$$"
+  GUARD_W2="cockpit-selftest-guard-w2-$$"
   # Case 23 runs gc via send-keys (see below) — the only way to observe its
   # rc from outside that pane is to have the sent command write it to a
   # file itself. Dedicated to this one case, cleaned by the trap below.
   GUARD_GCOWN_RCFILE="${TMPDIR:-/tmp}/wsh-cockpit-selftest-guard-gcown-rc.$$"
-  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep
+  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep err
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
     if [ "$2" -eq 0 ]; then
@@ -894,7 +895,9 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_INDET" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_W2" 2>/dev/null || true
     rm -f "$GUARD_GCOWN_RCFILE" 2>/dev/null || true
+    rm -f "$(seq_file "$GUARD_W2")" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
@@ -1402,6 +1405,128 @@ cmd_selftest_guard() {
     fi
   else
     echo "note: case 24 skipped (not inside tmux)"
+  fi
+
+  # 25 (Task 2, lot 2, send). `send` on the caller's own session must refuse
+  # (exit 8) instead of typing the command straight into its own pane —
+  # against an interactive foreground (a live CLI REPL) that text is
+  # SUBMITTED as a new prompt instead of executing, exactly the incident
+  # `gotchas.md` already documents for spawn's silent reuse, here reachable
+  # through send's positional [session] argument instead of a remembered
+  # one. Guard placement follows plan §3: WRITE paths (send/keys/step-run/
+  # banner) refuse outright like `stop` (case 22); READ paths (read/output/
+  # wait-done) stay unguarded on purpose. Cases 26-28 point back here for
+  # the rationale instead of repeating it. Confined under GUARD_KEY like
+  # cases 8/22, so a red run can't pollute the real agent's state.
+  # WARNING FOR ANYONE RUNNING THIS BY HAND: before the guard exists, this
+  # case actually TYPES 'echo lot2-guard-marker' into the tmux session
+  # running this very selftest — an inert marker either way, but real:
+  # never run selftest-guard from a terminal you'd notice text appearing
+  # in (see the module-wide note this function prints, and docs/gotchas.md).
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-guard-marker' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "25 send refuses own session (exit 8)" 0
+    else
+      report_guard_case "25 send refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 25 skipped (not inside tmux)"
+  fi
+
+  # 26 (Task 2, lot 2, keys). Same guard, `keys)` block — see case 25.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" keys 'C-c' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "26 keys refuses own session (exit 8)" 0
+    else
+      report_guard_case "26 keys refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 26 skipped (not inside tmux)"
+  fi
+
+  # 27 (Task 2, lot 2, step-run). Same guard, `step-run)` block — see case 25.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" step-run 1 'probe' 'true' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "27 step-run refuses own session (exit 8)" 0
+    else
+      report_guard_case "27 step-run refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 27 skipped (not inside tmux)"
+  fi
+
+  # 28 (Task 2, lot 2, banner). Same guard, `banner)` block — see case 25.
+  # `banner` recognizes its trailing [session] argument only when it is NOT
+  # the sole remaining positional argument (wsh-live.sh: `[ $# -gt 1 ] &&
+  # mux_has "${!#}"`) — the 'probe' text ahead of $own keeps this call two
+  # args deep so the call actually reaches the guard instead of silently
+  # missing it and falling back to the remembered session.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" banner step 'probe' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "28 banner refuses own session (exit 8)" 0
+    else
+      report_guard_case "28 banner refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 28 skipped (not inside tmux)"
+  fi
+
+  # 29 (Task 2, lot 2, positive control). A genuinely THIRD-PARTY session
+  # must still accept `send` normally — the guard added for cases 25-28
+  # must not neutralise writes to everyone else. GUARD_W2 is a fresh
+  # disposable session, unrelated to the caller; poll `mux_capture` (not
+  # just the rc) so this proves the command actually RAN in that pane, not
+  # merely that `send` returned 0. The seq-file `send` writes for GUARD_W2
+  # is keyed by session name, not by WSH_COCKPIT_AGENT (see lib/session.sh
+  # seq_file), so it needs its own cleanup — added to selftest_guard_cleanup
+  # above, not covered by the generic last-session-$GUARD_KEY removal.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_W2" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 29 skipped (could not create '$GUARD_W2')"
+    else
+      set +e
+      WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-w2-ok' "$GUARD_W2" >/dev/null 2>&1
+      rc=$?
+      set -e
+      tries=0; found=no
+      while [ "$tries" -lt 20 ]; do
+        mux_capture "$GUARD_W2" 50 | grep -q lot2-w2-ok && { found=yes; break; }
+        tries=$((tries + 1)); sleep 0.5
+      done
+      if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+        report_guard_case "29 send still writes to a genuinely non-own session" 0
+      else
+        report_guard_case "29 send still writes to a genuinely non-own session" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-w2-ok' never appeared in '$GUARD_W2')"
+      fi
+      tmux kill-session -t "=$GUARD_W2" 2>/dev/null || true
+      rm -f "$(seq_file "$GUARD_W2")" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 29 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup
