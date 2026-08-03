@@ -862,6 +862,8 @@ cmd_selftest_guard() {
   GUARD_NB_PREFIX="cockpit-t7nb-$$"
   GUARD_NB_SESS="${GUARD_NB_PREFIX}-full"
   GUARD_INDET="cockpit-selftest-guard-indet-$$"
+  GUARD_GCOWN="cockpit-selftest-guard-gcown-$$"
+  GUARD_GCOTHER="cockpit-selftest-guard-gcother-$$"
   local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
@@ -886,6 +888,8 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_NB_SESS" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_INDET" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
@@ -1312,6 +1316,74 @@ cmd_selftest_guard() {
     fi
   else
     echo "note: case 22 skipped (not inside tmux)"
+  fi
+
+  # 23 (Task 1, lot 2, gc — RED case). `gc --idle=0` run FROM INSIDE a
+  # detached cockpit-* session must not kill that session out from under
+  # itself. Unlike case 22, this can't be exercised by calling wsh-live.sh
+  # as a plain subprocess of THIS shell: own_tmux_session reads $TMUX/
+  # $TMUX_PANE from the calling process's own environment, which would
+  # still point at whatever session is running selftest-guard itself, not
+  # at GUARD_GCOWN. `send-keys` runs the command as a child of GUARD_GCOWN's
+  # own pane instead, so its $TMUX_PANE is genuinely GUARD_GCOWN's — the
+  # only way to reproduce "gc sweeping its own session" honestly. Target is
+  # NOT anchored with "=": send-keys is a target-PANE command and rejects a
+  # leading "=" outright (measured — "can't find pane: =cockpit-...").
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_GCOWN" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 23 skipped (could not create '$GUARD_GCOWN')"
+    else
+      tmux send-keys -t "$GUARD_GCOWN" \
+        "cd '$(dirname "$SCRIPT_DIR")' && WSH_COCKPIT_AGENT='$GUARD_KEY' scripts/wsh-live.sh gc --idle=0 --only-session='$GUARD_GCOWN'" Enter
+      tries=0; present=yes
+      while [ "$tries" -lt 30 ]; do
+        mux_list_sessions | grep -Fqx -- "$GUARD_GCOWN" || { present=no; break; }
+        tries=$((tries + 1)); sleep 0.5
+      done
+      if [ "$present" = yes ]; then
+        report_guard_case "23 gc --idle=0 spares the session it runs inside" 0
+      else
+        report_guard_case "23 gc --idle=0 spares the session it runs inside" 1 "'$GUARD_GCOWN' was killed by its own gc sweep"
+      fi
+      tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 23 skipped (not inside tmux)"
+  fi
+
+  # 24 (Task 1, lot 2, gc — positive control). A session that is genuinely
+  # NOT the caller's own must still be swept normally: the own-session skip
+  # added for case 23 must not neutralise gc for everyone else. Calls
+  # cmd_gc directly in-process, same as cmd_selftest_gc's own cases 4-5 —
+  # no send-keys needed here, this session is never the caller's own so
+  # there is no self-kill hazard to isolate against.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_GCOTHER" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 24 skipped (could not create '$GUARD_GCOTHER')"
+    else
+      set +e
+      cmd_gc --idle=0 --only-session="$GUARD_GCOTHER" >/dev/null 2>&1
+      rc=$?
+      set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_GCOTHER" && present=yes
+      if [ "$rc" -eq 0 ] && [ "$present" = no ]; then
+        report_guard_case "24 gc still kills a genuinely non-own idle session" 0
+      else
+        report_guard_case "24 gc still kills a genuinely non-own idle session" 1 "rc=$rc (expected 0), session present=$present (expected no)"
+      fi
+      tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 24 skipped (not inside tmux)"
   fi
 
   selftest_guard_cleanup
