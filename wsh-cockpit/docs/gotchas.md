@@ -83,6 +83,22 @@ suit est le détail et le "pourquoi" derrière chacune.
     only that — a separate piece of work (`send-keys`/`capture-pane`/
     `split-window`/`pipe-pane` still need it; `set-option`/`show-option` in
     `teardown_session` got a narrower fix — see the next gotcha).
+  Fixed for the discrimination itself (not the canonicalization above) by the
+  `2026-08-02-desambiguisation-argument-session.md` lot: a token still gets
+  dropped from ITS category when it doesn't look like a session at all, but a
+  token whose FORM matches (`cockpit-*`, the bare `cockpit` default, or an
+  anchored `=…`) no longer falls through silently just because it happens not
+  to exist right now — `looks_like_session` (`lib/session.sh`) makes that
+  call by shape, before `mux_has` ever asks about existence, and a token that
+  passes it but is dead reaches `need_session` and fails loud (`no tmux
+  session 'X'`, exit 4) at `banner`/`wait-done`/`output`/`step-run`, the same
+  four sites this gotcha names. `--session NAME` / `-s NAME`
+  (`parse_session_flag`) sidesteps the whole discrimination for a caller that
+  already knows the name it wants — including one that doesn't match
+  `cockpit-*` at all (`start` accepts free-form names) — short-circuiting
+  straight to `resolve_session`/`need_session`; a flag with no value (end of
+  arguments, or a value starting with `-`) is a usage error, exit 2, not a
+  silent no-op. Covered by `selftest-guard` cases 30-36.
 - **`stop <prefix>` used to silently corrupt a LIVE neighbour session
   instead of doing nothing.** `stop` (`wsh-live.sh`) passes its raw argument
   straight to `teardown_session` (`lib/session.sh`) with no `mux_has` check

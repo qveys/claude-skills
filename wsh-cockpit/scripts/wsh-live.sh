@@ -25,12 +25,15 @@
 #                              (shorthand for `remote-init --pre <host>` right after spawn)
 #   start [session] [--reuse]  create the session + print the attach command
 #   open  [session]            AUTO-OPEN a visible Wave block attached to the session
-#   send  '<command>' [sess]   type a command into the pane and press Enter
-#   keys  '<tmux-keys>' [sess] send raw tmux keys (C-c, Up, Enter, q ...) verbatim
-#   read  [session] [lines]    print the current pane (default 30 lines back) — free-form
+#   send  '<command>' [sess] [--session NAME|-s NAME]
+#                              type a command into the pane and press Enter
+#   keys  '<tmux-keys>' [sess] [--session NAME|-s NAME]
+#                              send raw tmux keys (C-c, Up, Enter, q ...) verbatim
+#   read  [session] [lines] [--session NAME|-s NAME]
+#                              print the current pane (default 30 lines back) — free-form
 #                              scrollback inspection (TUI/REPL, unframed pane); when the
 #                              pane IS framed, prefer `output` below (nothing to guess)
-#   output [session] [seq] [--full]
+#   output [session] [seq] [--full] [--session NAME|-s NAME]
 #                              print EXACTLY the framed segment for send #<seq> — header
 #                              through footer inclusive, delimited by the ┌─[#N]/└─[#N]
 #                              exit <code> markers already in the pane, so there is no
@@ -58,9 +61,9 @@
 #                              browser view of the cockpit pane via ttyd, loopback-only
 #                              (brew install ttyd); read-only by default (WSH_WEB_WRITE=1
 #                              for a writable view) — see SKILL.md for tailnet exposure
-#   banner {header|phase|step|done} ... [session]
+#   banner {header|phase|step|done} ... [session] [--session NAME|-s NAME]
 #                              airy step announcement (no send framing — see wsh-step.sh)
-#   step-run <id> '<label>' '<command>' [session] [timeout_sec]
+#   step-run <id> '<label>' '<command>' [session] [timeout_sec] [--session NAME|-s NAME]
 #                              ONE call = banner step + framed send + wait-done + read:
 #                              the visual step announcement and the command it covers,
 #                              without the caller having to chain 3 separate round-trips
@@ -91,7 +94,7 @@
 #                              `tailscale ssh` → bare `scp` (last resort, likely a fresh
 #                              auth prompt). Shells out to wsh-push.sh; never counts
 #                              toward the one-shot-SSH nudge (that only tracks `send`).
-#   wait-done [session] [timeout_sec] [seq] [--print]
+#   wait-done [session] [timeout_sec] [seq] [--print] [--session NAME|-s NAME]
 #                              block until last `send` footer shows exit (before next send);
 #                              --print also emits the bounded `output` segment on success —
 #                              one call instead of wait-done + output separately (this is
