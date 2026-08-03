@@ -204,7 +204,13 @@ session_indeterminate_refusal() {
 # NOTE (spec claude-cockpit §2): lot 2 extends check 2 for ADOPTION with
 # ssh/tailscale/mosh as adoptable states — reuse stays bare-shell strict.
 session_safe_to_reuse() {
-  local sess="$1" cmd rc
+  # Strip a leading "=" anchor like session_is_own does: check 2 below feeds
+  # $sess to mux_pane_command (display-message, a target-pane command that is
+  # blind to "=" — empty output, rc=0), so an anchored "=name" left unstripped
+  # would be classed unverifiable-but-safe and skip the foreground check
+  # entirely. Not reachable in prod (find_reusable_session only ever passes
+  # canonical names) — API-consistency hardening, not an exploitable hole.
+  local sess="${1#=}" cmd rc
   rc=0; session_is_own "$sess" || rc=$?
   if [ "$rc" -eq 2 ]; then
     session_indeterminate_refusal "$sess"

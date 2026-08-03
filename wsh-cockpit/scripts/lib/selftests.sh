@@ -1270,6 +1270,20 @@ cmd_selftest_guard() {
     echo "note: case 20 skipped (not inside tmux)"
   fi
 
+  # 21 (Task 8, C2, RED-first). session_safe_to_reuse must strip a leading
+  # "=" anchor like session_is_own does: check 2 feeds its argument to
+  # mux_pane_command (display-message, blind to "=" — empty, rc=0), so an
+  # anchored "=name" left unstripped was classed unverifiable-but-safe and
+  # skipped the foreground check entirely (measured: rc=0 on a session
+  # running `top` — see task-8-report.md). Reuses GUARD_BUSY (created in
+  # case 4, foreground `top`, still alive until selftest_guard_cleanup).
+  set +e; session_safe_to_reuse "=$GUARD_BUSY" 2>/dev/null; rc=$?; set -e
+  if [ "$rc" -eq 1 ]; then
+    report_guard_case "21 anchored =name still hits the foreground check" 0
+  else
+    report_guard_case "21 anchored =name still hits the foreground check" 1 "rc=$rc (expected 1) on '=$GUARD_BUSY' (foreground top)"
+  fi
+
   selftest_guard_cleanup
   trap - EXIT
   if [ "$failures" -eq 0 ]; then echo "selftest-guard: all cases passed"; return 0
