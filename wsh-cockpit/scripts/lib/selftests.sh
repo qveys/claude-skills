@@ -864,6 +864,10 @@ cmd_selftest_guard() {
   GUARD_INDET="cockpit-selftest-guard-indet-$$"
   GUARD_GCOWN="cockpit-selftest-guard-gcown-$$"
   GUARD_GCOTHER="cockpit-selftest-guard-gcother-$$"
+  # Case 23 runs gc via send-keys (see below) — the only way to observe its
+  # rc from outside that pane is to have the sent command write it to a
+  # file itself. Dedicated to this one case, cleaned by the trap below.
+  GUARD_GCOWN_RCFILE="${TMPDIR:-/tmp}/wsh-cockpit-selftest-guard-gcown-rc.$$"
   local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
@@ -890,6 +894,7 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_INDET" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
+    rm -f "$GUARD_GCOWN_RCFILE" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
@@ -1329,6 +1334,13 @@ cmd_selftest_guard() {
   # only way to reproduce "gc sweeping its own session" honestly. Target is
   # NOT anchored with "=": send-keys is a target-PANE command and rejects a
   # leading "=" outright (measured — "can't find pane: =cockpit-...").
+  #
+  # Presence alone is not enough: if the sent command breaks silently (bad
+  # cd, a typo on --only-session=, wsh-live.sh not found -> rc=127), the
+  # session would also survive, and this case would report ok for the wrong
+  # reason. The rc has to be observed too — the only way to get it out of
+  # GUARD_GCOWN's pane is to have the sent command write it to a file
+  # itself (GUARD_GCOWN_RCFILE), polled the same way as presence below.
   if [ -n "${TMUX:-}" ]; then
     set +e
     tmux new-session -d -s "$GUARD_GCOWN" 2>/dev/null
@@ -1337,17 +1349,23 @@ cmd_selftest_guard() {
     if [ "$rc" -ne 0 ]; then
       echo "note: case 23 skipped (could not create '$GUARD_GCOWN')"
     else
+      rm -f "$GUARD_GCOWN_RCFILE"
       tmux send-keys -t "$GUARD_GCOWN" \
-        "cd '$(dirname "$SCRIPT_DIR")' && WSH_COCKPIT_AGENT='$GUARD_KEY' scripts/wsh-live.sh gc --idle=0 --only-session='$GUARD_GCOWN'" Enter
-      tries=0; present=yes
+        "cd '$(dirname "$SCRIPT_DIR")' && WSH_COCKPIT_AGENT='$GUARD_KEY' scripts/wsh-live.sh gc --idle=0 --only-session='$GUARD_GCOWN'; echo RC=\$? > '$GUARD_GCOWN_RCFILE'" Enter
+      tries=0; present=yes; rcline=""
       while [ "$tries" -lt 30 ]; do
         mux_list_sessions | grep -Fqx -- "$GUARD_GCOWN" || { present=no; break; }
+        if [ -s "$GUARD_GCOWN_RCFILE" ]; then
+          rcline=$(cat "$GUARD_GCOWN_RCFILE")
+          break
+        fi
         tries=$((tries + 1)); sleep 0.5
       done
-      if [ "$present" = yes ]; then
+      gcrc="${rcline#RC=}"
+      if [ "$present" = yes ] && [ "$gcrc" = "0" ]; then
         report_guard_case "23 gc --idle=0 spares the session it runs inside" 0
       else
-        report_guard_case "23 gc --idle=0 spares the session it runs inside" 1 "'$GUARD_GCOWN' was killed by its own gc sweep"
+        report_guard_case "23 gc --idle=0 spares the session it runs inside" 1 "present=$present (expected yes), rc='$gcrc' (expected 0, '$rcline')"
       fi
       tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
     fi
