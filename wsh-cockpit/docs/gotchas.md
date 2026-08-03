@@ -101,18 +101,33 @@ suit est le détail et le "pourquoi" derrière chacune.
   themselves against acting on a prefix at all (rather than just this one
   function's internal consistency) is deferred to
   `docs/plans/2026-08-02-desambiguisation-argument-session.md`.
-- **`gc` has NO own-session guard.** Unlike `spawn`'s reuse path
-  (`session_is_own`/`session_safe_to_reuse`), `gc_should_kill`
-  (`lib/gc.sh`) only checks idle age and attached-client count — nothing in
-  it recognizes "this is the session the sweep is itself running inside".
+- **`gc` now refuses to destroy its own session; `stop` refuses outright
+  (exit 8).** (Task 1, lot 2.) `gc_should_kill` (`lib/gc.sh`) itself stays
+  a pure idle/attached check — the own-session guard lives in `cmd_gc`
+  instead: a probe before the loop (`session_is_own` on a name that can
+  never exist) refuses the WHOLE sweep, printing a note and destroying
+  nothing, when identity is indeterminable (`$TMUX` set, `$TMUX_PANE`
+  unset); inside the loop, any candidate that IS the caller's own session
+  is skipped — counted `kept`, the sweep continues on the others (unlike
+  `stop`, this is a skip, not an error). `--dry-run` still lists normally
+  regardless (it never destroys anything, so the indeterminate-identity
+  probe is skipped for it). Measured before this guard existed: running
+  `gc --idle=0` from inside a detached `cockpit-*` session killed that
+  session out from under itself — conditions to self-kill were the calling
+  session named `cockpit-*`, detached (no attached tmux client), and idle
+  for at least the threshold (default 86400s, override with `--idle=`);
   `gc` runs automatically, best-effort, in the background on every `spawn`
-  and every `start`. Measured: running `gc --idle=0` from inside a
-  detached `cockpit-*` session kills that session out from under itself.
-  Conditions to self-kill: the calling session is named `cockpit-*`,
-  detached (no attached tmux client), and idle for at least the threshold
-  (default 86400s, override with `--idle=`). Closing this (a real
-  `session_is_own` guard on `gc`'s destroy path) is deferred to
-  `docs/plans/2026-08-02-desambiguisation-argument-session.md`.
+  and every `start`, so this could fire without the caller ever running
+  `gc` by hand. `stop <session>` (`wsh-live.sh`) got its own, stricter
+  guard on the same `session_is_own`/`session_own_refusal`/
+  `session_indeterminate_refusal` helpers (`lib/session.sh`) already used
+  by `start --reuse`: unlike `gc`'s skip-and-continue, a `stop` on the
+  caller's own session refuses outright (exit 8, same family as `start
+  --reuse`'s own-session refusal) — there is no "continue on the rest",
+  `stop` only ever targets the one session it was given. The remaining
+  ergonomic gap (how a caller should DISAMBIGUATE which session they meant
+  in the first place, rather than just being refused) is tracked in
+  `docs/plans/2026-08-02-desambiguisation-argument-session.md` §3 bis.
 - **`selftest-guard` creates sessions on the DEFAULT tmux server, some of
   them GROUPED onto the caller's own live session.** Case 10 (grouped
   session sharing the caller's pane) runs `tmux new-session -t "=$own"`
