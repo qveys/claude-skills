@@ -32,7 +32,16 @@ suit est le détail et le "pourquoi" derrière chacune.
   is presumed known to the caller — only `spawn`'s silent reuse runs the
   bare-shell heuristic too. History: guard introduced by
   `a920197` (#7), silently lost in the `9863c07` regression, reintroduced
-  with `selftest-guard`.
+  with `selftest-guard`. Since Task 2 (lot 2), the same own-session check
+  guards the WRITE paths too: `send`/`keys`/`step-run`/`banner` all refuse
+  outright (exit 8, `deny_own_session`, `lib/session.sh`) when the resolved
+  session is the caller's own — against a bare shell this used to TYPE the
+  command into the caller's own pane, queued silently behind the still-
+  running caller until it eventually finished (measured: `step-run` timing
+  out at rc=124 rather than ever seeing the real result, since `wait-done`
+  gave up long before the queued text got a chance to run). `read`/`output`/
+  `wait-done` stay unguarded — read-only, no self-interference hazard (plan
+  §3).
 - **A session name is now taken literally — abbreviations by prefix are no
   longer accepted.** `mux_has`/`mux_kill`/`mux_clients` (`lib/mux.sh`) anchor
   their tmux target with `=` (`-t "=$1"`), forcing an exact match. Before
