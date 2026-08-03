@@ -271,6 +271,23 @@ find_reusable_session() {
   return 1
 }
 
+# Form-based test: does this token LOOK like a session name, regardless of
+# whether such a session exists right now? Deliberately STABLE and LOCAL (the
+# string's shape) as opposed to mux_has, which tests EXISTENCE — a property of
+# the system at this instant. Conflating the two in one discrimination loop is
+# the design fault named in
+# docs/plans/2026-08-02-desambiguisation-argument-session.md §2: a token that
+# looks like a session but doesn't (yet, or anymore) exist must reach
+# need_session and fail loud (exit 4), not silently fall through into another
+# argument category. $SESS_DEFAULT is set in wsh-live.sh before this file is
+# sourced.
+looks_like_session() {
+  case "$1" in
+    cockpit-*|"$SESS_DEFAULT"|=*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 resolve_session() {
   local requested="${1:-}"
   if [ -n "$requested" ]; then
@@ -284,6 +301,47 @@ resolve_session() {
 need_session() {
   mux_has "$1" || {
     echo "no $MUX session '$1' — run: $0 start $1" >&2; exit 4; }
+}
+
+# parse_session_flag "$@" — pre-scan for a --session/-s VALUE pair ahead of
+# any positional discrimination. Sets exactly two globals and does nothing
+# else:
+#   SESS_FLAG   the raw value, unstripped (unlike the positional acceptance
+#               path's "${arg#=}") — empty when the flag was absent.
+#   PSF_REST    the remaining positionals with the flag and its value
+#               removed, in order; the caller rebuilds "$@" with
+#               `set -- ${PSF_REST[@]+"${PSF_REST[@]}"}` — NOT the plain
+#               `"${PSF_REST[@]}"` form: bash 3.2, under `set -u`, treats an
+#               array with zero elements as unbound on a bare `[@]`
+#               expansion ("PSF_REST[@]: unbound variable") even though the
+#               array itself was assigned; `${PSF_REST[@]+"${PSF_REST[@]}"}`
+#               is the standard guard (measured: reproduces and is fixed by
+#               this exact idiom on this Mac's /usr/bin/env bash 3.2.57).
+# Bash 3.2: no associative arrays, so PSF_REST is a plain indexed array (the
+# script already relies on those elsewhere, e.g. wsh-live.sh's output
+# truncation). A missing value (end of arguments, or a value starting with
+# "-") is a usage error raised HERE, exit 2 — not left for the caller.
+parse_session_flag() {
+  SESS_FLAG=""
+  PSF_REST=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session|-s)
+        if [ $# -lt 2 ]; then
+          echo "wsh-live: $1 requires a value" >&2; exit 2
+        fi
+        case "$2" in
+          -*) echo "wsh-live: $1 requires a value" >&2; exit 2 ;;
+        esac
+        SESS_FLAG="$2"
+        shift 2
+        ;;
+      *)
+        PSF_REST+=("$1")
+        shift
+        ;;
+    esac
+  done
 }
 
 # --- Remote mode: sticky per-session inline-framing flag ---------------------

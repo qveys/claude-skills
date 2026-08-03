@@ -606,7 +606,9 @@ banner)
   # sends a short call. NOT the default send framing. WSH_STEP_INLINE=1 forces the
   # self-contained one-liner (for an ssh-hopped pane without the helper file).
   have_mux
-  TYPE="${1:?usage: wsh-live.sh banner <header|phase|step|done> [args...] [session]}"
+  # --session/-s short-circuits the trailing-argument sniff below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  TYPE="${1:?usage: wsh-live.sh banner <header|phase|step|done> [args...] [session] (or --session/-s NAME)}"
   shift || true
   case "$TYPE" in header|phase|step|done) ;; *)
     echo "banner: unknown type '$TYPE' (want header|phase|step|done)" >&2; exit 11 ;;
@@ -614,13 +616,20 @@ banner)
   SESS=""
   # Optional session is recognized only when it is NOT the sole remaining
   # argument — otherwise `banner header "cockpit-x"` would lose its text.
-  if [ $# -gt 1 ] && mux_has "${!#}"; then
+  # Form first (looks_like_session), existence second (mux_has): a token
+  # shaped like a session that no longer exists must reach need_session below
+  # and fail loud (exit 4), not fall back to text (plan §2/§3, lot 2 t3).
+  # $SESS_FLAG set: skip the sniff entirely, the flag already decided SESS.
+  if [ -z "$SESS_FLAG" ] && [ $# -gt 1 ] && { looks_like_session "${!#}" || mux_has "${!#}"; }; then
     SESS="${!#}"
+    SESS="${SESS#=}"   # target-pane calls downstream (mux_send_line) reject "="
     set -- "${@:1:$#-1}"
   fi
   STEP_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-step.sh"
   [ -f "$STEP_SCRIPT" ] || { echo "missing $STEP_SCRIPT" >&2; exit 10; }
-  SESS=$(resolve_session "$SESS"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "$SESS"); fi
+  need_session "$SESS"
   # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
   # `banner` isn't in plan §3's table, but it writes into the pane through
   # this same mux_send_line (it sources the banner helper INSIDE the
@@ -663,21 +672,28 @@ banner)
 wait-done)
   # Block until the framed footer for a `send` appears in the pane — never race the next send.
   have_mux
+  # --session/-s short-circuits the loop below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
   local_sess=""
   timeout_sec=""
   target_seq=""
   PRINT=0
   for arg in "$@"; do
     case "$arg" in --print) PRINT=1 ;; esac
-    if [ -z "$local_sess" ] && mux_has "$arg"; then
-      local_sess="$arg"
+    # Form first, existence second — see banner) above for the rationale.
+    # $SESS_FLAG set: a token that looks like a session goes back to being
+    # ordinary text/number for this call (the flag already decided SESS).
+    if [ -z "$SESS_FLAG" ] && [ -z "$local_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
+      local_sess="${arg#=}"
     elif [ -z "$timeout_sec" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       timeout_sec="$arg"
     elif [ -z "$target_seq" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       target_seq="$arg"
     fi
   done
-  SESS=$(resolve_session "${local_sess:-}"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${local_sess:-}"); fi
+  need_session "$SESS"
   TIMEOUT="${timeout_sec:-${WSH_WAIT_TIMEOUT:-300}}"
   if [ -z "$target_seq" ]; then
     target_seq=$(cat "$(seq_file "$SESS")" 2>/dev/null || true)
@@ -919,8 +935,13 @@ pull)
   ;;
 send)
   have_mux
-  CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
-  SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  # --session/-s short-circuits the positional [session] slot below (plan §2
+  # point tranché 1, lot 2 t3) — see lib/session.sh:parse_session_flag.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  CMD="${1:?usage: wsh-live.sh send '<command>' [session] (or --session/-s NAME)}"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${2:-}"); fi
+  need_session "$SESS"
   # Own-session guard (Task 2, lot 2): send/keys/step-run/banner all reach
   # mux_send_line/send-keys on a raw, caller-supplied session name — same
   # hazard class as stop/gc (Task 1, lot 2), but here the effect is WRITE,
@@ -989,8 +1010,12 @@ send)
   ;;
 keys)
   have_mux
-  K="${1:?usage: wsh-live.sh keys '<tmux-keys>' [session]}"
-  SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  # --session/-s short-circuits the positional [session] slot — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  K="${1:?usage: wsh-live.sh keys '<tmux-keys>' [session] (or --session/-s NAME)}"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${2:-}"); fi
+  need_session "$SESS"
   # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
   deny_own_session "$SESS" || exit 8
   [ "$MUX" = tmux ] || {
@@ -1002,7 +1027,12 @@ keys)
   ;;
 read)
   have_mux
-  if [ -n "${1:-}" ] && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+  # --session/-s short-circuits the positional [session] slot — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  if [ -n "$SESS_FLAG" ]; then
+    SESS=$(resolve_session "$SESS_FLAG")
+    LINES="${1:-30}"
+  elif [ -n "${1:-}" ] && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
     SESS=$(resolve_session "")
     LINES="$1"
   else
@@ -1019,18 +1049,25 @@ read)
 output)
   # Marker-bounded read: no lines-to-guess, see cmd_output above.
   have_mux
+  # --session/-s short-circuits the loop below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
   FULL=0
   local_sess=""
   target_seq=""
   for arg in "$@"; do
     case "$arg" in --full) FULL=1 ;; esac
-    if [ -z "$local_sess" ] && mux_has "$arg"; then
-      local_sess="$arg"
+    # Form first, existence second — see banner) above for the rationale.
+    # $SESS_FLAG set: a token that looks like a session goes back to being
+    # ordinary text/number for this call (the flag already decided SESS).
+    if [ -z "$SESS_FLAG" ] && [ -z "$local_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
+      local_sess="${arg#=}"
     elif [ -z "$target_seq" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       target_seq="$arg"
     fi
   done
-  SESS=$(resolve_session "${local_sess:-}"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${local_sess:-}"); fi
+  need_session "$SESS"
   if [ "${WSH_LIVE_SEP:-1}" = "0" ]; then
     echo "output: WSH_LIVE_SEP=0 — this pane has no ┌─[#N]/└─[#N] markers to extract; use 'read N' for a raw scrollback snapshot" >&2
     exit 13
@@ -1047,7 +1084,9 @@ step-run)
   # tool calls (banner, send, wait-done). <id>/<label> match `banner step`'s
   # own two fields (e.g. "1.1" / "openclaw doctor").
   have_mux
-  ID="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]}"
+  # --session/-s short-circuits the loop below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  ID="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec] (or --session/-s NAME)}"
   shift || true
   LABEL="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]}"
   shift || true
@@ -1056,13 +1095,18 @@ step-run)
   run_sess=""
   run_timeout=""
   for arg in "$@"; do
-    if [ -z "$run_sess" ] && mux_has "$arg"; then
-      run_sess="$arg"
+    # Form first, existence second — see banner) above for the rationale.
+    # $SESS_FLAG set: a token that looks like a session goes back to being
+    # ordinary text/number for this call (the flag already decided SESS).
+    if [ -z "$SESS_FLAG" ] && [ -z "$run_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
+      run_sess="${arg#=}"
     elif [ -z "$run_timeout" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       run_timeout="$arg"
     fi
   done
-  SESS=$(resolve_session "${run_sess:-}"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${run_sess:-}"); fi
+  need_session "$SESS"
   # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
   # Caught HERE, before step_run() ever fires its internal banner/send/
   # wait-done subcalls: those would otherwise queue into the caller's own

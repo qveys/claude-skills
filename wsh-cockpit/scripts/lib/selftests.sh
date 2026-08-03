@@ -869,6 +869,18 @@ cmd_selftest_guard() {
   # rc from outside that pane is to have the sent command write it to a
   # file itself. Dedicated to this one case, cleaned by the trap below.
   GUARD_GCOWN_RCFILE="${TMPDIR:-/tmp}/wsh-cockpit-selftest-guard-gcown-rc.$$"
+  # Task 3, lot 2 (cases 30-36): form-first discrimination + --session flag.
+  # GUARD_T3_ALIVE is remembered as the last session under GUARD_T3_KEY so
+  # cases 31/32 can tell the fix apart from the pre-fix bug: silently
+  # dropping the dead-shaped token used to fall back to this remembered
+  # session (rc != 4) instead of failing loud on the token itself. GUARD_T3_DEAD
+  # is a name that LOOKS like a session (matches looks_like_session) but is
+  # never created. GUARD_T3_KEY2 is a separate, never-remembered key so case
+  # 33 resolves to SESS_DEFAULT untainted by GUARD_T3_ALIVE.
+  GUARD_T3_ALIVE="cockpit-selftest-guard-t3-$$"
+  GUARD_T3_DEAD="cockpit-selftest-guard-mort-$$"
+  GUARD_T3_KEY="selftest-guard-t3-$$"
+  GUARD_T3_KEY2="selftest-guard-t3b-$$"
   local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep err
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
@@ -896,9 +908,12 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_W2" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_T3_ALIVE" 2>/dev/null || true
     rm -f "$GUARD_GCOWN_RCFILE" 2>/dev/null || true
     rm -f "$(seq_file "$GUARD_W2")" 2>/dev/null || true
+    rm -f "$(seq_file "$GUARD_T3_ALIVE")" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
+    rm -f "$STATE_DIR/last-session-$GUARD_T3_KEY" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
 
@@ -1527,6 +1542,118 @@ cmd_selftest_guard() {
     fi
   else
     echo "note: case 29 skipped (not inside tmux)"
+  fi
+
+  # 30-36 (Task 3, lot 2): form-first discrimination
+  # (docs/plans/2026-08-02-desambiguisation-argument-session.md §2/§3) and the
+  # --session/-s flag (§2 point tranché 1). None of these need the caller to
+  # be inside tmux — they exercise a disposable session, not
+  # own_tmux_session — so unlike cases 2-3/25-29 they always run.
+
+  # 30. A session that IS alive is still recognized as before (non-regression).
+  # rc must be neither 4 (would mean need_session wrongly rejected an alive
+  # session) nor 127 (command-not-found — the surest sign of a typo'd helper
+  # call); the exact rc otherwise depends on whether seq #1 was ever framed
+  # in this fresh session, which this case doesn't control.
+  tmux new-session -d -s "$GUARD_T3_ALIVE" 2>/dev/null || true
+  (WSH_COCKPIT_AGENT="$GUARD_T3_KEY" remember_session "$GUARD_T3_ALIVE") 2>/dev/null || true
+  set +e
+  "$SCRIPT_DIR/wsh-live.sh" output "$GUARD_T3_ALIVE" 1 >/dev/null 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 4 ] && [ "$rc" -ne 127 ]; then
+    report_guard_case "30 output on a live session-shaped token is recognized (rc != 4, != 127)" 0
+  else
+    report_guard_case "30 output on a live session-shaped token is recognized (rc != 4, != 127)" 1 "rc=$rc"
+  fi
+
+  # 31. A token shaped like a session but DEAD must fail loud (exit 4), not
+  # fall through to the remembered GUARD_T3_ALIVE — this is the fix: before
+  # it, the dead token was silently dropped and this call would have
+  # succeeded (or failed some OTHER way) against GUARD_T3_ALIVE instead,
+  # never mentioning GUARD_T3_DEAD at all.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output "$GUARD_T3_DEAD" 1 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 4 ] && printf '%s' "$err" | grep -q "no tmux session"; then
+    report_guard_case "31 output on a dead session-shaped token fails loud (exit 4), not absorbed" 0
+  else
+    report_guard_case "31 output on a dead session-shaped token fails loud (exit 4), not absorbed" 1 "rc=$rc (expected 4), stderr='$err'"
+  fi
+
+  # 32. `banner`'s $# -gt 1 guard still protects a sole remaining argument
+  # from being mistaken for a session, even when it now ALSO looks like one
+  # by form — confined under GUARD_T3_KEY (remembered GUARD_T3_ALIVE) so
+  # banner has a live session to actually write into; the control is on rc,
+  # not on the pane's contents.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" banner header "$GUARD_T3_DEAD" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 4 ]; then
+    report_guard_case "32 banner's sole remaining arg stays text, not mistaken for a session" 0
+  else
+    report_guard_case "32 banner's sole remaining arg stays text, not mistaken for a session" 1 "rc=4 (expected != 4), stderr='$err'"
+  fi
+
+  # 33. Bare numbers are still never mistaken for a session name — under a
+  # key that has NO remembered session (GUARD_T3_KEY2), so this doesn't
+  # accidentally piggyback on GUARD_T3_ALIVE from cases 30-32. The rc itself
+  # is not asserted (it legitimately depends on whether SESS_DEFAULT
+  # "cockpit" happens to be alive on this machine); what must NEVER happen is
+  # '30' or '7' being named as an unknown session in stderr.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY2" "$SCRIPT_DIR/wsh-live.sh" wait-done 30 7 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if ! printf '%s' "$err" | grep -Eq "session '(30|7)'"; then
+    report_guard_case "33 wait-done's bare numbers are never mistaken for a session name" 0
+  else
+    report_guard_case "33 wait-done's bare numbers are never mistaken for a session name" 1 "rc=$rc, stderr='$err'"
+  fi
+
+  # 34. --session/-s on a dead session short-circuits straight to exit 4 —
+  # same outcome as case 31, reached through the flag instead of the
+  # positional loop.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output --session "$GUARD_T3_DEAD" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 4 ] && printf '%s' "$err" | grep -q "no tmux session"; then
+    report_guard_case "34 output --session on a dead session exits 4" 0
+  else
+    report_guard_case "34 output --session on a dead session exits 4" 1 "rc=$rc (expected 4), stderr='$err'"
+  fi
+
+  # 35. --session/-s with no value (end of arguments) is a usage error, not a
+  # silent no-op — exit 2, same family as spawn's -* usage errors above.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output --session 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ]; then
+    report_guard_case "35 output --session with no value exits 2 (usage error)" 0
+  else
+    report_guard_case "35 output --session with no value exits 2 (usage error)" 1 "rc=$rc (expected 2), stderr='$err'"
+  fi
+
+  # 36. Positive control: --session NAME still WRITES into that session —
+  # cases 31/34/35 must not have turned the flag into a pure rejection path.
+  # Poll mux_capture (not just rc) so this proves the command actually RAN.
+  set +e
+  WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-t3-ok' --session "$GUARD_T3_ALIVE" >/dev/null 2>&1
+  rc=$?
+  set -e
+  tries=0; found=no
+  while [ "$tries" -lt 20 ]; do
+    mux_capture "$GUARD_T3_ALIVE" 50 | grep -q lot2-t3-ok && { found=yes; break; }
+    tries=$((tries + 1)); sleep 0.5
+  done
+  if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+    report_guard_case "36 send --session NAME still writes to that session (positive control)" 0
+  else
+    report_guard_case "36 send --session NAME still writes to that session (positive control)" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-t3-ok' never appeared in '$GUARD_T3_ALIVE')"
   fi
 
   selftest_guard_cleanup
