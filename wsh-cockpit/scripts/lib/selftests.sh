@@ -1033,16 +1033,19 @@ cmd_selftest_guard() {
   # 11. `=NAME` alias: tmux honours `=` as an exact-match anchor for
   #     target-SESSION commands (has-session) but NOT for target-PANE ones
   #     (display-message, capture-pane) — those silently return empty with
-  #     rc=0 instead of erroring. So today `session_safe_to_reuse "=$own"`
-  #     falls through every check blind and reports 0 (reusable): a caller
-  #     holding "=<own>" would slip straight past the guard, and mux_kill
-  #     (which DOES honour "=") would then tear down the caller's own
-  #     session.
+  #     rc=0 instead of erroring. session_is_own strips the leading "="
+  #     (`${raw#=}`) before any lookup precisely so this case passes: were
+  #     that strip ever lost, mux_session_name/mux_session_panes would go
+  #     blind on "=<own>", the guard would fall through every check and
+  #     report 0 (reusable), and mux_kill — which DOES honour "=" — would
+  #     then tear down the caller's own session. Assert rc==1 exactly (the
+  #     refusal path), not just !=0: a missing/renamed function's rc=127
+  #     must not pass for the wrong reason.
   if [ -n "${TMUX:-}" ]; then
     own=$(own_tmux_session)
     set +e; session_safe_to_reuse "=$own" 2>/dev/null; rc=$?; set -e
-    if [ "$rc" -ne 0 ]; then report_guard_case "11 =own alias refused" 0
-    else report_guard_case "11 =own alias refused" 1 "rc=0 on '=$own' (mux_session_name/mux_session_panes are blind to a '=' target-pane)"; fi
+    if [ "$rc" -eq 1 ]; then report_guard_case "11 =own alias refused" 0
+    else report_guard_case "11 =own alias refused" 1 "rc=$rc (expected 1) on '=$own' (mux_session_name/mux_session_panes are blind to a '=' target-pane)"; fi
   else
     echo "note: case 11 skipped (not inside tmux)"
   fi
