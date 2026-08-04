@@ -283,6 +283,10 @@ find_reusable_session() {
 # sourced.
 looks_like_session() {
   case "$1" in
+    # A real session name never contains whitespace (spawn/start never
+    # produce one) — a multi-word banner text starting with "cockpit-"
+    # (e.g. "cockpit-build terminé") must NOT be mistaken for one.
+    *[[:space:]]*) return 1 ;;
     cockpit-*|"$SESS_DEFAULT"|=*) return 0 ;;
     *) return 1 ;;
   esac
@@ -306,8 +310,12 @@ need_session() {
 # parse_session_flag "$@" — pre-scan for a --session/-s VALUE pair ahead of
 # any positional discrimination. Sets exactly two globals and does nothing
 # else:
-#   SESS_FLAG   the raw value, unstripped (unlike the positional acceptance
-#               path's "${arg#=}") — empty when the flag was absent.
+#   SESS_FLAG   the value with a leading "=" stripped (same as the positional
+#               acceptance path's "${arg#=}") — empty when the flag was
+#               absent. Un-stripped, "=name" reaches mux_send_line/tmux
+#               send-keys -t as a target-pane spec containing "=", which
+#               tmux rejects ("can't find pane"); mux_capture fails the same
+#               way, silently.
 #   PSF_REST    the remaining positionals with the flag and its value
 #               removed, in order; the caller rebuilds "$@" with
 #               `set -- ${PSF_REST[@]+"${PSF_REST[@]}"}` — NOT the plain
@@ -333,7 +341,7 @@ parse_session_flag() {
         case "$2" in
           -*) echo "wsh-live: $1 requires a value" >&2; exit 2 ;;
         esac
-        SESS_FLAG="$2"
+        SESS_FLAG="${2#=}"
         shift 2
         ;;
       *)

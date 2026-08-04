@@ -1656,6 +1656,47 @@ cmd_selftest_guard() {
     report_guard_case "36 send --session NAME still writes to that session (positive control)" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-t3-ok' never appeared in '$GUARD_T3_ALIVE')"
   fi
 
+  # 37. Final-review fix: --session/-s accepts a leading "=" (tmux's own
+  # exact-match-anchor syntax) without forwarding it verbatim to mux. Before
+  # the fix, SESS_FLAG stayed "=NAME" unstripped and every mux call
+  # downstream (send-keys -t, capture-pane -t) rejected it as an
+  # unparseable target — poll mux_capture (not just rc) so this proves the
+  # command actually ran, not just that the flag parsed.
+  set +e
+  WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-fw-ok' --session "=$GUARD_T3_ALIVE" >/dev/null 2>&1
+  rc=$?
+  set -e
+  tries=0; found=no
+  while [ "$tries" -lt 20 ]; do
+    mux_capture "$GUARD_T3_ALIVE" 50 | grep -q lot2-fw-ok && { found=yes; break; }
+    tries=$((tries + 1)); sleep 0.5
+  done
+  if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+    report_guard_case "37 --session '=NAME' is stripped and reaches the pane" 0
+  else
+    report_guard_case "37 --session '=NAME' is stripped and reaches the pane" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-fw-ok' never appeared in '$GUARD_T3_ALIVE')"
+  fi
+
+  # 38. Final-review fix: a banner TEXT argument that is itself multi-word
+  # and happens to start with "cockpit-" must not be mistaken for a session
+  # — looks_like_session's cockpit-* glob used to match it regardless of
+  # the embedded space (a real session name, produced only by spawn/start,
+  # never contains whitespace). A leading dummy word ("essai") satisfies
+  # banner's own $# -gt 1 guard so the trailing multi-word token is the one
+  # actually probed by the sniff. Confined to GUARD_T3_KEY, which already
+  # has a live GUARD_T3_ALIVE remembered from case 30 — resolution goes
+  # through the ordinary DEFAULT path (no --session, no positional session
+  # survives), same as real usage.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" banner done "essai" "cockpit-fixwave terminé" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 4 ]; then
+    report_guard_case "38 banner's multi-word cockpit-shaped text is not mistaken for a session" 0
+  else
+    report_guard_case "38 banner's multi-word cockpit-shaped text is not mistaken for a session" 1 "rc=4 (expected != 4), stderr='$err'"
+  fi
+
   selftest_guard_cleanup
   trap - EXIT
   if [ "$failures" -eq 0 ]; then echo "selftest-guard: all cases passed"; return 0
