@@ -1,6 +1,10 @@
 # Lot — Désambiguïsation de l'argument `[session]` : échouer fort plutôt que deviner
 
-**Statut :** plan, non lancé.
+**Statut :** implémenté (lot 2, 2026-08-04, branche `feat/wsh-cockpit-session-disambiguation`) —
+gardes destruction (`stop` exit 8, `gc` skip own) et écriture (`send`/`keys`/`step-run`/`banner`
+exit 8), discrimination par la forme (`looks_like_session`, exit 4), flag `--session`/`-s`
+(formes espace et `=`) ; couvert par `selftest-guard` cas 22-41. Le §3 bis ci-dessous est FERMÉ ;
+le texte est conservé tel quel comme trace de la mesure d'origine.
 **Dépend de :** Task 6 du lot 1 (ancrage `=` de `mux_has`/`mux_kill`) — ce lot traite la
 conséquence ergonomique de cet ancrage.
 **Spec de référence :** `docs/superpowers/specs/2026-07-27-claude-cockpit-wrapper-design.md` (v11).

@@ -119,7 +119,7 @@ suit est le détail et le "pourquoi" derrière chacune.
   (loud, at least visible); anchoring `mux_kill` alone turned that into a
   silent partial corruption instead. Fixed by gating the six set-option
   calls on an anchored `mux_has "$sess"` check at the top of
-  `teardown_session` (`lib/session.sh:357`): only once that confirms an
+  `teardown_session` (`lib/session.sh`): only once that confirms an
   EXACT session exists does the function resolve its canonical name
   (`mux_session_name`) and touch its options; a bare prefix with no exact
   match now leaves the block untouched entirely. Closing `stop`/`gc`
