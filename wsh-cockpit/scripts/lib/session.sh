@@ -307,9 +307,9 @@ need_session() {
     echo "no $MUX session '$1' — run: $0 start $1" >&2; exit 4; }
 }
 
-# parse_session_flag "$@" — pre-scan for a --session/-s VALUE pair ahead of
-# any positional discrimination. Sets exactly two globals and does nothing
-# else:
+# parse_session_flag "$@" — pre-scan for a --session/-s VALUE pair (or the
+# equals forms --session=VALUE / -s=VALUE) ahead of any positional
+# discrimination. Sets exactly two globals and does nothing else:
 #   SESS_FLAG   the value with a leading "=" stripped (same as the positional
 #               acceptance path's "${arg#=}") — empty when the flag was
 #               absent. Un-stripped, "=name" reaches mux_send_line/tmux
@@ -334,15 +334,31 @@ parse_session_flag() {
   PSF_REST=()
   while [ $# -gt 0 ]; do
     case "$1" in
+      --session=*|-s=*)
+        # Equals form — the same spelling gc already accepts (--idle=,
+        # --only-session=), so callers WILL type it; silently ignoring it
+        # would re-create the exact absorption this lot exists to close.
+        SESS_FLAG="${1#*=}"
+        SESS_FLAG="${SESS_FLAG#=}"
+        if [ -z "$SESS_FLAG" ]; then
+          echo "wsh-live: ${1%%=*} requires a value" >&2; exit 2
+        fi
+        shift
+        ;;
       --session|-s)
         if [ $# -lt 2 ]; then
           echo "wsh-live: $1 requires a value" >&2; exit 2
         fi
         case "$2" in
-          -*) echo "wsh-live: $1 requires a value" >&2; exit 2 ;;
+          -*) echo "wsh-live: $1 takes a session name, got '$2' (a flag is not a value)" >&2; exit 2 ;;
         esac
         SESS_FLAG="${2#=}"
         shift 2
+        ;;
+      --session*)
+        # Unknown spelling (--sessions, --session:x, …): reject rather than
+        # let it fall into PSF_REST and be silently dropped downstream.
+        echo "wsh-live: unknown option '$1' (did you mean --session NAME or --session=NAME?)" >&2; exit 2
         ;;
       *)
         PSF_REST+=("$1")
@@ -350,6 +366,18 @@ parse_session_flag() {
         ;;
     esac
   done
+}
+
+# A session-shaped positional NEXT TO --session/-s is a contradiction the
+# caller must resolve — fail loud instead of silently dropping the token
+# (same "no guessing" rule as looks_like_session; the flag would otherwise
+# win and the second name would vanish without a word). Shared by the four
+# discrimination sites (banner/wait-done/output/step-run), same
+# anti-divergence rationale as deny_own_session.
+flag_conflict_check() {  # $1 candidate token
+  [ -n "$SESS_FLAG" ] && looks_like_session "$1" || return 0
+  echo "wsh-live: got both --session '$SESS_FLAG' and session-shaped token '$1' — name the session once" >&2
+  exit 2
 }
 
 # --- Remote mode: sticky per-session inline-framing flag ---------------------

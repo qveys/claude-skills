@@ -622,7 +622,10 @@ banner)
   # Form first (looks_like_session), existence second (mux_has): a token
   # shaped like a session that no longer exists must reach need_session below
   # and fail loud (exit 4), not fall back to text (plan §2/§3, lot 2 t3).
-  # $SESS_FLAG set: skip the sniff entirely, the flag already decided SESS.
+  # $SESS_FLAG set: skip the sniff entirely, the flag already decided SESS —
+  # but a session-shaped last argument NEXT TO the flag is a contradiction,
+  # not text: fail loud (flag_conflict_check, exit 2) instead of guessing.
+  if [ $# -gt 0 ]; then flag_conflict_check "${!#}"; fi
   if [ -z "$SESS_FLAG" ] && [ $# -gt 1 ] && { looks_like_session "${!#}" || mux_has "${!#}"; }; then
     SESS="${!#}"
     SESS="${SESS#=}"   # target-pane calls downstream (mux_send_line) reject "="
@@ -684,8 +687,8 @@ wait-done)
   for arg in "$@"; do
     case "$arg" in --print) PRINT=1 ;; esac
     # Form first, existence second — see banner) above for the rationale.
-    # $SESS_FLAG set: a token that looks like a session goes back to being
-    # ordinary text/number for this call (the flag already decided SESS).
+    # Session-shaped token next to --session: contradiction, fail loud.
+    flag_conflict_check "$arg"
     if [ -z "$SESS_FLAG" ] && [ -z "$local_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
       local_sess="${arg#=}"
     elif [ -z "$timeout_sec" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
@@ -1042,6 +1045,11 @@ read)
     SESS=$(resolve_session "${1:-}")
     LINES="${2:-30}"
   fi
+  # Single validation point for every branch above: a non-numeric LINES
+  # (read --session NAME foo / read NAME foo) would reach capture-pane as an
+  # invalid -S argument and fail confusingly — usage error instead.
+  [[ "$LINES" =~ ^[0-9]+$ ]] || {
+    echo "read: lines must be a positive integer, got '$LINES'" >&2; exit 2; }
   need_session "$SESS"
   # capture-pane pads the bottom of the screen with blank lines; trim the
   # trailing blanks so output ends at the last real line (the live prompt).
@@ -1060,8 +1068,8 @@ output)
   for arg in "$@"; do
     case "$arg" in --full) FULL=1 ;; esac
     # Form first, existence second — see banner) above for the rationale.
-    # $SESS_FLAG set: a token that looks like a session goes back to being
-    # ordinary text/number for this call (the flag already decided SESS).
+    # Session-shaped token next to --session: contradiction, fail loud.
+    flag_conflict_check "$arg"
     if [ -z "$SESS_FLAG" ] && [ -z "$local_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
       local_sess="${arg#=}"
     elif [ -z "$target_seq" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
@@ -1099,8 +1107,8 @@ step-run)
   run_timeout=""
   for arg in "$@"; do
     # Form first, existence second — see banner) above for the rationale.
-    # $SESS_FLAG set: a token that looks like a session goes back to being
-    # ordinary text/number for this call (the flag already decided SESS).
+    # Session-shaped token next to --session: contradiction, fail loud.
+    flag_conflict_check "$arg"
     if [ -z "$SESS_FLAG" ] && [ -z "$run_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
       run_sess="${arg#=}"
     elif [ -z "$run_timeout" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then

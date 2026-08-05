@@ -881,7 +881,7 @@ cmd_selftest_guard() {
   GUARD_T3_DEAD="cockpit-selftest-guard-mort-$$"
   GUARD_T3_KEY="selftest-guard-t3-$$"
   GUARD_T3_KEY2="selftest-guard-t3b-$$"
-  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep err
+  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep err rcline gcrc
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
     if [ "$2" -eq 0 ]; then
@@ -1688,13 +1688,63 @@ cmd_selftest_guard() {
   # through the ordinary DEFAULT path (no --session, no positional session
   # survives), same as real usage.
   set +e
-  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" banner done "essai" "cockpit-fixwave terminé" 2>&1 >/dev/null)
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" banner "done" "essai" "cockpit-fixwave terminé" 2>&1 >/dev/null)
   rc=$?
   set -e
   if [ "$rc" -ne 4 ]; then
     report_guard_case "38 banner's multi-word cockpit-shaped text is not mistaken for a session" 0
   else
     report_guard_case "38 banner's multi-word cockpit-shaped text is not mistaken for a session" 1 "rc=4 (expected != 4), stderr='$err'"
+  fi
+
+  # 39 (PR review, CodeRabbit). The equals form --session=NAME must behave
+  # exactly like --session NAME — gc already accepts --idle=/--only-session=
+  # so callers WILL type it; before the fix it fell into PSF_REST, matched
+  # no discrimination branch, and the command silently ran against the
+  # REMEMBERED session instead of the named one. Poll mux_capture so this
+  # proves the command ran in the right pane, not just that parsing passed.
+  set +e
+  WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-eq-ok' "--session=$GUARD_T3_ALIVE" >/dev/null 2>&1
+  rc=$?
+  set -e
+  tries=0; found=no
+  while [ "$tries" -lt 20 ]; do
+    mux_capture "$GUARD_T3_ALIVE" 50 | grep -q lot2-eq-ok && { found=yes; break; }
+    tries=$((tries + 1)); sleep 0.5
+  done
+  if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+    report_guard_case "39 --session=NAME (equals form) reaches the named session" 0
+  else
+    report_guard_case "39 --session=NAME (equals form) reaches the named session" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-eq-ok' never appeared in '$GUARD_T3_ALIVE')"
+  fi
+
+  # 40 (PR review, CodeRabbit). --session PLUS a session-shaped positional is
+  # a contradiction — before the fix the positional was silently dropped and
+  # the flag won without a word, the exact "guess instead of fail" behavior
+  # this lot exists to close. flag_conflict_check must exit 2 with both names
+  # on stderr.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output --session "$GUARD_T3_ALIVE" "cockpit-conflict-$$" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'name the session once'; then
+    report_guard_case "40 --session + session-shaped positional fails loud (exit 2)" 0
+  else
+    report_guard_case "40 --session + session-shaped positional fails loud (exit 2)" 1 "rc=$rc (expected 2), stderr='$err'"
+  fi
+
+  # 41 (PR review, Copilot). read's LINES must be numeric on EVERY branch —
+  # before the fix `read --session NAME foo` fed "foo" straight to
+  # capture-pane -S as an invalid scrollback offset (confusing tmux error
+  # instead of a usage error).
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" read --session "$GUARD_T3_ALIVE" foo 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'must be a positive integer'; then
+    report_guard_case "41 read rejects a non-numeric lines argument (exit 2)" 0
+  else
+    report_guard_case "41 read rejects a non-numeric lines argument (exit 2)" 1 "rc=$rc (expected 2), stderr='$err'"
   fi
 
   selftest_guard_cleanup
