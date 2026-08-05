@@ -52,13 +52,13 @@ pour que stderr arrive avant le footer.
 | `output [session] [seq] [--full]` | Le résultat d'un `send`, borné par ses marqueurs (tronqué tête+queue au-delà de `WSH_READ_MAX`, `--full` pour tout). |
 | `wait-done [session] [timeout] [seq] [--print]` | Attend le footer `exit` du dernier `send` ; `--print` émet aussi le résultat. |
 | `step-run <id> '<label>' '<cmd>' [session] [timeout]` | Bannière d'étape + send + wait-done en un seul appel. |
-| `banner {header\|phase\|step\|done} <texte…> [session]` | Bannières visuelles de phases/étapes dans le pane. |
+| `banner <type> <texte…> [session]` | Bannières visuelles dans le pane ; `<type>` : `header`, `phase`, `step` ou `done`. |
 | `push <local> <chemin-distant> [session]` / `pull` | Transfert de fichiers avec l'hôte enregistré de la session (moteur : `wsh-push.sh` — jamais de base64 dans le pane). |
 | `remote-init <session> <hôte>` / `local-init` | Après un hop SSH dans le cockpit : bascule le cadrage en mode distant (et retour). |
 | `stop [session]` | Tue la session, ferme le bloc Wave, nettoie l'état. |
 | `gc [--dry-run] [--idle=S] [--only-session=N]` | Balaye les cockpits orphelins (détachés et inactifs depuis 24 h par défaut). |
 | `status` / `current` / `doctor` | État des sessions / la session courante / diagnostic de l'environnement. |
-| `web [start\|stop\|status]` | Miroir navigateur du cockpit via ttyd (lecture seule par défaut). |
+| `web <action>` | Miroir navigateur du cockpit via ttyd (lecture seule par défaut) ; `<action>` : `start`, `stop` ou `status`. |
 | `selftest-*` | Suites d'auto-test (voir plus bas). |
 
 **`--session NOM` / `-s NOM` / `--session=NOM`** : toutes les commandes qui
@@ -112,6 +112,7 @@ Le skill refuse de *deviner* et refuse de se *mordre la queue* :
 | `WSH_LIVE_GC_IDLE` | `86400` | Seuil d'inactivité du `gc` (s). |
 | `WSH_LIVE_LOG` / `WSH_LIVE_LOG_DIR` | `1` / `~/Library/Logs/wsh-cockpit` | Journal d'audit. |
 | `WSH_REXEC_TIMEOUT` | `60` | Attente max d'un `rexec` (s). |
+| `WSH_REXEC_LINGER` | `60` | Durée d'affichage du bloc `rexec` après la fin (s) ; `0` = fermeture immédiate. |
 | `WSH_WEB_PORT` / `WSH_WEB_WRITE` | `7681` / lecture seule | Miroir `web`. |
 
 ## Auto-tests
