@@ -72,20 +72,224 @@ newest_session_for_prefix() {
   printf '%s\n' "$best"
 }
 
+# The tmux session CURRENTLY running the calling process itself, if any.
+# `$TMUX` is set by tmux in every process spawned inside a pane — including
+# the Bash tool call whose shell lives inside the Claude Code CLI's own
+# wrapping tmux session (Wave wraps every terminal in tmux, one block = one
+# session). `tmux display-message` asks the tmux server, not the pane
+# content, so it's authoritative regardless of what's drawn on screen.
+own_tmux_session() {
+  [ "$MUX" = tmux ] || return 1
+  [ -n "${TMUX:-}" ] || return 1
+  # Measured twice (M-a, tmux 3.7b): anchoring on $TMUX_PANE does NOT
+  # stabilise the display-message call below — under a grouped session the
+  # anchored form drifts exactly like the bare '#S' form. Do not "fix" this
+  # by adding -t "$TMUX_PANE" here; it has already been proposed and
+  # measured wrong twice. Instead: without $TMUX_PANE, "my own session" has
+  # no answer worth trusting at all — refuse rather than guess (Task 8).
+  [ -n "${TMUX_PANE:-}" ] || return 2   # under tmux, but identity indeterminable
+  tmux display-message -p '#S' 2>/dev/null
+}
+
+# Whether <sess> designates the tmux session the caller is itself running
+# inside. With grouped sessions "my session" has no unique answer: several
+# session names can share the exact same pane, and the two ways tmux gives
+# you to name a session (the string you were handed vs. `#{session_name}`)
+# can disagree (measured on this machine: `$TMUX`'s sid names one session,
+# `#S` names another, same live pane). The pane is the only identity that
+# stays pinned to the caller regardless of naming, so pane membership is
+# the PRIMARY test; name equality is only a fallback for when pane info is
+# unavailable:
+#   1. strip a leading "=" anchor — `=X` and `X` name the same session, but
+#      tmux only resolves "=" for target-SESSION commands (has-session), not
+#      target-PANE ones (display-message, capture-pane): left unstripped,
+#      the canonical-name lookup below goes blind (empty, rc=0) on exactly
+#      the input this function most needs to catch, and `mux_kill` — which
+#      DOES honour "=" — would then tear down the caller's own session;
+#   2. resolve the canonical name (mux_session_name), falling back to the
+#      stripped name itself if that lookup comes back empty;
+#   3. PRIMARY — is $TMUX_PANE non-empty and a member of
+#      mux_session_panes(canonical)? Catches grouped sessions (a different
+#      session name sharing the caller's pane — how Wave wraps blocks) and,
+#      as a side effect, exact/prefix/fnmatch aliases too, since those all
+#      resolve to a session containing that same pane;
+#   4. FALLBACK — raw or canonical name equal to own_tmux_session(). Reached
+#      whenever $TMUX_PANE is present but not a member of the target's
+#      panes (the ordinary case: a genuinely different session) — NOT only
+#      when $TMUX_PANE is unset, contrary to what this comment used to say.
+#      Since Task 8, an unset $TMUX_PANE is caught earlier: own_tmux_session
+#      returns 2 (indeterminable) and this function propagates that before
+#      ever reaching this fallback.
+# Sets SESSION_OWN_CANON / SESSION_OWN_REASON (exact|alias|shared-pane) /
+# SESSION_OWN_PANE (shared-pane only) for session_own_refusal to build a
+# message from — deliberately NOT `local`: callers read them after return.
+# Silent otherwise: it only tests, callers write the refusal message.
+# rc 1 outside tmux and under zellij (own_tmux_session is a no-op there),
+# same as before this function existed; rc 2 under tmux when $TMUX_PANE is
+# unset (identity indeterminable — see own_tmux_session, Task 8).
+SESSION_OWN_CANON=""
+SESSION_OWN_REASON=""
+SESSION_OWN_PANE=""
+session_is_own() {
+  local raw="$1" sess canon own panes rc
+  sess="${raw#=}"
+  canon=$(mux_session_name "$sess" 2>/dev/null || true)
+  [ -n "$canon" ] || canon="$sess"
+  SESSION_OWN_CANON="$canon"
+  SESSION_OWN_REASON=""
+  SESSION_OWN_PANE=""
+  rc=0; own=$(own_tmux_session) || rc=$?
+  # rc=2 (own_tmux_session: $TMUX set, $TMUX_PANE unset — identity
+  # indeterminable) must propagate as-is, not collapse into "not own" (rc=1):
+  # a guard that can't tell must refuse, not guess (Task 8, option A).
+  [ "$rc" -ne 2 ] || return 2
+  [ "$rc" -eq 0 ] || return 1
+
+  if [ -n "${TMUX_PANE:-}" ]; then
+    panes=$(mux_session_panes "$canon" || true)
+    if grep -Fqx -- "$TMUX_PANE" <<<"$panes"; then
+      if [ "$raw" = "$own" ]; then SESSION_OWN_REASON="exact"
+      elif [ "$canon" = "$own" ]; then SESSION_OWN_REASON="alias"
+      else SESSION_OWN_REASON="shared-pane"; SESSION_OWN_PANE="$TMUX_PANE"
+      fi
+      return 0
+    fi
+  fi
+
+  if [ "$raw" = "$own" ]; then SESSION_OWN_REASON="exact"; return 0; fi
+  if [ "$canon" = "$own" ]; then SESSION_OWN_REASON="alias"; return 0; fi
+  return 1
+}
+
+# Refusal message for a target session_is_own just confirmed is the
+# caller's own — reads the globals it sets, so always call this right
+# after a session_is_own that returned 0. Factored so session_safe_to_reuse
+# and `start --reuse` (wsh-live.sh) can't re-diverge the way they already
+# had (the ~6-line block used to be duplicated, with slightly different
+# wording in each place).
+session_own_refusal() {
+  local sess="$1"
+  case "$SESSION_OWN_REASON" in
+    shared-pane)
+      echo "⚠️  session '$sess' shares pane $SESSION_OWN_PANE with the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2 ;;
+    alias)
+      echo "⚠️  session '$sess' resolves to '$SESSION_OWN_CANON', the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2 ;;
+    *)
+      echo "⚠️  session '$sess' IS the tmux session this call is running inside (your own controlling terminal) — refusing to reuse it under any circumstance" >&2 ;;
+  esac
+}
+
+# Refusal message for when session_is_own returned 2: $TMUX is set but
+# $TMUX_PANE is not, so the caller's own identity cannot be established at
+# all (own_tmux_session, Task 8). This is NOT "confirmed not yours" — it's
+# "cannot check" — so the guard refuses by principle instead of falling
+# back to an arbitrary name comparison. Companion to session_own_refusal,
+# factored for the same reason: session_safe_to_reuse and `start --reuse`
+# (wsh-live.sh) must not re-diverge on wording.
+session_indeterminate_refusal() {
+  local sess="$1"
+  echo "⚠️  cannot verify whether session '$sess' is the tmux session this call is running inside (\$TMUX is set but \$TMUX_PANE is not — identity indeterminable) — refusing by principle; relaunch from inside a real tmux pane, or pass --force for a fresh cockpit" >&2
+}
+
+# One-shot own-session guard for a resolved (already existence-checked)
+# session: probe + print the right refusal + return 1, or return 0 to
+# proceed. Factored for the same reason as session_own_refusal itself — 4
+# call sites (wsh-live.sh: send/keys/step-run/banner, Task 2 lot 2) that
+# must not re-diverge on the rc=0/rc=2/set -e dance session_is_own requires
+# (the `rc=0; … || rc=$?` form, not a bare `if session_is_own; then`, so a
+# non-zero rc under `set -e` doesn't abort the caller before this function
+# even gets to inspect it). rc=2 (identity indeterminable) is refused just
+# like rc=0 (confirmed own): "cannot verify" is not "confirmed not yours" —
+# guessing wrong here means typing into a stranger's own terminal, so both
+# non-clear outcomes refuse alike (same principle as session_safe_to_reuse
+# and stop's guard, Task 8 option A).
+deny_own_session() {
+  local sess="$1" rc=0
+  session_is_own "$sess" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    session_indeterminate_refusal "$sess"
+    return 1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    session_own_refusal "$sess"
+    return 1
+  fi
+  return 0
+}
+
+# A session is safe to silently reuse only if BOTH hold:
+#   1. it is not the tmux session the caller is itself running inside, by any
+#      alias (absolute, unconditional block — see session_is_own); this also
+#      refuses outright when identity is indeterminable rather than own
+#      (session_is_own rc=2, Task 8);
+#   2. its foreground process is a bare shell, not some other interactive
+#      program left running in an otherwise-orphaned cockpit (most
+#      dangerously another CLI: `send` would TYPE into its input).
+# Empty pane_current_command (zellij: unsupported, or transient read
+# failure) is treated unverifiable-but-safe, not unsafe.
+# NOTE (spec claude-cockpit §2): lot 2 extends check 2 for ADOPTION with
+# ssh/tailscale/mosh as adoptable states — reuse stays bare-shell strict.
+session_safe_to_reuse() {
+  # Strip a leading "=" anchor like session_is_own does: check 2 below feeds
+  # $sess to mux_pane_command (display-message, a target-pane command that is
+  # blind to "=" — empty output, rc=0), so an anchored "=name" left unstripped
+  # would be classed unverifiable-but-safe and skip the foreground check
+  # entirely. Not reachable in prod (find_reusable_session only ever passes
+  # canonical names) — API-consistency hardening, not an exploitable hole.
+  local sess="${1#=}" cmd rc
+  rc=0; session_is_own "$sess" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    session_indeterminate_refusal "$sess"
+    return 1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    session_own_refusal "$sess"
+    return 1
+  fi
+  cmd=$(mux_pane_command "$sess")
+  case "$cmd" in
+    ""|bash|zsh|sh|fish|-bash|-zsh|-sh|-fish) return 0 ;;
+    *)
+      echo "⚠️  session '$sess' has foreground process '$cmd', not a bare shell — refusing silent reuse (pass --force for a fresh cockpit, or 'read' it manually first)" >&2
+      return 1 ;;
+  esac
+}
+
 # Prefer last remembered session; else newest alive session for the spawn prefix.
 find_reusable_session() {
   local prefix="${1:-}"
   local norm remembered newest
   norm=$(normalize_prefix "$prefix")
-  if remembered=$(last_session 2>/dev/null); then
+  if remembered=$(last_session 2>/dev/null) && session_safe_to_reuse "$remembered"; then
     printf '%s\n' "$remembered"
     return 0
   fi
-  if newest=$(newest_session_for_prefix "$norm" 2>/dev/null); then
+  if newest=$(newest_session_for_prefix "$norm" 2>/dev/null) && session_safe_to_reuse "$newest"; then
     printf '%s\n' "$newest"
     return 0
   fi
   return 1
+}
+
+# Form-based test: does this token LOOK like a session name, regardless of
+# whether such a session exists right now? Deliberately STABLE and LOCAL (the
+# string's shape) as opposed to mux_has, which tests EXISTENCE — a property of
+# the system at this instant. Conflating the two in one discrimination loop is
+# the design fault named in
+# docs/plans/2026-08-02-desambiguisation-argument-session.md §2: a token that
+# looks like a session but doesn't (yet, or anymore) exist must reach
+# need_session and fail loud (exit 4), not silently fall through into another
+# argument category. $SESS_DEFAULT is set in wsh-live.sh before this file is
+# sourced.
+looks_like_session() {
+  case "$1" in
+    # A real session name never contains whitespace (spawn/start never
+    # produce one) — a multi-word banner text starting with "cockpit-"
+    # (e.g. "cockpit-build terminé") must NOT be mistaken for one.
+    *[[:space:]]*) return 1 ;;
+    cockpit-*|"$SESS_DEFAULT"|=*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 resolve_session() {
@@ -101,6 +305,79 @@ resolve_session() {
 need_session() {
   mux_has "$1" || {
     echo "no $MUX session '$1' — run: $0 start $1" >&2; exit 4; }
+}
+
+# parse_session_flag "$@" — pre-scan for a --session/-s VALUE pair (or the
+# equals forms --session=VALUE / -s=VALUE) ahead of any positional
+# discrimination. Sets exactly two globals and does nothing else:
+#   SESS_FLAG   the value with a leading "=" stripped (same as the positional
+#               acceptance path's "${arg#=}") — empty when the flag was
+#               absent. Un-stripped, "=name" reaches mux_send_line/tmux
+#               send-keys -t as a target-pane spec containing "=", which
+#               tmux rejects ("can't find pane"); mux_capture fails the same
+#               way, silently.
+#   PSF_REST    the remaining positionals with the flag and its value
+#               removed, in order; the caller rebuilds "$@" with
+#               `set -- ${PSF_REST[@]+"${PSF_REST[@]}"}` — NOT the plain
+#               `"${PSF_REST[@]}"` form: bash 3.2, under `set -u`, treats an
+#               array with zero elements as unbound on a bare `[@]`
+#               expansion ("PSF_REST[@]: unbound variable") even though the
+#               array itself was assigned; `${PSF_REST[@]+"${PSF_REST[@]}"}`
+#               is the standard guard (measured: reproduces and is fixed by
+#               this exact idiom on this Mac's /usr/bin/env bash 3.2.57).
+# Bash 3.2: no associative arrays, so PSF_REST is a plain indexed array (the
+# script already relies on those elsewhere, e.g. wsh-live.sh's output
+# truncation). A missing value (end of arguments, or a value starting with
+# "-") is a usage error raised HERE, exit 2 — not left for the caller.
+parse_session_flag() {
+  SESS_FLAG=""
+  PSF_REST=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session=*|-s=*)
+        # Equals form — the same spelling gc already accepts (--idle=,
+        # --only-session=), so callers WILL type it; silently ignoring it
+        # would re-create the exact absorption this lot exists to close.
+        SESS_FLAG="${1#*=}"
+        SESS_FLAG="${SESS_FLAG#=}"
+        if [ -z "$SESS_FLAG" ]; then
+          echo "wsh-live: ${1%%=*} requires a value" >&2; exit 2
+        fi
+        shift
+        ;;
+      --session|-s)
+        if [ $# -lt 2 ]; then
+          echo "wsh-live: $1 requires a value" >&2; exit 2
+        fi
+        case "$2" in
+          -*) echo "wsh-live: $1 takes a session name, got '$2' (a flag is not a value)" >&2; exit 2 ;;
+        esac
+        SESS_FLAG="${2#=}"
+        shift 2
+        ;;
+      --session*)
+        # Unknown spelling (--sessions, --session:x, …): reject rather than
+        # let it fall into PSF_REST and be silently dropped downstream.
+        echo "wsh-live: unknown option '$1' (did you mean --session NAME or --session=NAME?)" >&2; exit 2
+        ;;
+      *)
+        PSF_REST+=("$1")
+        shift
+        ;;
+    esac
+  done
+}
+
+# A session-shaped positional NEXT TO --session/-s is a contradiction the
+# caller must resolve — fail loud instead of silently dropping the token
+# (same "no guessing" rule as looks_like_session; the flag would otherwise
+# win and the second name would vanish without a word). Shared by the four
+# discrimination sites (banner/wait-done/output/step-run), same
+# anti-divergence rationale as deny_own_session.
+flag_conflict_check() {  # $1 candidate token
+  [ -n "$SESS_FLAG" ] && looks_like_session "$1" || return 0
+  echo "wsh-live: got both --session '$SESS_FLAG' and session-shaped token '$1' — name the session once" >&2
+  exit 2
 }
 
 # --- Remote mode: sticky per-session inline-framing flag ---------------------
@@ -246,12 +523,30 @@ teardown_session() {
   rm -f "$(oneshot_ssh_file "$sess")" 2>/dev/null || true
   tab_cache_invalidate "$sess"
   if [ "$MUX" = tmux ]; then
-    tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
+    # `stop` (wsh-live.sh) hands its raw argument straight to this function
+    # with no mux_has check of its own — so $sess can be a bare PREFIX, not
+    # the exact session name. `set-option` rejects "=" and resolves by
+    # PREFIX instead (measured — see docs/gotchas.md's I1/I2 gotchas), so
+    # unlike the anchored `mux_kill` below, the six set-option calls used to
+    # run against whatever session $sess happened to prefix-match — wiping
+    # a live NEIGHBOUR's remote-mode options while `mux_kill` correctly (and
+    # silently) refused to kill anything. `mux_has` is anchored ("=", exact
+    # match only), so gate on it FIRST: only when an EXACT session really
+    # exists do we resolve its canonical name (mux_session_name, same
+    # round-trip session_is_own uses, for the rare grouped-session alias)
+    # and let these calls proceed. If nothing matches exactly, leave $sess
+    # untouched and skip the whole block — closes the hole for whatever
+    # tmux target command gets added here next, not just today's six lines.
+    if mux_has "$sess"; then
+      local canon; canon=$(mux_session_name "$sess" 2>/dev/null || true)
+      [ -n "$canon" ] && sess="$canon"
+      tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
+      tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
+    fi
   fi
   # Close and remove the session's ControlMaster socket, if any (orphaned
   # otherwise — see control_path_for_session). "-O exit" needs a host

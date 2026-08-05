@@ -20,9 +20,18 @@
 # Returns 0 (yes — kill it) or 1 (no — keep it).
 gc_should_kill() {
   local now="$1" activity="$2" attached="$3" idle="$4"
-  # Non-negotiable guard: an attached session is never a GC candidate,
-  # regardless of age — mirrors the "never touch a session in use" spirit of
-  # the own_tmux_session guard elsewhere in this skill.
+  # This checks idle age and the attached-client count ONLY — it does NOT
+  # know or care whether the session being evaluated is the one the sweep
+  # itself is running inside. Measured, before Task 1 (lot 2): `gc --idle=0`
+  # run from inside a detached cockpit-* session killed that session out
+  # from under itself (see docs/gotchas.md history). The own-session guard
+  # now lives in cmd_gc below, not here: a probe before the loop refuses
+  # the WHOLE sweep outright when identity is indeterminable ($TMUX set,
+  # $TMUX_PANE unset), and a per-candidate session_is_own check inside the
+  # loop skips (kept, not an error) any candidate that IS the caller's own
+  # session. Keeping that guard out of gc_should_kill is deliberate: this
+  # function stays pure (no tmux/date calls), which is what makes it
+  # directly testable with fabricated timestamps (see cmd_selftest_gc).
   [ "$attached" = "0" ] || return 1
   local age=$((now - activity))
   [ "$age" -ge "$idle" ]
@@ -65,6 +74,27 @@ cmd_gc() {
     [ -t 1 ] && echo "gc: no tmux server reachable — nothing to sweep"
     return 0
   fi
+
+  # Own-session guard (Task 1, lot 2), probed ONCE here rather than inside
+  # the loop below: own_tmux_session's rc=2 ($TMUX set, $TMUX_PANE unset —
+  # identity indeterminable) fires before session_is_own ever compares a
+  # name, so it would be identical for every candidate in the loop. A REAL
+  # sweep that cannot verify its own identity refuses outright — this is
+  # exactly the state that used to let `gc --idle=0` kill its own detached
+  # session (docs/gotchas.md). --dry-run never destroys anything regardless
+  # of identity, so it skips this probe and keeps listing normally — the
+  # per-candidate check further down still runs for it, it just can't
+  # distinguish rc=1 from rc=2 there, which is harmless since dry-run only
+  # prints.
+  local rc
+  if [ "$DRY_RUN" -eq 0 ]; then
+    rc=0; session_is_own "cockpit-gc-probe-nonexistent" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      echo "gc: cannot verify own session (\$TMUX set but \$TMUX_PANE unset) — nothing destroyed" >&2
+      return 0
+    fi
+  fi
+
   sessions=$(printf '%s\n' "$sessions" | grep '^cockpit-' || true)
   if [ -n "$ONLY_SESSION" ]; then
     sessions=$(printf '%s\n' "$sessions" | awk -F'|' -v n="$ONLY_SESSION" '$1==n' || true)
@@ -74,7 +104,11 @@ cmd_gc() {
   while IFS='|' read -r nm att act; do
     [ -n "$nm" ] || continue
     if gc_should_kill "$now" "$act" "$att" "$IDLE"; then
-      if [ "$DRY_RUN" -eq 1 ]; then
+      rc=0; session_is_own "$nm" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        kept=$((kept + 1))
+        echo "kept: $nm (own session — never a GC candidate)"
+      elif [ "$DRY_RUN" -eq 1 ]; then
         wouldkill=$((wouldkill + 1))
         echo "would-kill: $nm (idle $((now - act))s >= ${IDLE}s)"
       elif teardown_session "$nm"; then
