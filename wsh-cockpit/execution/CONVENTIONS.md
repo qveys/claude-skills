@@ -50,10 +50,12 @@ sans mise à jour de NEXT → la même fiche est rejouée (les fiches restent re
 Pas d'opusplan : le blueprint est payé au découpage, chaque fiche EST le plan.
 | Cas | Modèle |
 |---|---|
-| Défaut (implémentation au contrat clair) | Sonnet |
-| Fiches de jugement (plan, audit, arbitrage qui redécoupe) | Opus |
-| Mécanique pur | Haiku possible |
+| Défaut (implémentation au contrat clair, mécanique compris) | Sonnet |
+| Fiches de jugement (plan, audit, arbitrage qui redécoupe) | Fable |
 | Blocage réel en cours de session | Consigner dans STATE.md, escalader, redescendre |
+
+⚠️ Ne JAMAIS mettre « Modèle : Haiku » sur une fiche : Haiku n'est pas disponible en
+« auto mode on » sur cette machine — le mécanique pur reste sur Sonnet.
 
 ## Décisions actées (ne PAS re-questionner)
 
