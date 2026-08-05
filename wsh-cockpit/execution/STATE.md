@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-05 · **Étape courante : step-1.1 (non démarrée) — step-0.1 terminée**
+màj : 2026-08-05 · **Étape courante : step-1.2 — step-1.1 terminée**
 
-NEXT: step-1.1
+NEXT: step-1.2
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -17,7 +17,7 @@ c'est le seul remède, puis relancer la fiche)
 | Étape | Titre | Modèle | Statut |
 |---|---|---|---|
 | 0.1 | Amender la spec (findings v11) + plan du lot + découpage en fiches | Fable | ✅ 2026-08-05 |
-| 1.1 | Inventaire de réalité et mesures préalables (`ln` no-clobber, DB Wave, `sql_quote`) | Sonnet | ☐ |
+| 1.1 | Inventaire de réalité et mesures préalables (`ln` no-clobber, DB Wave, `sql_quote`) | Sonnet | ✅ 2026-08-05 |
 | 1.2 | Primitives du claim (`lib/claim.sh`) + `selftest-claim` | Sonnet | ☐ |
 | 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ☐ |
 | 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ☐ |
@@ -59,3 +59,22 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   `mux_pane_command` :93→:104-110) — fiche 1.1 dresse la table exacte ; **`selftest-guard` :
   28 appels `report_guard_case` comptés vs « 41 cas » annoncés par CONVENTIONS.md** — à
   trancher en 1.1 (compter les cas exécutés, corriger CONVENTIONS.md ou expliquer).
+- 2026-08-05 (step-1.1, Sonnet) : **aucune contradiction avec la spec v12** — voir
+  `execution/rapport-step-1.1.md`. Table de références vérifiée par nom de fonction (dérives
+  de numéro de ligne seulement, attendu). Absence confirmée de `release`, claim/adopt,
+  `claude-cockpit.sh`. `selftest-guard` : exécution réelle en session tmux jetable →
+  **41/41 cas passent** ; CONVENTIONS.md a raison, le « 28 » de step-0.1 était un
+  sous-comptage préliminaire, à ne plus citer. Mesure 1 (no-clobber `ln`/`mv`) : les 4
+  garanties de la spec confirmées sur APFS. Mesure 2 (DB Wave) : résolution dynamique
+  `wsh wavepath data` confirmée, requête `--tab` v12 exécutée avec succès sur la DB vivante,
+  `pinnedtabids` bien absent des blobs actuels ; note secondaire non bloquante — le fallback
+  codé en dur de `wave_db_ro` pointe vers une DB observée à 9 jours de retard sur la DB
+  vivante (renforce, sans la contredire, la prudence déjà présente dans le code). Mesure 3
+  (`sql_quote()`) : prototype validé contre 5 cas hostiles (quote, `%`, retour-ligne,
+  tentative d'injection, contrôle) sur DB fixture — neutralisation complète, table cible
+  intacte ; piège de prototypage documenté dans le rapport (`${s//\'/\'\'}` insère des
+  backslashes littéraux — passer par une variable intermédiaire). Gotcha secondaire noté :
+  un point littéral dans un nom de session tmux casse le ciblage `-t`, même ancré `=` —
+  cibler par `session_id` (`$N`) en remède ; sans impact sur le lot (nos noms de session
+  n'ont jamais de point) mais à garder en tête pour les selftests des fiches suivantes.
+  Aucun fichier de `scripts/` modifié.
