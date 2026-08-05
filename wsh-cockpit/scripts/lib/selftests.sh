@@ -1752,3 +1752,223 @@ cmd_selftest_guard() {
   if [ "$failures" -eq 0 ]; then echo "selftest-guard: all cases passed"; return 0
   else echo "selftest-guard: $failures failure(s)" >&2; return 1; fi
 }
+
+# Claim state-machine test (step-1.2, lib/claim.sh) — pure filesystem, no
+# tmux session needed (same spirit as selftest-cache/selftest-oneshot-ssh).
+# Slugs are opaque strings here on purpose: deriving a slug from a real
+# session name is step-1.3's job, not this fiche's.
+cmd_selftest_claim() {
+  # NOT local: the EXIT trap runs after this function has already returned
+  # (same rationale as selftest-guard's GUARD_* / selftest-cache's SESS).
+  CLAIM_PREFIX="selftest-claim-$$"
+  local failures=0 rc rc2 rc3 rc4 rcB rcV wins stale_leftover won_gone
+  local key_after key_after_finalize key_after_release key_final key_won key8 pid8 lines8
+  local slug prekey ownkey pidx pidy rcfile_a rcfile_b rcfile_e rcfile_f f
+
+  report_claim_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  selftest_claim_cleanup() {
+    rm -f "${STATE_DIR}/adopt-claim-${CLAIM_PREFIX}"* 2>/dev/null || true
+    rm -f "${TMPDIR:-/tmp}/wsh-cockpit-selftest-claim-"*".$$" 2>/dev/null || true
+  }
+  trap selftest_claim_cleanup EXIT
+
+  mkdir -p "$STATE_DIR"
+
+  # 1. Cycle nominal complet : création -> consommation -> vérif -> définitif
+  #    -> release -> re-consommation par un nouvel agent.
+  slug="${CLAIM_PREFIX}-cycle"
+  prekey="user-preopen-1"
+  ownkey="claude-selftest-cycle-$$"
+  pidx="${$}A1"
+  set +e
+  claim_create "$slug" "$prekey" "$$" >/dev/null 2>&1; rc=$?
+  claim_consume "$slug" "$pidx" >/dev/null 2>&1; rc2=$?
+  claim_verify_won "$slug" "$pidx" >/dev/null 2>&1; rc3=$?
+  claim_finalize "$slug" "$pidx" "$ownkey" >/dev/null 2>&1; rc4=$?
+  set -e
+  key_after_finalize=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
+  won_gone=1; [ -f "$(claim_won_path "$slug" "$pidx")" ] || won_gone=0
+  if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && [ "$rc3" -eq 0 ] && [ "$rc4" -eq 0 ] \
+     && [ "$key_after_finalize" = "$ownkey" ] && [ "$won_gone" -eq 0 ]; then
+    report_claim_case "1a cycle nominal : create -> consume -> verify -> finalize" 0
+  else
+    report_claim_case "1a cycle nominal : create -> consume -> verify -> finalize" 1 \
+      "rc=$rc/$rc2/$rc3/$rc4 key='$key_after_finalize' (attendu '$ownkey') won_gone=$won_gone"
+  fi
+
+  set +e
+  claim_release "$slug" "$ownkey" >/dev/null 2>&1; rc=$?
+  set -e
+  key_after_release=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
+  if [ "$rc" -eq 0 ] && [ "$key_after_release" = "released" ]; then
+    report_claim_case "1b release : POSSÉDÉ -> PRÉ-CLAIM released" 0
+  else
+    report_claim_case "1b release : POSSÉDÉ -> PRÉ-CLAIM released" 1 "rc=$rc key='$key_after_release'"
+  fi
+
+  pidy="${$}B1"
+  set +e
+  claim_consume "$slug" "$pidy" >/dev/null 2>&1; rc=$?
+  claim_verify_won "$slug" "$pidy" >/dev/null 2>&1; rc2=$?
+  set -e
+  if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ]; then
+    report_claim_case "1c re-consommation du released par un nouvel agent" 0
+  else
+    report_claim_case "1c re-consommation du released par un nouvel agent" 1 "rc=$rc rc2=$rc2"
+  fi
+
+  # 2. Course A/B sur un même pré-claim : exactement un gagnant (comptage),
+  #    par dispatch réellement concurrent (deux sous-shells en arrière-plan).
+  slug="${CLAIM_PREFIX}-race"
+  claim_create "$slug" "user-preopen-2" "$$" >/dev/null 2>&1
+  rcfile_a="${TMPDIR:-/tmp}/wsh-cockpit-selftest-claim-raceA.$$"
+  rcfile_b="${TMPDIR:-/tmp}/wsh-cockpit-selftest-claim-raceB.$$"
+  ( claim_consume "$slug" "${$}A2" >/dev/null 2>&1; echo $? >"$rcfile_a" ) &
+  ( claim_consume "$slug" "${$}B2" >/dev/null 2>&1; echo $? >"$rcfile_b" ) &
+  wait
+  rc=$(cat "$rcfile_a" 2>/dev/null || echo 1)
+  rc2=$(cat "$rcfile_b" 2>/dev/null || echo 1)
+  wins=0
+  [ "$rc" -eq 0 ] && wins=$((wins + 1))
+  [ "$rc2" -eq 0 ] && wins=$((wins + 1))
+  if [ "$wins" -eq 1 ]; then
+    report_claim_case "2 course A/B sur un même pré-claim : exactement un gagnant" 0
+  else
+    report_claim_case "2 course A/B sur un même pré-claim : exactement un gagnant" 1 "wins=$wins rcA=$rc rcB=$rc2"
+  fi
+
+  # 3. Anti-ré-armement : B rename APRÈS le claim définitif de A -> détecté
+  #    par la vérification de contenu (I2), rename inverse (rollback),
+  #    aucune double adoption (le claim de A reste intact).
+  slug="${CLAIM_PREFIX}-antirearm"
+  claim_create "$slug" "user-preopen-3" "$$" >/dev/null 2>&1
+  claim_consume "$slug" "${$}A3" >/dev/null 2>&1
+  claim_verify_won "$slug" "${$}A3" >/dev/null 2>&1
+  ownkey="claude-selftest-antirearm-A-$$"
+  claim_finalize "$slug" "${$}A3" "$ownkey" >/dev/null 2>&1
+  set +e
+  claim_consume "$slug" "${$}B3" >/dev/null 2>&1; rcB=$?
+  claim_verify_won "$slug" "${$}B3" >/dev/null 2>&1; rcV=$?
+  set -e
+  if [ "$rcV" -eq 0 ]; then
+    report_claim_case "3 anti-ré-armement détecté par vérif de contenu" 1 \
+      "claim_verify_won a validé à tort le claim définitif de A comme pré-claim"
+  else
+    set +e
+    claim_rollback "$slug" "${$}B3" >/dev/null 2>&1
+    set -e
+    key_final=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
+    won_gone=1; [ -f "$(claim_won_path "$slug" "${$}B3")" ] || won_gone=0
+    if [ "$rcB" -eq 0 ] && [ "$key_final" = "$ownkey" ] && [ "$won_gone" -eq 0 ]; then
+      report_claim_case "3 anti-ré-armement détecté par vérif de contenu" 0
+    else
+      report_claim_case "3 anti-ré-armement détecté par vérif de contenu" 1 \
+        "rcB=$rcB key_final='$key_final' (attendu '$ownkey') won_gone=$won_gone"
+    fi
+  fi
+
+  # 4. .won-<pid> résiduel d'un pid recyclé : purgé/restauré avant la
+  #    consommation réelle (jamais écrasé silencieusement — I1).
+  slug="${CLAIM_PREFIX}-recycled"
+  pidx="${$}R4"
+  printf 'user-preopen-99\n%s\n' "$pidx" >"$(claim_won_path "$slug" "$pidx")"
+  claim_create "$slug" "user-preopen-4" "$$" >/dev/null 2>&1
+  set +e
+  claim_consume "$slug" "$pidx" >/dev/null 2>&1; rc=$?
+  set -e
+  key_won=$(claim_read_key "$(claim_won_path "$slug" "$pidx")" 2>/dev/null || true)
+  if [ "$rc" -eq 0 ] && [ "$key_won" = "user-preopen-4" ]; then
+    report_claim_case "4 .won-<pid> résiduel de pid recyclé purgé avant consommation" 0
+  else
+    report_claim_case "4 .won-<pid> résiduel de pid recyclé purgé avant consommation" 1 \
+      "rc=$rc key_won='$key_won' (attendu 'user-preopen-4')"
+  fi
+
+  # 5. Rollback face à un claim définitif apparu entre-temps : le .won est
+  #    supprimé, le claim rival reste intact (jamais écrasé — I1).
+  slug="${CLAIM_PREFIX}-rollback-race"
+  pidx="${$}C5"
+  claim_create "$slug" "user-preopen-5" "$$" >/dev/null 2>&1
+  claim_consume "$slug" "$pidx" >/dev/null 2>&1
+  ownkey="claude-selftest-rollback-D-$$"
+  claim_create "$slug" "$ownkey" "$$" >/dev/null 2>&1
+  set +e
+  claim_rollback "$slug" "$pidx" >/dev/null 2>&1; rc=$?
+  set -e
+  key_after=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
+  won_gone=1; [ -f "$(claim_won_path "$slug" "$pidx")" ] || won_gone=0
+  if [ "$rc" -ne 0 ] && [ "$key_after" = "$ownkey" ] && [ "$won_gone" -eq 0 ]; then
+    report_claim_case "5 rollback vs claim définitif apparu entre-temps : won supprimé, claim intact" 0
+  else
+    report_claim_case "5 rollback vs claim définitif apparu entre-temps : won supprimé, claim intact" 1 \
+      "rc=$rc key_after='$key_after' (attendu '$ownkey') won_gone=$won_gone"
+  fi
+
+  # 6. Remplacement d'orphelin sous course réelle : deux remplaçants
+  #    concurrents sur le même orphelin -> exactement un gagnant, aucun
+  #    .stale-<pid> résiduel, claim final valide (l'un des deux gagnants).
+  #    Note : dans cette implémentation, le perdant échoue le plus souvent
+  #    dès le `mv claim .stale-<pid>` (source disparue) plutôt qu'à l'étape
+  #    O_EXCL elle-même — la protection I1 de `claim__restore` (perte
+  #    O_EXCL -> restauration no-clobber) est exercée directement par les
+  #    cas 3 et 5 ci-dessus, qui partagent la même primitive interne.
+  slug="${CLAIM_PREFIX}-orphan-race"
+  claim_create "$slug" "user-preopen-6" "$$" >/dev/null 2>&1
+  rcfile_e="${TMPDIR:-/tmp}/wsh-cockpit-selftest-claim-orphanE.$$"
+  rcfile_f="${TMPDIR:-/tmp}/wsh-cockpit-selftest-claim-orphanF.$$"
+  ( claim_replace_orphan "$slug" "${$}E6" "claude-orphan-E-$$" >/dev/null 2>&1; echo $? >"$rcfile_e" ) &
+  ( claim_replace_orphan "$slug" "${$}F6" "claude-orphan-F-$$" >/dev/null 2>&1; echo $? >"$rcfile_f" ) &
+  wait
+  rc=$(cat "$rcfile_e" 2>/dev/null || echo 1)
+  rc2=$(cat "$rcfile_f" 2>/dev/null || echo 1)
+  key_after=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
+  stale_leftover=0
+  for f in "${STATE_DIR}/adopt-claim-${slug}".stale-*; do
+    [ -e "$f" ] && stale_leftover=$((stale_leftover + 1))
+  done
+  wins=0
+  [ "$rc" -eq 0 ] && wins=$((wins + 1))
+  [ "$rc2" -eq 0 ] && wins=$((wins + 1))
+  if [ "$wins" -eq 1 ] \
+     && { [ "$key_after" = "claude-orphan-E-$$" ] || [ "$key_after" = "claude-orphan-F-$$" ]; } \
+     && [ "$stale_leftover" -eq 0 ]; then
+    report_claim_case "6 remplacement d'orphelin sous course : un gagnant, aucun .stale résiduel" 0
+  else
+    report_claim_case "6 remplacement d'orphelin sous course : un gagnant, aucun .stale résiduel" 1 \
+      "wins=$wins rcE=$rc rcF=$rc2 key_after='$key_after' stale_leftover=$stale_leftover"
+  fi
+
+  # 7. Refus de clé réservée (user-preopen-*, released) vs. clé normale.
+  if claim_key_reserved "user-preopen-7" && claim_key_reserved "released" \
+     && ! claim_key_reserved "claude-not-reserved-$$"; then
+    report_claim_case "7 refus de clé réservée (user-preopen-*, released)" 0
+  else
+    report_claim_case "7 refus de clé réservée (user-preopen-*, released)" 1 "claim_key_reserved incohérent"
+  fi
+
+  # 8. Format à deux lignes (clé, pid) relu correctement.
+  slug="${CLAIM_PREFIX}-format"
+  claim_create "$slug" "claude-format-$$" "4242" >/dev/null 2>&1
+  key8=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
+  pid8=$(claim_read_pid "$(claim_path "$slug")" 2>/dev/null || true)
+  lines8=$(wc -l <"$(claim_path "$slug")" | tr -d ' ')
+  if [ "$key8" = "claude-format-$$" ] && [ "$pid8" = "4242" ] && [ "$lines8" -eq 2 ]; then
+    report_claim_case "8 format à deux lignes (clé, pid) relu correctement" 0
+  else
+    report_claim_case "8 format à deux lignes (clé, pid) relu correctement" 1 \
+      "key8='$key8' pid8='$pid8' lines8=$lines8"
+  fi
+
+  selftest_claim_cleanup
+  trap - EXIT
+  if [ "$failures" -eq 0 ]; then echo "selftest-claim: all cases passed"; return 0
+  else echo "selftest-claim: $failures failure(s)" >&2; return 1; fi
+}

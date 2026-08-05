@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-05 · **Étape courante : step-1.2 — step-1.1 terminée**
+màj : 2026-08-06 · **Étape courante : step-1.3 — step-1.2 terminée**
 
-NEXT: step-1.2
+NEXT: step-1.3
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -18,7 +18,7 @@ c'est le seul remède, puis relancer la fiche)
 |---|---|---|---|
 | 0.1 | Amender la spec (findings v11) + plan du lot + découpage en fiches | Fable | ✅ 2026-08-05 |
 | 1.1 | Inventaire de réalité et mesures préalables (`ln` no-clobber, DB Wave, `sql_quote`) | Sonnet | ✅ 2026-08-05 |
-| 1.2 | Primitives du claim (`lib/claim.sh`) + `selftest-claim` | Sonnet | ☐ |
+| 1.2 | Primitives du claim (`lib/claim.sh`) + `selftest-claim` | Sonnet | ✅ 2026-08-06 |
 | 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ☐ |
 | 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ☐ |
 | 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ☐ |
@@ -78,3 +78,31 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   cibler par `session_id` (`$N`) en remède ; sans impact sur le lot (nos noms de session
   n'ont jamais de point) mais à garder en tête pour les selftests des fiches suivantes.
   Aucun fichier de `scripts/` modifié.
+- 2026-08-06 (step-1.2, Sonnet) : **`lib/claim.sh` livré** — machine d'états du claim
+  (ABSENT → PRÉ-CLAIM → EN-COURS → POSSÉDÉ) encapsulée en primitives (`claim_create`,
+  `claim_consume`, `claim_verify_won`, `claim_finalize`, `claim_rollback`,
+  `claim_replace_orphan`, `claim_release`, `claim_key_reserved`, `claim_read_key`,
+  `claim_read_pid`), invariants I1-I4 respectés (jamais de `mv` écrasant sur un claim,
+  toujours O_EXCL/no-clobber ou destination-exclusif via `ln`). Décision de périmètre :
+  les primitives prennent un **slug opaque** (chaîne quelconque) — la dérivation
+  session-name→slug (mécanique `tr -cs 'A-Za-z0-9_.-' '_'` groupée par la spec avec
+  `seq-<slug>`/`oneshot-ssh-<slug>`, spec v12 ligne ~352) est repoussée à la fiche 1.3,
+  qui devra introduire le pont réel ; le rapport 1.1 ne tranchait pas cette question,
+  la citation `session.sh:27,55` de la fiche 1.2 s'est révélée être les DEUX AUTRES
+  normaliseurs (clé agent, préfixe) — non pertinents pour le slug de claim.
+  **RED-first démontré** : sourcing de `lib/claim.sh` commenté dans `wsh-live.sh`,
+  `selftest-claim` lancé en session tmux jetable → échec immédiat rc=127
+  (`claim_path: command not found`) dès le cas 1a, script interrompu par `set -e` avant
+  même d'atteindre les cas 2-8 — sourcing restauré, mêmes 8 cas imposés tous verts
+  ensuite (`selftest-claim: all cases passed`). Bug trouvé et corrigé pendant le passage
+  au vert : le cas 6 (comptage des `.stale-<pid>` résiduels) utilisait `ls glob | wc -l`
+  — sous `set -euo pipefail`, un glob sans résultat fait échouer `ls` et le pipeline
+  entier abandonne le script ; remplacé par une boucle `for f in glob; do [ -e "$f" ]...`
+  qui tolère un glob vide. `selftest-guard` (41 cas) re-exécuté en session tmux jetable
+  après coup → toujours 41/41. Gotcha tmux confirmé en pratique (déjà noté en 1.1) :
+  cibler `send-keys`/`capture-pane` par nom de session fraîchement créée peut échouer
+  (`can't find pane`) même ancré `-t "=nom"` juste après `new-session` — cibler par
+  `session_id` (`$N`, lu via `list-sessions -F '#{session_id} #{session_name}'`) est le
+  remède fiable, à réutiliser pour les selftests des fiches suivantes. Seul nouveau
+  fichier de code : `scripts/lib/claim.sh` ; aucun appel `mv`/`ln` sur un claim hors de
+  ce fichier ; `spawn`/`stop`/le registre-à-la-création restent intouchés (fiche 1.3).

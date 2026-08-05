@@ -127,6 +127,12 @@
 #                              pane_current_command safe, find_reusable_session never hands
 #                              back an unsafe remembered session, start --reuse exit 8;
 #                              tmux-only; rc 0/1
+#   selftest-claim             claim state-machine primitives (lib/claim.sh): nominal
+#                              cycle, A/B race on a pre-claim, anti-rearm content check,
+#                              recycled-pid .won residue, rollback vs. a rival definitive
+#                              claim, orphan replacement under race, reserved-key refusal,
+#                              two-line format readback; pure filesystem, no tmux session
+#                              needed; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -197,6 +203,8 @@ PUSH_SCRIPT="$SCRIPT_DIR/wsh-push.sh"
 . "$SCRIPT_DIR/lib/web.sh"
 # shellcheck source=./lib/gc.sh
 . "$SCRIPT_DIR/lib/gc.sh"
+# shellcheck source=./lib/claim.sh
+. "$SCRIPT_DIR/lib/claim.sh"
 # shellcheck source=./lib/selftests.sh
 . "$SCRIPT_DIR/lib/selftests.sh"
 
@@ -920,6 +928,9 @@ selftest-transfer)
 selftest-guard)
   cmd_selftest_guard
   ;;
+selftest-claim)
+  cmd_selftest_claim
+  ;;
 push)
   have_mux
   # [session] is genuinely optional: with only <local> <remote-path> the
@@ -1171,5 +1182,5 @@ stop)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim} [args]" >&2; exit 2 ;;
 esac
