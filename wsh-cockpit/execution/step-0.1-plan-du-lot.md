@@ -1,6 +1,6 @@
 # Step 0.1 — Amender la spec, écrire le plan du lot, découper en fiches
 
-Phase 0 · première fiche · bloquante (elle génère toutes les autres) · **Modèle : Fable**
+Phase 0 · première fiche · bloquante (elle génère toutes les autres) · **Modèle : Opus**
 
 ## Objectif
 
