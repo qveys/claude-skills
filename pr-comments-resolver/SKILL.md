@@ -1,15 +1,11 @@
 ---
 name: pr-comments-resolver
 description: >
-  Automatically resolves GitHub pull-request review comments end-to-end:
-  fetches all threads, classifies each comment as actionable or not, generates
-  targeted code patches, commits them to the PR branch, and updates each thread
-  with a resolution reply. Use this skill whenever a user asks to "resolve PR
-  comments", "address review feedback", "process review threads", "fix PR
-  comments automatically", or provides a GitHub PR URL/number and wants the
-  review loop handled programmatically. Also trigger when the user says things
-  like "traiter les commentaires de review", "résoudre les threads de la PR",
-  or any similar phrase in any language.
+  Use when the user asks to resolve or address GitHub pull-request review
+  comments/threads, provides a PR URL or number and wants review feedback
+  handled, or says "resolve PR comments", "address review feedback",
+  "traiter les commentaires de review", "résoudre les threads de la PR", or
+  similar in any language.
 ---
 
 # PR Comments Resolver
@@ -23,21 +19,24 @@ Automates the full GitHub PR review response cycle:
 
 | Requirement | Details |
 |---|---|
-| `GITHUB_TOKEN` | Classic PAT or fine-grained token. Required scopes: `repo`, `pull_requests:write`, `contents:write` |
-| Python 3.9+ | `pip install requests` |
+| `GITHUB_TOKEN` | Optional as an env var — if unset, the script falls back automatically to `gh auth token`. Classic PAT: `repo` scope. Fine-grained token: `Contents: write` and `Pull requests: write` permissions. |
+| Python 3.9+ | Standard library only — no `pip install` needed (`urllib`, `subprocess`, `json`, `tempfile`). |
 | `git` | Available in `PATH`, configured to push over HTTPS |
 
 ---
 
 ## Tool invocation
 
-All operations use a single script:
+All operations use a single script. Invoke it with an **absolute path** — the
+working directory is typically the PR's repo checkout, not this skill's folder:
 
 ```bash
-python scripts/pr_tool.py '<json_input>'
+python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '<json_input>'
 ```
 
 The script prints a JSON result to stdout. Always parse stdout as JSON.
+On any error the script prints `{"error": "..."}` **and** exits with status
+code 1 — check both, do not rely on stdout parsing alone.
 
 ---
 
@@ -64,16 +63,22 @@ Each comment object:
 | `isResolved` | bool | Skip if `true` |
 | `path` | string | File path relative to repo root |
 | `line` | int | Line number in the file |
+| `position` | int\|null | Diff position; `null` when the comment falls outside the current diff (outdated) |
 | `body` | string | Comment text |
 | `inReplyToId` | int\|null | `null` = root comment of a thread |
 | `user` | string | Reviewer login |
+| `createdAt` | string | ISO 8601 timestamp |
 | `diffHunk` | string | Surrounding diff context for locating the code |
+
+Thread pagination is exhaustive: the script follows `hasNextPage` across the
+GraphQL `reviewThreads` connection until all pages are fetched, so PRs with
+more than 100 threads are still fully covered.
 
 ---
 
 ### Operation: `apply_patch`
 
-**Input:**
+**Input – legacy single-patch (still supported):**
 ```json
 {
   "kind": "apply_patch",
@@ -86,19 +91,65 @@ Each comment object:
   "authorEmail": "contact@quentinveys.be"
 }
 ```
+**Output:** `{ "commitSha": "abc123..." }`
 
-`authorName` / `authorEmail` are **optional**; when omitted the commit inherits the
-ambient git identity (global `~/.gitconfig`). They exist so the SSH signature is
-attributed to the right author.
+**Input – batch mode (multiple fixes, one push):**
+```json
+{
+  "kind": "apply_patch",
+  "owner": "qveys",
+  "repo": "my-supervision",
+  "prNumber": 4,
+  "commits": [
+    { "patch": "diff --git a/src/foo.py ...", "commitMessage": "fix: address review comment #1" },
+    { "patch": "diff --git a/src/bar.py ...", "commitMessage": "fix: address review comment #2" }
+  ]
+}
+```
+One clone (or one local checkout, see below), N signed commits applied in order, one push at
+the end — so N review-comment fixes cost one clone + one push instead of N.
+**Output:** `{ "commitShas": ["abc123...", "def456..."] }`
 
-**Signing (enforced):** commits are **always signed** (`git commit -S`). The signing
-key, format, and signer program are inherited from your ambient git config — nothing
-is hardcoded. If signing fails (e.g. 1Password locked), the operation **aborts and
-never pushes an unsigned commit**; it returns an `error` asking you to unlock the key
-and retry. A push is also refused if `HEAD` ends up without a signature.
+`authorName` / `authorEmail` are **optional** (top-level, apply to every commit in the
+batch); when omitted the commit inherits the ambient git identity (global
+`~/.gitconfig`). They exist so the SSH signature is attributed to the right author.
 
-**Output (success):** `{ "commitSha": "abc123..." }`  
-**Output (failure):** `{ "error": "git apply failed: ..." }` — or a signing error as described above.
+**`localRepoPath` (optional, opt-in):**
+```json
+{ "localRepoPath": "/abs/path/to/existing/checkout" }
+```
+Reuses an already-checked-out working copy instead of cloning. Preconditions are
+checked up front, each with its own clear error: the path must be a git repo, its
+**current branch must equal the PR's head branch**, and its **working tree must be
+clean**. The user's git config is never touched — an `authorName`/`authorEmail`
+override, if given, is passed per commit via `git -c user.name=... -c user.email=...
+commit ...` instead of `git config`. Pushes go through the existing `origin` remote
+(no token URL).
+
+**`dryRun` (optional):**
+```json
+{ "dryRun": true }
+```
+Runs the full flow (clone or local checks, patch application, signed commits) but
+never pushes. **Output:** `{ "dryRun": true, "wouldPush": [ { "commitMessage": "...",
+"diffStat": "...", "signed": <bool> }, ... ] }`. In local-repo mode, the branch is hard-reset
+back to its pre-dry-run HEAD before returning, so the checkout never ends up carrying
+unpushed commits. In a dry run a signing failure does not abort the operation — it
+retries the commit unsigned and reports `signed: false`, since the point of a dry run
+is to diagnose before the real pass.
+
+**Signing (enforced on real runs):** commits are **always signed** (`git commit -S`).
+The signing key, format, and signer program are inherited from your ambient git
+config — nothing is hardcoded. If signing fails, the operation **aborts and never
+pushes an unsigned commit**; it returns an `error` asking you to unlock the key and
+retry. A push is also refused if `HEAD` ends up without a signature. Two common
+causes: (1) the signing key is locked (e.g. 1Password) — unlock it and retry; (2) the
+shell is sandboxed and blocks the signer (`op-ssh-sign`) — rerun outside the sandbox
+(e.g. Claude Code Bash with `dangerouslyDisableSandbox`).
+
+**Output (failure):** `{ "error": "git apply failed: ..." }` — or a signing error as
+described above. In batch mode, a failure on commit *k* names the offending commit
+(e.g. `commit 2/3 ("fix: ...") failed: ...`) and nothing is pushed.
 
 ---
 
@@ -123,7 +174,28 @@ and retry. A push is also refused if `HEAD` ends up without a signature.
 }
 ```
 
-**Output:** `{ "ok": true }`
+**Output:**
+```json
+{
+  "ok": true,
+  "results": [
+    { "commentId": 123456, "ok": true },
+    { "commentId": 789012, "ok": false, "step": "reply", "error": "..." }
+  ]
+}
+```
+`ok` at the top level is `true` only if every update succeeded. Each update is
+processed independently — a failure on one (posting the reply, or resolving the
+thread; see `step`) does not interrupt the loop, so the remaining updates still get
+applied and reported.
+
+**`dryRun` (optional):**
+```json
+{ "dryRun": true }
+```
+Makes **no network call at all** — no reply posted, no thread resolved. **Output:**
+`{ "dryRun": true, "wouldPost": [ { "commentId": 123456, "message": "...",
+"wouldResolve": <bool> }, ... ] }`.
 
 ---
 
@@ -136,7 +208,7 @@ Minimum required: `owner`, `repo`, `prNumber`.
 ### Step 2 – Fetch all comments
 
 ```bash
-python scripts/pr_tool.py '{"kind":"list_pr_comments","owner":"...","repo":"...","prNumber":N}'
+python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"list_pr_comments","owner":"...","repo":"...","prNumber":N}'
 ```
 
 - Filter out comments where `isResolved = true`.
@@ -189,11 +261,15 @@ diff --git a/path/to/file.ext b/path/to/file.ext
 
 Group logically related comments into a single commit where appropriate (e.g., two nits in the same function). Keep unrelated changes in separate commits.
 
+If the PR is sensitive (production branch, many reviewers) or the patch set is large,
+run with `"dryRun": true` first and inspect `wouldPush` before committing to a real
+run.
+
 ```bash
-python scripts/pr_tool.py '{"kind":"apply_patch", ...}'
+python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"apply_patch", ...}'
 ```
 
-Store the returned `commitSha`, associated with the relevant `commentId`(s).
+Store the returned `commitSha` (or `commitShas` for a batch), associated with the relevant `commentId`(s).
 
 On error: do **not** mark the comment resolved; report the error in the thread.
 
@@ -232,11 +308,14 @@ No code change needed here. Thanks for the feedback!
 
 ### Step 8 – Update threads
 
+For a sensitive PR, consider a `"dryRun": true` pass first and review `wouldPost`
+before posting for real.
+
 ```bash
-python scripts/pr_tool.py '{"kind":"update_threads", ...}'
+python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"update_threads", ...}'
 ```
 
-Pass all updates in a single call. The script posts a reply in each thread and resolves threads via GitHub GraphQL when `resolved = true` and `threadId` is present.
+Pass all updates in a single call. The script posts a reply in each thread and resolves threads via GitHub GraphQL when `resolved = true` and `threadId` is present. Check `results` for per-update failures — a single failure does not block the others.
 
 ---
 
