@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dispose.sh — enregistre le retour de Quentin sur une session du récap /ou-en-suis-je.
-# Ce feedback rend les récaps suivants plus justes : une session CLOSE ne réapparaît
+# Ce feedback rend les récaps suivants plus justes : une session marquée CLOS ne réapparaît
 # plus jamais (filtrée dès collect.sh), une note ATTEND/REPRENDRE est ré-affichée.
 #
 # Usage : dispose.sh ID8 STATUT ["note libre"]
@@ -24,10 +24,20 @@ case "$1" in
   *) echo "usage : dispose.sh ID8 CLOS|ATTEND|REPRENDRE [\"note\"]" >&2; exit 2 ;;
 esac
 
+# Notes libres potentiellement sensibles : dossier 700 / fichier 600, indépendamment de
+# l'umask appelant (avec 022, dispositions.tsv naîtrait en 644, lisible par les autres
+# comptes locaux de la machine).
+umask 077
 DIR="${OEJ_DIR:-$HOME/.claude/ou-en-suis-je}"
 mkdir -p "$DIR"
+chmod 700 "$DIR"
+DISP="$DIR/dispositions.tsv"
+: >> "$DISP"
+chmod 600 "$DISP"
 # Assainit la note : une tabulation ou un saut de ligne casserait le format TSV
 # (colonnes décalées, ligne coupée) et perturberait la lecture awk -F'\t' de collect.sh.
 note=$(printf '%s' "${3:-}" | tr '\t\r\n' '   ')
-printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$(date '+%Y-%m-%d')" "$note" >> "$DIR/dispositions.tsv"
-echo "noté : $1 → $2${3:+ ($3)}"
+printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$(date '+%Y-%m-%d')" "$note" >> "$DISP"
+# Affiche la note ASSAINIE (variable note), pas $3 brut : l'écho reste fidèle à ce qui a
+# réellement été écrit dans le TSV (pas de retours à la ligne surprises dans la sortie).
+echo "noté : $1 → $2${note:+ ($note)}"
