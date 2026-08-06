@@ -469,12 +469,27 @@ spawn)
     exit 2
   fi
 
+  ADOPTED_NOW=0
   if [ "$FORCE" -eq 0 ]; then
+    NORM=$(normalize_prefix "$PREFIX")
     RC=0
-    SESS=$(find_reusable_session "$PREFIX") || RC=$?
+    SESS=$(find_registry_session "$PREFIX" "$NORM") || RC=$?
     if [ "$RC" -eq 2 ]; then
       echo "ambiguous: more than one of your sessions (registry) matches and none is the last-used one — pass a prefix to disambiguate, or --force for a fresh cockpit" >&2
       exit 2
+    fi
+    if [ "$RC" -ne 0 ] && try_adopt_session "$PREFIX" "$NORM"; then
+      SESS="$ADOPT_RESULT"
+      RC=0
+      ADOPTED_NOW=1
+    fi
+    if [ "$RC" -ne 0 ]; then
+      RC=0
+      SESS=$(find_reusable_session "$PREFIX") || RC=$?
+      if [ "$RC" -eq 2 ]; then
+        echo "ambiguous: more than one of your sessions (registry) matches and none is the last-used one — pass a prefix to disambiguate, or --force for a fresh cockpit" >&2
+        exit 2
+      fi
     fi
   else
     RC=1
@@ -482,7 +497,9 @@ spawn)
   if [ "$RC" -eq 0 ]; then
     remember_session "$SESS"
     audit_log_start "$SESS"
-    echo "reusing existing $MUX session '$SESS' (still alive — not spawning a duplicate)"
+    if [ "$ADOPTED_NOW" -ne 1 ]; then
+      echo "reusing existing $MUX session '$SESS' (still alive — not spawning a duplicate)"
+    fi
     if mux_clients "$SESS" | grep -q .; then
       echo "clients already attached — cockpit should still be visible in Wave"
     else

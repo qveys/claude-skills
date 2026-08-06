@@ -1,20 +1,28 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-06 · **Étape courante : step-1.3 terminée et commitée, au tour de step-1.4**
+màj : 2026-08-06 · **Étape courante : step-1.4 implémentée (16/16 verts) mais NON commitée —
+bloquée sur 1Password verrouillé, commit signé impossible**
 
-NEXT: step-1.4
+NEXT: PAUSE
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
 
 ## Bloqueurs actifs
 
-- aucun.
-
-  *(résolu 2026-08-06 : le commit signé de step-1.3 échouait sur
-  `1Password: failed to fill whole buffer` — l'app 1Password venait de se mettre à jour
-  et son agent SSH était injoignable. Après redémarrage de l'app, `ssh-add -l` sur le
-  socket 1Password réexpose `id_ed25519_github_signing` et le commit signé passe.)*
+- **1Password verrouillé, commit signé de step-1.4 impossible** (2026-08-06) : `git commit -S`
+  échoue avec `1Password: agent returned an error` / `failed to write commit object`.
+  `ssh-add -l` → « The agent has no identities. » Un redémarrage de l'app (`quit` + `open -a
+  "1Password"`, précédent qui avait résolu le même symptôme pour step-1.3) n'a **pas** suffi
+  cette fois — le process 1Password est bien relancé (confirmé via System Events) mais l'agent
+  SSH ne réexpose toujours pas `id_ed25519_github_signing` après 15×2 s de scrutation, signe
+  probable d'un **coffre verrouillé** (déverrouillage biométrique/mot de passe maître requis,
+  action humaine hors de portée de cette session). **Action pilote demandée : déverrouiller
+  1Password** (Touch ID ou mot de passe maître), puis vérifier `ssh-add -l` fait apparaître
+  `id_ed25519_github_signing` avant de relancer le relais sur cette même fiche. Le code de
+  step-1.4 est complet et vert (16/16 `selftest-adopt`, 41/41 `selftest-guard`, 8/8
+  `selftest-claim`) et **déjà `git add`-é** (staged, non commité) — rien à refaire, seul le
+  commit + push restent à exécuter.
 
 ## Avancement
 
@@ -24,7 +32,7 @@ NEXT: step-1.4
 | 1.1 | Inventaire de réalité et mesures préalables (`ln` no-clobber, DB Wave, `sql_quote`) | Sonnet | ✅ 2026-08-05 |
 | 1.2 | Primitives du claim (`lib/claim.sh`) + `selftest-claim` | Sonnet | ✅ 2026-08-06 |
 | 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ✅ 2026-08-06 |
-| 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ☐ |
+| 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ⏸ code vert, commit bloqué (1Password) |
 | 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ☐ |
 | 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ☐ |
 | 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ☐ |
@@ -151,3 +159,43 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   `selftest-claim` (8/8), `selftest-live`, `selftest-cache` re-passés en session tmux
   jetable après coup → tous verts, aucune régression. Étapes 2 (adoption) et 3 (scan)
   restent hors périmètre, reportées à 1.4/1.5 comme prévu.
+- 2026-08-06 (step-1.4, Sonnet) : **adoption étape 2 livrée** — `try_adopt_session()` et ses
+  primitives (`lib/session.sh`) consomment `WSH_COCKPIT_ADOPT` (liste séparée par virgules)
+  strictement via la machine d'états de `lib/claim.sh` (`claim_consume` → `claim_verify_won`
+  (I2 anti-ré-armement) → sonde → `claim_finalize`/`claim_rollback`, jamais de `mv`/`ln` ad hoc
+  hors de ce fichier). Garde de pane élargie pour l'adoption (`adopt_state_allowed` : shell nu
+  OU `ssh`/`tailscale`/`mosh` au premier plan) — plus permissive que la garde stricte
+  shell-nu utilisée ailleurs pour la réutilisation silencieuse, car une keep « libérée » a pu
+  être sauteuse-ssh sans jamais repasser par `remote-init`. Sonde systématique et non
+  optionnelle (`adopt_run_probe` : hostname/pwd/whoami, `WSH_LIVE_SEP_REINIT=1` forcé pour un
+  cadrage inline auto-porté) : le rc de la sonde **gate** `claim_finalize` (jamais de claim
+  conservé sans sonde réussie, conformément à la fiche) — décision architecturale corrigée en
+  cours de session : un premier jet appelait `claim_finalize` avant la sonde, relecture littérale
+  de la fiche → sonde scindée en `adopt_run_probe` (exécute + capture, aucune sortie) et
+  `adopt_print_probe` (imprime la capture + auto-détection remote-init), appelées dans l'ordre
+  consume → verify → pane-ready → probe → check rc → finalize → annonce. Idiome retour par
+  variables globales (`ADOPT_RESULT`/`ADOPT_PROBE_OUT`/`ADOPT_PROBE_RC`, calque de
+  `SESSION_OWN_CANON`) pour préserver la pureté de stdout des fonctions atteintes via `$(...)`.
+  `WSH_COCKPIT_ADOPT` absent/vide ⇒ étape 2 n'existe pas du tout (rétrocompatibilité totale,
+  premier `return 1` de `try_adopt_session`). `wsh-live.sh` : `spawn` câble désormais la
+  résolution en 3 temps — étape 1 (`find_registry_session`) → étape 2 (`try_adopt_session`) →
+  repli legacy (`find_reusable_session`), avec un indicateur `ADOPTED_NOW` qui supprime le
+  message « reusing existing » (déjà annoncé par `try_adopt_session` lui-même). 8 nouveaux cas
+  `selftest-adopt` (9-16, tous en appels directs en process à `try_adopt_session`/
+  `adopt_state_allowed` — jamais via un vrai sous-processus `spawn`, pour éviter l'effet Wave
+  `"$0" open` sur une session synthétique sans client) : adoption simple avec preuve que la
+  sonde a réellement tourné (grep de `WSH_SITUATE_HOST=` dans `ADOPT_PROBE_OUT`) ; course A/B
+  avec repli propre du perdant (technique du `$` suffixé, calque de `selftest-claim`) ; rollback
+  sur pane occupé (`tmux ... 'exec top'` + boucle de scrutation, calque de `GUARD_BUSY`) avec
+  claim restauré à l'identique ; adoptabilité d'un pane sauteuse-ssh ; refus de sa propre
+  session ; avertissement une seule fois sur session offerte mais morte ; jamais d'adoption
+  nominale sur préfixe non correspondant ; priorité du candidat libre sur la last-session
+  résiduelle (démonstration de l'ordre réel câblé dans `spawn`, `find_reusable_session` servant
+  de témoin positif du chemin legacy qui existe mais n'est jamais atteint le premier). **RED-first
+  démontré** : bloc `adopt_*`/`try_adopt_session` neutralisé dans `session.sh` → cas 1-8
+  toujours verts, cas 9-16 échouent immédiatement (`try_adopt_session: command not found`,
+  `ADOPT_PROBE_OUT`/`ADOPT_RESULT: unbound variable`, RC=1) — preuve que les nouveaux cas
+  exercent bien le nouveau code ; bloc restauré ensuite, 16/16 verts au premier essai, aucun bug
+  trouvé pendant le passage au vert. Non-régression : `selftest-guard` 41/41, `selftest-claim`
+  8/8, aucune session tmux ni fichier temporaire résiduel après coup. Étape 3 (scan) reste hors
+  périmètre, reportée à 1.5 comme prévu.

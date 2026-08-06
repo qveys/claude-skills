@@ -2199,6 +2199,214 @@ cmd_selftest_adopt() {
       "claim_before=$claim_before prefix_before=$prefix_before rc8=$rc8 claim_after=$claim_after prefix_after=$prefix_after"
   fi
 
+  # 9-16 (step-1.4, spec v12 §2, étape 2 "adoption"). WSH_COCKPIT_ADOPT is
+  # exercised via IN-PROCESS calls to try_adopt_session — never a real
+  # `spawn` subprocess: on a synthetic, client-less session, spawn's shared
+  # reuse branch would call `$0 open` (a genuine Wave block popup), the same
+  # side effect already avoided by cases 1-8 above.
+  had_agent9=0; [ -n "${WSH_COCKPIT_AGENT+x}" ] && had_agent9=1
+  saved_agent9="${WSH_COCKPIT_AGENT:-}"
+  had_adopt9=0; [ -n "${WSH_COCKPIT_ADOPT+x}" ] && had_adopt9=1
+  saved_adopt9="${WSH_COCKPIT_ADOPT:-}"
+  rm -f "$(state_file)" 2>/dev/null || true
+
+  # 9. Adoption simple : consume+verify+sonde+finalize d'un pré-claim libre,
+  #    avec PREUVE que la sonde a réellement tourné dans le pane (pas
+  #    seulement rc=0 — le contenu hostname/pwd/whoami capturé compte).
+  sess9="selftest-adopt-simple9-$$"
+  WSH_COCKPIT_AGENT="user-preopen-9" "$SCRIPT_DIR/wsh-live.sh" start "$sess9" --preopen >/dev/null 2>&1
+  created+=("$sess9")
+  export WSH_COCKPIT_AGENT="$ADOPT_KEY"
+  export WSH_COCKPIT_ADOPT="$sess9"
+  set +e
+  try_adopt_session "" ""
+  rc9=$?
+  set -e
+  k9=$(claim_read_key "$(claim_path "$(session_slug "$sess9")")" 2>/dev/null || true)
+  won9_gone=1; [ -f "$(claim_won_path "$(session_slug "$sess9")" "$$")" ] || won9_gone=0
+  probe9_ok=1; printf '%s\n' "$ADOPT_PROBE_OUT" | grep -q '^WSH_SITUATE_HOST=' && probe9_ok=0
+  if [ "$rc9" -eq 0 ] && [ "$ADOPT_RESULT" = "$sess9" ] && [ "$k9" = "$ADOPT_KEY" ] \
+     && [ "$won9_gone" -eq 0 ] && [ "$probe9_ok" -eq 0 ]; then
+    report_adopt_case "9 adoption simple, sonde PROUVÉE exécutée (hostname/pwd/whoami capturés)" 0
+  else
+    report_adopt_case "9 adoption simple, sonde PROUVÉE exécutée (hostname/pwd/whoami capturés)" 1 \
+      "rc9=$rc9 ADOPT_RESULT='$ADOPT_RESULT' k9='$k9' won9_gone=$won9_gone probe9_ok=$probe9_ok probe_out='$ADOPT_PROBE_OUT'"
+  fi
+
+  # 10. Course A/B : le "perdant" (même $$ que le gagnant dans ce process de
+  #     selftest, comme selftest-claim cas 2/3 suffixe déjà $$ plutôt que de
+  #     forker un vrai second process) retombe sur le candidat SUIVANT de sa
+  #     liste au lieu de s'arrêter. La ré-consommation du claim déjà finalisé
+  #     par le gagnant est détectée par l'anti-ré-armement (I2,
+  #     claim_verify_won) exactement comme un vrai perdant concurrent le
+  #     serait — rollback, puis repli propre sur le candidat D.
+  sessC10="selftest-adopt-race-c10-$$"
+  sessD10="selftest-adopt-race-d10-$$"
+  WSH_COCKPIT_AGENT="user-preopen-10" "$SCRIPT_DIR/wsh-live.sh" start "$sessC10" --preopen >/dev/null 2>&1
+  WSH_COCKPIT_AGENT="user-preopen-10" "$SCRIPT_DIR/wsh-live.sh" start "$sessD10" --preopen >/dev/null 2>&1
+  created+=("$sessC10" "$sessD10")
+  export WSH_COCKPIT_AGENT="winner10-$$"
+  export WSH_COCKPIT_ADOPT="$sessC10"
+  set +e; try_adopt_session "" ""; rc10win=$?; set -e
+  result10win="$ADOPT_RESULT"
+  export WSH_COCKPIT_AGENT="loser10-$$"
+  export WSH_COCKPIT_ADOPT="$sessC10,$sessD10"
+  set +e; try_adopt_session "" ""; rc10lose=$?; set -e
+  result10lose="$ADOPT_RESULT"
+  kC10=$(claim_read_key "$(claim_path "$(session_slug "$sessC10")")" 2>/dev/null || true)
+  kD10=$(claim_read_key "$(claim_path "$(session_slug "$sessD10")")" 2>/dev/null || true)
+  if [ "$rc10win" -eq 0 ] && [ "$result10win" = "$sessC10" ] && [ "$kC10" = "winner10-$$" ] \
+     && [ "$rc10lose" -eq 0 ] && [ "$result10lose" = "$sessD10" ] && [ "$kD10" = "loser10-$$" ]; then
+    report_adopt_case "10 course A/B : le perdant retombe proprement sur le candidat suivant" 0
+  else
+    report_adopt_case "10 course A/B : le perdant retombe proprement sur le candidat suivant" 1 \
+      "rc10win=$rc10win result10win='$result10win' kC10='$kC10' rc10lose=$rc10lose result10lose='$result10lose' kD10='$kD10'"
+  fi
+
+  # 11. Garde busy-pane élargie : un pane occupé par un process NI shell nu
+  #     NI ssh/tailscale/mosh (ici `top`, même technique que GUARD_BUSY du
+  #     selftest-guard, avec le même sondage tolérant au démarrage) échoue
+  #     l'adoption ET restaure le claim en PRÉ-CLAIM (rollback) — jamais de
+  #     claim laissé EN-COURS/POSSÉDÉ sans sonde réussie.
+  sess11="cockpit-selftest-adopt-busy11-$$"
+  tmux new-session -d -s "$sess11" 'exec top'
+  created+=("$sess11")
+  tries11=0; cmd11=""
+  while [ "$tries11" -lt 20 ]; do
+    cmd11=$(mux_pane_command "$sess11")
+    [ "$cmd11" = top ] && break
+    tries11=$((tries11 + 1)); sleep 0.2
+  done
+  slug11=$(session_slug "$sess11")
+  claim_create "$slug11" "user-preopen-11" "$$" >/dev/null 2>&1
+  prefix_write "$sess11" "(named)"
+  export WSH_COCKPIT_AGENT="busyagent11-$$"
+  export WSH_COCKPIT_ADOPT="$sess11"
+  set +e; try_adopt_session "" ""; rc11=$?; set -e
+  k11=$(claim_read_key "$(claim_path "$slug11")" 2>/dev/null || true)
+  won11_gone=1; [ -f "$(claim_won_path "$slug11" "$$")" ] || won11_gone=0
+  if [ "$rc11" -ne 0 ] && [ -z "$ADOPT_RESULT" ] && [ "$k11" = "user-preopen-11" ] && [ "$won11_gone" -eq 0 ]; then
+    report_adopt_case "11 pane busy (ni shell nu ni ssh/tailscale/mosh) : rollback, claim restauré" 0
+  else
+    report_adopt_case "11 pane busy (ni shell nu ni ssh/tailscale/mosh) : rollback, claim restauré" 1 \
+      "rc11=$rc11 ADOPT_RESULT='$ADOPT_RESULT' k11='$k11' won11_gone=$won11_gone cmd11='$cmd11'"
+  fi
+
+  # 12. Garde busy-pane élargie, sur la prédicate pure (pas de vrai process
+  #     `ssh` fake dans un pane — mêmes raisons pragmatiques que le cas 7
+  #     historique sur find_registry_session) : bare shell ET ssh/tailscale/
+  #     mosh sont adoptables, tout le reste est refusé.
+  ok12=0
+  for cmd12 in "" bash zsh sh fish -bash -zsh -sh -fish ssh -ssh tailscale mosh mosh-client; do
+    adopt_state_allowed "$cmd12" || ok12=1
+  done
+  bad12=0
+  for cmd12 in top vim nano less htop python3 node; do
+    adopt_state_allowed "$cmd12" && bad12=1
+  done
+  if [ "$ok12" -eq 0 ] && [ "$bad12" -eq 0 ]; then
+    report_adopt_case "12 garde élargie : bare shell + ssh/tailscale/mosh adoptables, le reste refusé" 0
+  else
+    report_adopt_case "12 garde élargie : bare shell + ssh/tailscale/mosh adoptables, le reste refusé" 1 \
+      "ok12=$ok12 bad12=$bad12"
+  fi
+
+  # 13. Une session offerte qui EST la session tmux du process appelant est
+  #     toujours refusée, même via WSH_COCKPIT_ADOPT — jamais de claim
+  #     touché sur sa propre session.
+  if [ -n "${TMUX:-}" ]; then
+    own13=$(own_tmux_session)
+    export WSH_COCKPIT_AGENT="selfowner13-$$"
+    export WSH_COCKPIT_ADOPT="$own13"
+    set +e; try_adopt_session "" ""; rc13=$?; set -e
+    if [ "$rc13" -ne 0 ] && [ -z "$ADOPT_RESULT" ]; then
+      report_adopt_case "13 refus d'adopter sa propre session" 0
+    else
+      report_adopt_case "13 refus d'adopter sa propre session" 1 "rc13=$rc13 ADOPT_RESULT='$ADOPT_RESULT'"
+    fi
+  else
+    echo "note: case 13 skipped (not inside tmux)"
+  fi
+
+  # 14. Candidat offert mais mort (jamais créé) : message d'avertissement une
+  #     seule fois, pas à chaque appel.
+  dead14="cockpit-selftest-adopt-dead14-$$"
+  export WSH_COCKPIT_AGENT="deadagent14-$$"
+  export WSH_COCKPIT_ADOPT="$dead14"
+  set +e; out14a=$(try_adopt_session "" "" 2>&1 1>/dev/null); rc14a=$?; set -e
+  set +e; out14b=$(try_adopt_session "" "" 2>&1 1>/dev/null); rc14b=$?; set -e
+  warn14_once=1
+  if printf '%s\n' "$out14a" | grep -q 'not alive'; then
+    printf '%s\n' "$out14b" | grep -q 'not alive' || warn14_once=0
+  fi
+  rm -f "$(adopt_warn_file "$dead14")" 2>/dev/null || true
+  if [ "$rc14a" -ne 0 ] && [ "$rc14b" -ne 0 ] && [ "$warn14_once" -eq 0 ]; then
+    report_adopt_case "14 candidat mort : avertissement une seule fois" 0
+  else
+    report_adopt_case "14 candidat mort : avertissement une seule fois" 1 \
+      "rc14a=$rc14a rc14b=$rc14b out14a='$out14a' out14b='$out14b'"
+  fi
+
+  # 15. Préfixe demandé qui ne correspond pas au préfixe enregistré du
+  #     candidat -> jamais une adoption nominale, même si le candidat est par
+  #     ailleurs parfaitement libre/adoptable (contrôle positif inclus : le
+  #     même candidat s'adopte bien avec le BON préfixe).
+  sess15="selftest-adopt-pfxmiss15-$$"
+  WSH_COCKPIT_AGENT="user-preopen-15" "$SCRIPT_DIR/wsh-live.sh" start "$sess15" --preopen >/dev/null 2>&1
+  created+=("$sess15")
+  pfx15_real=$(normalize_prefix "adopt-pfx15-real-$$")
+  pfx15_other=$(normalize_prefix "adopt-pfx15-other-$$")
+  prefix_write "$sess15" "$pfx15_real"
+  export WSH_COCKPIT_AGENT="pfxagent15-$$"
+  export WSH_COCKPIT_ADOPT="$sess15"
+  set +e; try_adopt_session "adopt-pfx15-other-$$" "$pfx15_other"; rc15a=$?; set -e
+  res15a="$ADOPT_RESULT"
+  set +e; try_adopt_session "adopt-pfx15-real-$$" "$pfx15_real"; rc15b=$?; set -e
+  res15b="$ADOPT_RESULT"
+  if [ "$rc15a" -ne 0 ] && [ -z "$res15a" ] && [ "$rc15b" -eq 0 ] && [ "$res15b" = "$sess15" ]; then
+    report_adopt_case "15 préfixe non matché : jamais une adoption nominale (+ contrôle positif)" 0
+  else
+    report_adopt_case "15 préfixe non matché : jamais une adoption nominale (+ contrôle positif)" 1 \
+      "rc15a=$rc15a res15a='$res15a' rc15b=$rc15b res15b='$res15b'"
+  fi
+
+  # 16. Un candidat libre offert prime sur une last-session résiduelle "hors
+  #     registre" (créée sans claim, style pré-étape-1.3) : le registre rate
+  #     (rc=1), find_reusable_session RETOMBERAIT sur la résiduelle (contrôle
+  #     positif : elle existe et est réutilisable), mais try_adopt_session
+  #     réussit d'abord — c'est cet ordre-là que spawn câble réellement
+  #     (wsh-live.sh : registre -> adoption -> repli find_reusable_session).
+  sess16_residual="cockpit-selftest-adopt-residual16-$$"
+  create_session "$sess16_residual"
+  created+=("$sess16_residual")
+  sess16_free="selftest-adopt-free16-$$"
+  WSH_COCKPIT_AGENT="user-preopen-16" "$SCRIPT_DIR/wsh-live.sh" start "$sess16_free" --preopen >/dev/null 2>&1
+  created+=("$sess16_free")
+  export WSH_COCKPIT_AGENT="freshagent16-$$"
+  export WSH_COCKPIT_ADOPT="$sess16_free"
+  rm -f "$(state_file)" 2>/dev/null || true
+  remember_session "$sess16_residual"
+  norm16=$(normalize_prefix "")
+  set +e
+  reg16=$(find_registry_session "" "$norm16"); rcreg16=$?
+  legacy16=$(find_reusable_session ""); rclegacy16=$?
+  try_adopt_session "" "$norm16"; rcadopt16=$?
+  set -e
+  result16="$ADOPT_RESULT"
+  if [ "$rcreg16" -eq 1 ] && [ "$rclegacy16" -eq 0 ] && [ "$legacy16" = "$sess16_residual" ] \
+     && [ "$rcadopt16" -eq 0 ] && [ "$result16" = "$sess16_free" ]; then
+    report_adopt_case "16 candidat libre prime sur une last-session résiduelle" 0
+  else
+    report_adopt_case "16 candidat libre prime sur une last-session résiduelle" 1 \
+      "rcreg16=$rcreg16 rclegacy16=$rclegacy16 legacy16='$legacy16' rcadopt16=$rcadopt16 result16='$result16'"
+  fi
+
+  rm -f "$(state_file)" 2>/dev/null || true
+  if [ "$had_agent9" -eq 1 ]; then export WSH_COCKPIT_AGENT="$saved_agent9"
+  else unset WSH_COCKPIT_AGENT; fi
+  if [ "$had_adopt9" -eq 1 ]; then export WSH_COCKPIT_ADOPT="$saved_adopt9"
+  else unset WSH_COCKPIT_ADOPT; fi
+
   selftest_adopt_cleanup
   trap - EXIT
   if [ "$failures" -eq 0 ]; then echo "selftest-adopt: all cases passed"; return 0

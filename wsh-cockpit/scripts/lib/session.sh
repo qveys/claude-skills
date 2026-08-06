@@ -382,6 +382,125 @@ find_reusable_session() {
   return 1
 }
 
+# -- Adoption (étape 2, spec v12 §2) --------------------------------------
+# Backward compatibility: everything below is reachable ONLY through
+# try_adopt_session, which itself is a no-op (rc 1, ADOPT_RESULT unset)
+# whenever WSH_COCKPIT_ADOPT is absent/empty — for every caller that never
+# sets it, étape 2 simply does not exist.
+
+# Warn-once marker so a dead candidate offered repeatedly (e.g. every retry
+# of a failed spawn) doesn't spam stderr — mirrors the seq-<slug>-style
+# per-session marker family, one file per offered (not per live) name.
+adopt_warn_file() { printf '%s/adopt-dead-warned-%s\n' "$STATE_DIR" "$(session_slug "$1")"; }
+adopt_warn_dead_once() {  # $1 candidate name (already confirmed not alive)
+  local f; f=$(adopt_warn_file "$1")
+  [ -f "$f" ] && return 0
+  mkdir -p "$STATE_DIR"
+  : >"$f"
+  echo "adopt: offered cockpit '$1' (WSH_COCKPIT_ADOPT) is not alive — ignoring (warned once)" >&2
+}
+
+# Widened busy-pane guard for adoption ONLY (spec v12 §2): a bare shell OR an
+# ssh/tailscale/mosh foreground process both count as adoptable — unlike
+# session_safe_to_reuse's strict bare-shell-only check for silent reuse. Pure
+# predicate on the command-name string (not a live session) so it's testable
+# without faking a real OS process name in a pane — same pragmatic reasoning
+# already applied to find_registry_session in selftest-adopt case 7.
+adopt_state_allowed() {  # $1 pane_current_command string -> rc 0 if adoptable
+  case "$1" in
+    ""|bash|zsh|sh|fish|-bash|-zsh|-sh|-fish) return 0 ;;
+    ssh|-ssh|tailscale|mosh|mosh-client) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+adopt_pane_ready() {  # $1 sess -> rc 0 pane's foreground process is adoptable
+  adopt_state_allowed "$(mux_pane_command "$1")"
+}
+
+# Systematic, non-optional probe (spec v12 §2): a released/hand-opened keep
+# may have been ssh-hopped without ever calling remote-init, so its sticky
+# remote-mode tmux option can't be trusted — WSH_LIVE_SEP_REINIT=1 forces
+# self-contained inline framing regardless. Split run/print (unlike
+# situate_session's single-shot version in wsh-live.sh) because the gate on
+# claim_finalize below needs the probe's rc BEFORE anything is printed: "jamais
+# de claim conservé sans sonde réussie" means a failed probe must roll back,
+# not just warn-and-continue as situate_session tolerates.
+ADOPT_PROBE_OUT=""
+ADOPT_PROBE_RC=0
+adopt_run_probe() {  # $1 sess -> sets ADOPT_PROBE_OUT/ADOPT_PROBE_RC, prints nothing
+  local sess="$1" rc=0
+  ADOPT_PROBE_OUT=""
+  WSH_LIVE_SEP_REINIT=1 "$0" send 'printf "WSH_SITUATE_HOST=%s\n" "$(hostname)"; pwd; whoami 2>&1' "$sess"
+  WSH_LIVE_SEP_REINIT=1 "$0" wait-done "$sess" 60 || rc=$?
+  ADOPT_PROBE_RC="$rc"
+  ADOPT_PROBE_OUT=$(WSH_LIVE_SEP_REINIT=1 "$0" read "$sess" 20)
+}
+# Prints the already-captured probe output, then applies situate_session's
+# own best-effort remote-init auto-detection (host mismatch -> push helpers).
+adopt_print_probe() {  # $1 sess
+  local sess="$1" remote_host remote_conn
+  printf '%s\n' "$ADOPT_PROBE_OUT"
+  remote_host=$(printf '%s\n' "$ADOPT_PROBE_OUT" | tr -d '\r' | grep -o '^WSH_SITUATE_HOST=.*' | tail -n1 | cut -d= -f2-)
+  if [ -n "$remote_host" ] && [ "$remote_host" != "$(hostname)" ] && ! remote_mode_get "$sess"; then
+    remote_conn="${remote_host%.local}"
+    echo "adopt: pane is on '$remote_host' (this Mac is '$(hostname)') — auto-calling remote-init '$remote_conn' (best-effort push; falls back to inline framing with a warning if unreachable)"
+    "$0" remote-init "$sess" "$remote_conn"
+  fi
+}
+
+# Étape 2 of spawn's resolution order (spec v12 §2): among the comma-
+# separated sessions offered via WSH_COCKPIT_ADOPT, atomically consume the
+# first candidate whose pre-claim is genuinely free (claim.sh primitives
+# ONLY — no ad hoc mv/ln), whose pane is adoptable, and whose probe actually
+# completes. Any failure at any stage -> claim_rollback + next candidate;
+# nothing is ever left claimed without a successful probe (I1/I2 from
+# claim.sh, enforced by construction here). $1/$2 mirror find_registry_session
+# exactly (requested prefix raw, normalized) so a requested prefix that
+# doesn't match a candidate's registered prefix never nominally adopts it.
+# ADOPT_RESULT (not stdout) carries the winning name back — this function's
+# caller is deliberately NOT reached via $(...), so the "adopted ..."
+# announcement and the probe output below can be loud (see spawn in
+# wsh-live.sh).
+ADOPT_RESULT=""
+try_adopt_session() {  # $1 requested prefix (raw) $2 normalized -> rc 0 adopted, 1 nothing adoptable
+  ADOPT_RESULT=""
+  [ -n "${WSH_COCKPIT_ADOPT:-}" ] || return 1
+  local requested="${1:-}" norm="${2:-}" mykey pid cand slug ckey pf rc
+  mykey=$(agent_claim_key)
+  pid=$$
+  local -a list=()
+  IFS=',' read -r -a list <<<"$WSH_COCKPIT_ADOPT"
+  for cand in ${list[@]+"${list[@]}"}; do
+    [ -n "$cand" ] || continue
+    if ! mux_has "$cand"; then
+      adopt_warn_dead_once "$cand"
+      continue
+    fi
+    if [ -n "$requested" ]; then
+      pf=$(prefix_read "$cand" 2>/dev/null) || continue
+      [ "$pf" = "$norm" ] || continue
+    fi
+    rc=0; session_is_own "$cand" || rc=$?
+    if [ "$rc" -eq 2 ]; then session_indeterminate_refusal "$cand"; continue; fi
+    if [ "$rc" -eq 0 ]; then session_own_refusal "$cand"; continue; fi
+    slug=$(session_slug "$cand")
+    ckey=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null) || continue
+    claim_key_reserved "$ckey" || continue
+    claim_consume "$slug" "$pid" || continue
+    rc=0; claim_verify_won "$slug" "$pid" || rc=$?
+    if [ "$rc" -ne 0 ]; then claim_rollback "$slug" "$pid"; continue; fi
+    if ! adopt_pane_ready "$cand"; then claim_rollback "$slug" "$pid"; continue; fi
+    adopt_run_probe "$cand"
+    if [ "$ADOPT_PROBE_RC" -ne 0 ]; then claim_rollback "$slug" "$pid"; continue; fi
+    if ! claim_finalize "$slug" "$pid" "$mykey"; then claim_rollback "$slug" "$pid"; continue; fi
+    echo "adopted user cockpit: $cand"
+    adopt_print_probe "$cand"
+    ADOPT_RESULT="$cand"
+    return 0
+  done
+  return 1
+}
+
 # Form-based test: does this token LOOK like a session name, regardless of
 # whether such a session exists right now? Deliberately STABLE and LOCAL (the
 # string's shape) as opposed to mux_has, which tests EXISTENCE — a property of
