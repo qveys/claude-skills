@@ -18,7 +18,7 @@ tailscale ssh $H "$RC exit --dir $P"     # /exit à distance → étape suivante
 
 Le cycle complet à distance : `status` → (la session pose une question ? `say`) → (elle annonce la fin ? `exit`) → le relais enchaîne seul → `status`.
 
-Pour une immersion complète plutôt que des one-shots : `tailscale ssh $H` puis `tmux attach -t <session>` (détache : `Ctrl+b d`).
+Pour une immersion complète plutôt que des one-shots : `tailscale ssh $H` puis `tmux attach -t <session>` (détache avec `<prefix> d`, où prefix est `Ctrl+b` par défaut mais dépend de la config tmux de l'hôte, souvent `Ctrl+a`).
 
 ## Depuis un iPhone
 
@@ -41,8 +41,9 @@ tailscale serve --bg 7681                                              # exposé
 
 ## Sécurité et limites
 
-- La session est choisie par le **slug du projet** (`relay-<slug>*` / `cockpit-<slug>*` dérivés de `--dir`), jamais « la dernière session cockpit-\* de la machine » : sur un poste qui en fait tourner plusieurs, ce repli visait le pane d'un autre travail — typiquement un shell SSH distant, où `stop` aurait envoyé un Ctrl+C et `go` une commande. Forcer avec `--session <nom>` (qui sert aussi de nom à la session créée par `go`) ou `RELAY_SESSION`.
+- La session est choisie par le **slug du projet** (`relay-<slug>*` / `cockpit-<slug>*` dérivés de `--dir`), jamais « la dernière session cockpit-\* de la machine » : sur un poste qui en fait tourner plusieurs, ce repli visait le pane d'un autre travail — typiquement un shell SSH distant, où `stop` aurait envoyé un Ctrl+C et `go` une commande. Forcer avec `--session <nom>` (qui sert aussi de nom à la session créée par `go`) ou `RELAY_SESSION` ; si ce nom ne respecte pas la convention `relay-<slug>` / `cockpit-<slug>`, la session est bien créée mais la sélection automatique ne la retrouvera jamais ensuite — il faudra repasser `--session <nom>` (ou `RELAY_SESSION`) à chaque commande suivante (`status`, `say`, `exit`, `stop`…), sinon elles répondront « aucune session relais ».
 - `say`/`exit` refusent d'écrire si aucun Claude ne tourne dans le pane (sinon le texte serait exécuté par le shell) ; `go` refuse si le pane est occupé (sinon la commande serait tapée dans le chat de la session en cours). Ces gardes reposent sur la détection d'un processus `claude` sous le pane — fiable pour le relais standard, à revérifier si le pane fait tourner autre chose d'exotique.
 - Tout ce qui passe par `say` arrive comme message utilisateur dans la session Claude, avec les mêmes pouvoirs que le clavier local : ne l'utiliser que sur un canal de confiance (tailnet).
 - `set` ne prend effet qu'au prochain tour de boucle du relais : si une session est en cours, elle termine sa fiche d'abord — c'est voulu (jamais d'interruption à chaud ; pour interrompre vraiment : `stop`).
+- `stop` n'envoie qu'un seul Ctrl+C : pendant le compte à rebours de 5 s entre deux fiches, ça suffit à arrêter la chaîne, mais pendant une session Claude active, un seul Ctrl+C n'interrompt que le tour en cours — la session continue de tourner ; il faut deux Ctrl+C rapprochés pour la quitter, donc lancer `stop` deux fois de suite.
 - Si l'hôte wrappe ses blocs Wave en tmux avec GC : la session relais survit tant qu'elle n'est PAS nommée `wave-*` et n'est PAS liée (`link-window`) dans un groupe `wave-*`.

@@ -8,11 +8,13 @@ set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR/.." || exit 1
 command -v claude >/dev/null 2>&1 || { echo "■ claude introuvable dans le PATH — relais impossible."; exit 1; }
+[ -r "$DIR/STATE.md" ] || { echo "■ pas de $DIR/STATE.md — relais impossible."; exit 1; }
 
 # Nom du chantier : titre de STATE.md (« # STATE — chantier <NOM> »), sinon le dossier projet.
 chantier=$(sed -n '1s/^# *STATE *[—-]* *\(chantier \)\{0,1\}//p' "$DIR/STATE.md")
 [ -n "$chantier" ] || chantier=$(basename "$PWD")
 
+prev_next=""
 while :; do
   next=$(grep -m1 '^NEXT:' "$DIR/STATE.md" | awk '{print $2}')
   case "${next:-}" in
@@ -29,7 +31,14 @@ while :; do
   fi
 
   model=$(grep -m1 'Modèle :' "$fiche" | sed -E 's/.*Modèle : ?\**([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')
-  case "$model" in sonnet | opus | haiku | fable) ;; *) model=sonnet ;; esac
+  case "$model" in
+    sonnet | opus | haiku | fable) ;;
+    *) echo "⚠ Modèle absent ou non reconnu dans $(basename "$fiche") (« ${model:-absente} ») — défaut : sonnet"; model=sonnet ;;
+  esac
+
+  if [ -n "$next" ] && [ "$next" = "$prev_next" ]; then
+    echo "⚠ NEXT inchangé ($next) — la fiche va être rejouée (rituel de fin oublié ?)."
+  fi
 
   echo ""
   echo "▶ $next · modèle : $model · fiche : $(basename "$fiche")"
@@ -40,4 +49,6 @@ while :; do
     echo "■ claude s'est terminé en erreur — arrêt du relais."
     break
   }
+
+  prev_next="$next"
 done
