@@ -48,8 +48,12 @@ project_slug() {
 # dans le mauvais pane. Sans candidate, on le dit et on s'arrête.
 session() {
   if [ -n "$SESS" ]; then echo "$SESS"; return; fi
+  slug=$(project_slug)
+  # Slug vide (nom de dossier sans [a-z0-9]) : la regex matcherait les sessions
+  # « relay--* » d'un autre projet sans slug — aucune sélection auto dans ce cas.
+  [ -n "$slug" ] || return 1
   "$TMUX_BIN" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
-    | awk -v s="$(project_slug)" '$2 ~ "^(relay|cockpit)-" s "(-|$)"' \
+    | awk -v s="$slug" '$2 ~ "^(relay|cockpit)-" s "(-|$)"' \
     | sort -n | tail -1 | cut -d' ' -f2-
 }
 
@@ -139,6 +143,7 @@ case "$CMD" in
       pane_busy "$(pane_pid "$SID")" && die "le pane de $S est occupé — 'watch' pour voir, 'stop' pour interrompre d'abord"
     else
       # --session nomme la session à créer ; sinon relay-<slug du projet>-<hhmmss>.
+      [ -n "$SESS" ] || [ -n "$(project_slug)" ] || die "slug de projet vide pour « $DIR » — nommer la session : --session <nom>"
       S="${SESS:-relay-$(project_slug)-$(date +%H%M%S)}"
       "$TMUX_BIN" new-session -d -s "$S" -c "$DIR" || die "création de session tmux impossible"
       SID=$(resolve_sid "$S") || die "session $S créée mais introuvable dans list-sessions"

@@ -126,6 +126,22 @@ done
 
 isotmux kill-session -t "relay-autreprojet" >/dev/null 2>&1 || true
 
+# --- 3bis. slug vide : jamais de sélection automatique ---------------------
+# Un dossier sans aucun [a-z0-9] donne un slug vide ; une session « relay--… »
+# (créée par le go sans slug d'un autre projet) ne doit pas être choisie.
+NOSLUG="$PROJ2/____"
+mkdir -p "$NOSLUG/execution"
+printf '# STATE — chantier sans slug\nNEXT: step-0.1\n' > "$NOSLUG/execution/STATE.md"
+isotmux new-session -d -s "relay--123456" -c /private/tmp
+out=$(rc watch --dir "$NOSLUG" 2>&1)
+code=$?
+if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'aucune session relais'; then
+  ok "slug vide : watch refuse malgré une session relay--* présente"
+else
+  ko "slug vide : watch aurait dû refuser (code=$code) : $out"
+fi
+isotmux kill-session -t "relay--123456" >/dev/null 2>&1 || true
+
 # --- 4. garde say/exit face à un shell nu ---------------------------------
 isotmux new-session -d -s "relay-$SLUG" -c "$PROJ"
 wait_idle "relay-$SLUG"
