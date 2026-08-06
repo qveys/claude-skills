@@ -133,6 +133,18 @@
 #                              claim, orphan replacement under race, reserved-key refusal,
 #                              two-line format readback; pure filesystem, no tmux session
 #                              needed; rc 0/1
+#   selftest-adopt             registry-at-creation (step-1.3, spec v12 §2 étape 1):
+#                              spawn/start pose a creator claim + registered prefix;
+#                              A/B/A alternation never misroutes; two distinct prefixes
+#                              resolve to two distinct sessions; N>1 of mine with no
+#                              prefix and no last-session recorded is an explicit rc=2
+#                              (never a silent (N+1)-th cockpit); a start-created session
+#                              ("(named)" sentinel) is unreachable via a prefix match;
+#                              start refuses a slug-colliding name; reserved-key refusal
+#                              + --preopen lift; stop leaves no orphaned claim/prefix
+#                              marker; real spawn/start subprocess calls used only where
+#                              they exit before ever reaching spawn's open side effect —
+#                              tmux-only; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -435,17 +447,39 @@ spawn)
   SITUATE=0
   PREFIX=""
   PRE_HOST=""
+  PREOPEN=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --force|--fresh) FORCE=1; shift ;;
       --situate) SITUATE=1; shift ;;
       --pre) PRE_HOST="${2:?usage: spawn --pre <host> (connection string, e.g. qveys@srv1453980)}"; shift 2 ;;
+      # Internal only (spec v12 §1): lifts the reserved-key refusal below for
+      # the wrapper's own bootstrap spawn (WSH_COCKPIT_AGENT=user-preopen-<n>,
+      # set by the caller's environment — this flag never itself sets or
+      # exports that key). Not documented for interactive use.
+      --preopen) PREOPEN=1; shift ;;
       -*) echo "unknown flag: $1 (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami, --pre <host> to pre-stage remote helpers before the hop)" >&2; exit 2 ;;
       *) PREFIX="$1"; shift ;;
     esac
   done
 
-  if [ "$FORCE" -eq 0 ] && SESS=$(find_reusable_session "$PREFIX"); then
+  MYKEY=$(agent_claim_key)
+  if claim_key_reserved "$MYKEY" && [ "$PREOPEN" -ne 1 ]; then
+    echo "refusing to spawn under reserved agent key '$MYKEY' (reserved for wsh-cockpit's own bootstrap) — set WSH_COCKPIT_AGENT/WSH_COCKPIT_PREFIX to something else" >&2
+    exit 2
+  fi
+
+  if [ "$FORCE" -eq 0 ]; then
+    RC=0
+    SESS=$(find_reusable_session "$PREFIX") || RC=$?
+    if [ "$RC" -eq 2 ]; then
+      echo "ambiguous: more than one of your sessions (registry) matches and none is the last-used one — pass a prefix to disambiguate, or --force for a fresh cockpit" >&2
+      exit 2
+    fi
+  else
+    RC=1
+  fi
+  if [ "$RC" -eq 0 ]; then
     remember_session "$SESS"
     audit_log_start "$SESS"
     echo "reusing existing $MUX session '$SESS' (still alive — not spawning a duplicate)"
@@ -470,6 +504,7 @@ spawn)
   SESS=$(unique_session_name "$PREFIX")
   create_session "$SESS"
   remember_session "$SESS"
+  claim_new_session "$SESS" "$(normalize_prefix "$PREFIX")"
   echo "created fresh $MUX session '$SESS'"
   "$0" open "$SESS"
   echo "SESSION=$SESS"
@@ -510,17 +545,28 @@ start)
   # also launched as a detached background job, never blocking `start`.
   ( cmd_gc >/dev/null 2>&1 & ) || true
   REUSE=0
+  PREOPEN=0
   ARGS=()
   for arg in "$@"; do
     case "$arg" in
       --reuse) REUSE=1 ;;
+      # Internal only — see spawn's --preopen for the rationale (spec v12 §1).
+      --preopen) PREOPEN=1 ;;
       *) ARGS+=("$arg") ;;
     esac
   done
+
+  MYKEY=$(agent_claim_key)
+  if claim_key_reserved "$MYKEY" && [ "$PREOPEN" -ne 1 ]; then
+    echo "refusing to start under reserved agent key '$MYKEY' (reserved for wsh-cockpit's own bootstrap) — set WSH_COCKPIT_AGENT/WSH_COCKPIT_PREFIX to something else" >&2
+    exit 2
+  fi
+
   if [ ${#ARGS[@]} -eq 0 ]; then
     SESS=$(unique_session_name "")
     create_session "$SESS"
     remember_session "$SESS"
+    claim_new_session "$SESS" "(named)"
     echo "created fresh $MUX session '$SESS' (no name given — auto-unique)"
   else
     SESS="${ARGS[0]}"
@@ -565,8 +611,24 @@ MSG
         exit 8
       fi
     else
+      # Slug collision guard (spec v12 §2): adopt-claim-<slug>/prefix-<slug>
+      # are keyed by slug, not by the raw session name — two live sessions
+      # sharing a slug would corrupt each other's markers. `spawn` can't hit
+      # this (unique_session_name's HHMMSS suffix keeps slugs distinct in
+      # practice); a caller-chosen `start NAME` can.
+      NEWSLUG=$(session_slug "$SESS")
+      COLLIDE=""
+      while IFS= read -r OTHER; do
+        [ -n "$OTHER" ] && [ "$OTHER" != "$SESS" ] || continue
+        if [ "$(session_slug "$OTHER")" = "$NEWSLUG" ]; then COLLIDE="$OTHER"; break; fi
+      done < <(mux_list_sessions)
+      if [ -n "$COLLIDE" ]; then
+        echo "refusing to create '$SESS' — its slug collides with live session '$COLLIDE' (claim/prefix markers are keyed by slug); choose a less ambiguous name" >&2
+        exit 2
+      fi
       create_session "$SESS"
       remember_session "$SESS"
+      claim_new_session "$SESS" "(named)"
       echo "created $MUX session '$SESS'"
     fi
   fi
@@ -930,6 +992,9 @@ selftest-guard)
   ;;
 selftest-claim)
   cmd_selftest_claim
+  ;;
+selftest-adopt)
+  cmd_selftest_adopt
   ;;
 push)
   have_mux

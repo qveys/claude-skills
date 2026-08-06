@@ -1972,3 +1972,235 @@ cmd_selftest_claim() {
   if [ "$failures" -eq 0 ]; then echo "selftest-claim: all cases passed"; return 0
   else echo "selftest-claim: $failures failure(s)" >&2; return 1; fi
 }
+
+# selftest-adopt — step-1.3, spec v12 §2 étape 1 ("le registre des claims est
+# l'autorité de résolution"): spawn/start pose the creator's claim + a
+# registered prefix at creation, and find_reusable_session/find_registry_session
+# resolve MY sessions from that registry, ambiguity included.
+#
+# Every underlying tmux session here is created via the real `start`
+# subcommand (real subprocess, `WSH_COCKPIT_AGENT` set per case) — `start`
+# never calls "$0" open, unlike `spawn`'s creation/no-client-attached reuse
+# paths, so this whole selftest never pops a real Wave block. The two real
+# `spawn` subprocess calls below (cases 4 and 6b) are exactly the ones that
+# exit BEFORE `spawn` would ever reach `open` (reserved-key refusal, registry
+# ambiguity) — deliberately, not by luck. Where the test needs a SPAWN-style
+# registered prefix (not `start`'s "(named)" sentinel) on an already-live
+# session, it calls `prefix_write` directly in-process — the claim itself
+# (line 1 = key) doesn't differ between the two callers, only the prefix
+# value does, so overwriting just that file is a faithful stand-in for what
+# `spawn`'s own creation branch would have written.
+cmd_selftest_adopt() {
+  ADOPT_KEY="claude-selftest-adopt-$$"
+  local failures=0 rc
+  local -a created=()
+
+  report_adopt_case() {  # $1 label $2 rc (0=ok) $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  selftest_adopt_cleanup() {
+    local s
+    for s in ${created[@]+"${created[@]}"}; do
+      teardown_session "$s" >/dev/null 2>&1 || true
+    done
+    rm -f "$(state_file 2>/dev/null || true)" 2>/dev/null || true
+  }
+  trap selftest_adopt_cleanup EXIT
+
+  mkdir -p "$STATE_DIR"
+
+  # 1. `start` pose bien le claim du créateur (ma clé) + le sentinel de
+  #    préfixe "(named)" (jamais matchable par une requête de préfixe, spec
+  #    v12 §2).
+  named1="selftest-adopt-named1-$$"
+  set +e
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$named1" >/dev/null 2>&1
+  rc=$?
+  set -e
+  created+=("$named1")
+  k1=$(claim_read_key "$(claim_path "$(session_slug "$named1")")" 2>/dev/null || true)
+  p1=$(prefix_read "$named1" 2>/dev/null || true)
+  if [ "$rc" -eq 0 ] && [ "$k1" = "$ADOPT_KEY" ] && [ "$p1" = "(named)" ]; then
+    report_adopt_case "1 start pose claim(ma clé) + sentinel de préfixe (named)" 0
+  else
+    report_adopt_case "1 start pose claim(ma clé) + sentinel de préfixe (named)" 1 \
+      "rc=$rc key='$k1' (attendu '$ADOPT_KEY') prefix='$p1' (attendu '(named)')"
+  fi
+
+  # 2. `start` refuse un nom dont le slug collisionne avec celui d'une
+  #    session vivante différente ('@' et '#' se réduisent tous deux au même
+  #    '_' par session_slug — collision garantie par construction).
+  coll_a="selftest-adopt-coll@$$"
+  coll_b="selftest-adopt-coll#$$"
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$coll_a" >/dev/null 2>&1
+  created+=("$coll_a")
+  set +e
+  errcoll=$(WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$coll_b" 2>&1)
+  rccoll=$?
+  set -e
+  bexists=1; mux_has "$coll_b" && bexists=0
+  if [ "$rccoll" -eq 2 ] && [ "$bexists" -eq 1 ]; then
+    report_adopt_case "2 start refuse un nom au slug collisionnant (rc=2, pas créé)" 0
+  else
+    report_adopt_case "2 start refuse un nom au slug collisionnant (rc=2, pas créé)" 1 \
+      "rccoll=$rccoll bexists=$bexists err='$errcoll'"
+  fi
+
+  # 3. Refus des clés réservées ("user-preopen-*"/"released") + levée par
+  #    l'indicateur interne --preopen (start, portée sûre : aucun effet Wave).
+  resv1="selftest-adopt-resv1-$$"
+  set +e
+  WSH_COCKPIT_AGENT="user-preopen-99" "$SCRIPT_DIR/wsh-live.sh" start "$resv1" >/dev/null 2>&1
+  rcresv=$?
+  set -e
+  resv1_exists=1; mux_has "$resv1" && resv1_exists=0
+  resv2="selftest-adopt-resv2-$$"
+  set +e
+  WSH_COCKPIT_AGENT="user-preopen-99" "$SCRIPT_DIR/wsh-live.sh" start "$resv2" --preopen >/dev/null 2>&1
+  rcpreopen=$?
+  set -e
+  created+=("$resv2")
+  resv2_ok=1; { [ "$rcpreopen" -eq 0 ] && mux_has "$resv2"; } && resv2_ok=0
+  if [ "$rcresv" -eq 2 ] && [ "$resv1_exists" -eq 1 ] && [ "$resv2_ok" -eq 0 ]; then
+    report_adopt_case "3 refus clé réservée + levée par --preopen" 0
+  else
+    report_adopt_case "3 refus clé réservée + levée par --preopen" 1 \
+      "rcresv=$rcresv resv1_exists=$resv1_exists rcpreopen=$rcpreopen resv2_ok=$resv2_ok"
+  fi
+
+  # 4. `spawn` refuse la même clé réservée — sort avant même d'atteindre la
+  #    détection de réutilisation, donc jamais d'ouverture Wave ici.
+  set +e
+  errspawnresv=$(WSH_COCKPIT_AGENT="released" "$SCRIPT_DIR/wsh-live.sh" spawn 2>&1)
+  rcspawnresv=$?
+  set -e
+  if [ "$rcspawnresv" -eq 2 ]; then
+    report_adopt_case "4 spawn refuse aussi la clé réservée 'released'" 0
+  else
+    report_adopt_case "4 spawn refuse aussi la clé réservée 'released'" 1 \
+      "rcspawnresv=$rcspawnresv err='$errspawnresv'"
+  fi
+
+  # 5-6-7 : sessions A/B enregistrées SOUS PRÉFIXE (style spawn) — créées via
+  # `start` (aucun effet Wave), puis leur sentinel "(named)" est remplacé par
+  # un préfixe réel via prefix_write (seule la valeur de préfixe diffère
+  # entre les deux appelants, cf. commentaire de tête de fonction).
+  sess_a="selftest-adopt-a-$$"
+  sess_b="selftest-adopt-b-$$"
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$sess_a" >/dev/null 2>&1
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$sess_b" >/dev/null 2>&1
+  created+=("$sess_a" "$sess_b")
+  pfx_a=$(normalize_prefix "adopt-pfx-a-$$")
+  pfx_b=$(normalize_prefix "adopt-pfx-b-$$")
+  prefix_write "$sess_a" "$pfx_a"
+  prefix_write "$sess_b" "$pfx_b"
+
+  had_agent=0; [ -n "${WSH_COCKPIT_AGENT+x}" ] && had_agent=1
+  saved_agent="${WSH_COCKPIT_AGENT:-}"
+  export WSH_COCKPIT_AGENT="$ADOPT_KEY"
+  rm -f "$(state_file)" 2>/dev/null || true
+
+  # 5. Alternance A→B→A : jamais de misroute (registre, étape 1).
+  set +e
+  r1=$(find_reusable_session "adopt-pfx-a-$$"); rc1=$?
+  r2=$(find_reusable_session "adopt-pfx-b-$$"); rc2=$?
+  r3=$(find_reusable_session "adopt-pfx-a-$$"); rc3=$?
+  set -e
+  if [ "$rc1" -eq 0 ] && [ "$r1" = "$sess_a" ] && [ "$rc2" -eq 0 ] && [ "$r2" = "$sess_b" ] \
+     && [ "$rc3" -eq 0 ] && [ "$r3" = "$sess_a" ]; then
+    report_adopt_case "5 alternance A→B→A sans misroute (registre, étape 1)" 0
+  else
+    report_adopt_case "5 alternance A→B→A sans misroute (registre, étape 1)" 1 \
+      "rc1=$rc1 r1='$r1' rc2=$rc2 r2='$r2' rc3=$rc3 r3='$r3'"
+  fi
+
+  # 6a. N>1 de mes sessions au registre, sans préfixe demandé ni last-session
+  #     enregistrée -> ambiguïté explicite (rc=2), jamais un (N+1)-ième
+  #     cockpit silencieux.
+  set +e
+  find_reusable_session "" >/dev/null 2>&1; rc6a=$?
+  set -e
+  if [ "$rc6a" -eq 2 ]; then
+    report_adopt_case "6a N>1 sans préfixe ni last-session -> rc=2 explicite" 0
+  else
+    report_adopt_case "6a N>1 sans préfixe ni last-session -> rc=2 explicite" 1 "rc6a=$rc6a"
+  fi
+
+  # 6b. Même condition, bout en bout via le vrai `spawn` — le rc=2 sort
+  #     avant la création, donc avant tout "$0 open".
+  set +e
+  errspawnamb=$(WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" spawn 2>&1)
+  rcspawnamb=$?
+  set -e
+  if [ "$rcspawnamb" -eq 2 ]; then
+    report_adopt_case "6b spawn (sous-processus réel) surface la même ambiguïté" 0
+  else
+    report_adopt_case "6b spawn (sous-processus réel) surface la même ambiguïté" 1 \
+      "rcspawnamb=$rcspawnamb err='$errspawnamb'"
+  fi
+
+  # 6c. Une last-session appartenant au registre départage l'ambiguïté.
+  remember_session "$sess_a"
+  set +e
+  r6c=$(find_reusable_session ""); rc6c=$?
+  set -e
+  if [ "$rc6c" -eq 0 ] && [ "$r6c" = "$sess_a" ]; then
+    report_adopt_case "6c last-session au registre départage l'ambiguïté" 0
+  else
+    report_adopt_case "6c last-session au registre départage l'ambiguïté" 1 "rc6c=$rc6c r6c='$r6c'"
+  fi
+
+  # 7. Une session créée par `start` (sentinel "(named)") reste inatteignable
+  #    par une résolution à base de préfixe, même sous la même clé.
+  named2="selftest-adopt-named2-$$"
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$named2" >/dev/null 2>&1
+  created+=("$named2")
+  # find_registry_session (étape 1 seule), pas le wrapper find_reusable_session :
+  # ce dernier retomberait légitimement sur last-session — que le `start` réel
+  # ci-dessus vient de réécrire vers named2 lui-même — masquant la question
+  # posée ici, qui porte sur le registre seul (spec v12 §2, étape 1).
+  set +e
+  r7=$(find_registry_session "some-fresh-prefix-$$" "$(normalize_prefix "some-fresh-prefix-$$")"); rc7=$?
+  set -e
+  if [ "$rc7" -eq 1 ]; then
+    report_adopt_case "7 session créée par start ((named)) inatteignable par préfixe" 0
+  else
+    report_adopt_case "7 session créée par start ((named)) inatteignable par préfixe" 1 "rc7=$rc7 r7='$r7'"
+  fi
+
+  rm -f "$(state_file)" 2>/dev/null || true
+  if [ "$had_agent" -eq 1 ]; then export WSH_COCKPIT_AGENT="$saved_agent"
+  else unset WSH_COCKPIT_AGENT; fi
+
+  # 8. `stop` d'une session créée ne laisse ni claim ni prefix-<slug> orphelin.
+  sess_c="selftest-adopt-c-$$"
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$sess_c" >/dev/null 2>&1
+  created+=("$sess_c")
+  slug_c=$(session_slug "$sess_c")
+  claim_before=1; [ -f "$(claim_path "$slug_c")" ] && claim_before=0
+  prefix_before=1; [ -f "$(prefix_file "$sess_c")" ] && prefix_before=0
+  set +e
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" stop "$sess_c" >/dev/null 2>&1
+  rc8=$?
+  set -e
+  claim_after=1; [ -f "$(claim_path "$slug_c")" ] && claim_after=0
+  prefix_after=1; [ -f "$(prefix_file "$sess_c")" ] && prefix_after=0
+  if [ "$claim_before" -eq 0 ] && [ "$prefix_before" -eq 0 ] && [ "$rc8" -eq 0 ] \
+     && [ "$claim_after" -eq 1 ] && [ "$prefix_after" -eq 1 ]; then
+    report_adopt_case "8 stop ne laisse ni claim ni prefix-<slug> orphelin" 0
+  else
+    report_adopt_case "8 stop ne laisse ni claim ni prefix-<slug> orphelin" 1 \
+      "claim_before=$claim_before prefix_before=$prefix_before rc8=$rc8 claim_after=$claim_after prefix_after=$prefix_after"
+  fi
+
+  selftest_adopt_cleanup
+  trap - EXIT
+  if [ "$failures" -eq 0 ]; then echo "selftest-adopt: all cases passed"; return 0
+  else echo "selftest-adopt: $failures failure(s)" >&2; return 1; fi
+}

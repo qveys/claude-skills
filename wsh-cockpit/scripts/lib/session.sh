@@ -58,6 +58,102 @@ normalize_prefix() {
   printf '%s\n' "$prefix"
 }
 
+# Slug for per-session marker files (adopt-claim-<slug>, prefix-<slug>) — same
+# charset/squeeze rule as the pre-existing seq-<slug>/oneshot-ssh-<slug>/cm-<slug>
+# family (spec v12 §2 groups them explicitly); one shared definition so the
+# session-name -> slug bridge isn't redefined ad hoc at each call site.
+session_slug() { printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_'; }
+
+# The key a claim is created/matched under: the caller's own agent identity.
+# "default" when WSH_COCKPIT_AGENT is unset (spec v12 decisions table: "claude
+# lancé sans wrapper = clé `default` héritée, garanties réduites").
+agent_claim_key() { printf '%s' "${WSH_COCKPIT_AGENT:-default}"; }
+
+# Registered-prefix marker (spec v12 §2, "préfixe enregistré, pas parsé"):
+# written once at session creation, read (never re-parsed from the session
+# name) by the registry resolution below.
+prefix_file() { printf '%s/prefix-%s\n' "$STATE_DIR" "$(session_slug "$1")"; }
+prefix_write() {  # $1 sess $2 value (normalized prefix, or the "(named)" sentinel)
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$2" >"$(prefix_file "$1")"
+}
+prefix_read() {  # $1 sess -> prints the registered value, rc 1 if none recorded
+  local f; f=$(prefix_file "$1")
+  [ -f "$f" ] || return 1
+  tr -d '[:space:]' <"$f"
+}
+
+# Pose the creator's claim + registered prefix for a session that was JUST
+# created (spec v12 §2: "la création pose le claim du créateur"). $2 is the
+# value to register in prefix-<slug> — the normalized prefix for `spawn`, or
+# the "(named)" sentinel for `start` (never matchable by a requested prefix,
+# spec v12 §2: "start ... jamais matchable"). Shared by both call sites so
+# they can't re-diverge on the claim-then-prefix sequencing.
+# O_EXCL create is expected to win here: $sess was JUST created under a
+# unique/just-checked name, so any pre-existing adopt-claim-<slug> at this
+# exact slug can only be a residue from an earlier (dead) life of a recycled
+# name — claim_replace_orphan is the fallback for exactly that case (spec v12
+# §2: "collision de nom recyclé"). Best-effort: a failure here degrades
+# registry lookups for this one session but must never abort an otherwise-
+# successful spawn/start.
+claim_new_session() {  # $1 sess $2 prefix-value
+  local sess="$1" val="$2" slug key
+  slug=$(session_slug "$sess")
+  key=$(agent_claim_key)
+  if claim_create "$slug" "$key" || claim_replace_orphan "$slug" "$$" "$key"; then
+    prefix_write "$sess" "$val"
+  else
+    echo "warning: could not register claim for '$sess' (registry lookups may miss it)" >&2
+  fi
+}
+
+# Step 1 of spawn's resolution order (spec v12 §2, "Mes sessions (registre)"):
+# among LIVE sessions whose claim carries MY agent key (agent_claim_key) —
+# narrowed to those whose registered prefix (prefix-<slug>) equals $2 when a
+# prefix was actually requested ($1 non-empty: the caller passed a positional
+# arg, BEFORE normalize_prefix's own WSH_COCKPIT_PREFIX/WSH_COCKPIT_AGENT/live
+# fallback chain — spec v12 §2, "aucun préfixe demandé"). Prints the resolved
+# session and returns 0; returns 1 when the registry has no match at all
+# (caller falls through to the legacy last-session/newest-for-prefix path,
+# the étape-2/3 stand-in until step-1.4/1.5 land real adoption/scan); returns
+# 2 when the match is genuinely AMBIGUOUS (2+ live candidates and none of
+# them is the remembered last-session) — the caller must surface an explicit
+# error, never silently spin up an (N+1)-th cockpit.
+find_registry_session() {  # $1 requested prefix (raw, "" = none given) $2 normalized prefix
+  local requested="${1:-}" norm="$2" mykey slug ckey s pf remembered
+  mykey=$(agent_claim_key)
+  local -a cands=()
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    slug=$(session_slug "$s")
+    ckey=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null) || continue
+    [ "$ckey" = "$mykey" ] || continue
+    if [ -n "$requested" ]; then
+      pf=$(prefix_read "$s" 2>/dev/null) || continue
+      [ "$pf" = "$norm" ] || continue
+    fi
+    cands+=("$s")
+  done < <(mux_list_sessions)
+
+  [ ${#cands[@]} -gt 0 ] || return 1
+  if [ ${#cands[@]} -eq 1 ]; then
+    printf '%s\n' "${cands[0]}"
+    return 0
+  fi
+
+  remembered=$(last_session 2>/dev/null || true)
+  if [ -n "$remembered" ]; then
+    local c
+    for c in "${cands[@]}"; do
+      if [ "$c" = "$remembered" ]; then
+        printf '%s\n' "$c"
+        return 0
+      fi
+    done
+  fi
+  return 2
+}
+
 # Newest alive tmux session matching cockpit-<prefix>-* (lex sort ≈ time suffix).
 newest_session_for_prefix() {
   local prefix="$1" best=""
@@ -255,11 +351,26 @@ session_safe_to_reuse() {
   esac
 }
 
-# Prefer last remembered session; else newest alive session for the spawn prefix.
+# Étape 1 (registry) first — spec v12 §2: "le registre des claims est
+# l'autorité de résolution", last-session "rétrogradé en simple mémo". A
+# registry hit (rc 0) or genuine ambiguity (rc 2) both short-circuit here;
+# only a registry MISS (rc 1 — nothing of mine in the registry, e.g. a
+# session that predates step-1.3) falls through to the legacy
+# last-session/newest-for-prefix path below, which stays as the étape-2/3
+# stand-in until step-1.4/1.5 land real adoption/scan.
 find_reusable_session() {
   local prefix="${1:-}"
-  local norm remembered newest
+  local norm remembered newest hit rc
   norm=$(normalize_prefix "$prefix")
+
+  rc=0; hit=$(find_registry_session "$prefix" "$norm") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$hit"
+    return 0
+  elif [ "$rc" -eq 2 ]; then
+    return 2
+  fi
+
   if remembered=$(last_session 2>/dev/null) && session_safe_to_reuse "$remembered"; then
     printf '%s\n' "$remembered"
     return 0
@@ -521,6 +632,8 @@ teardown_session() {
   local sess="$1" sf killed=1 cpath
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
   rm -f "$(oneshot_ssh_file "$sess")" 2>/dev/null || true
+  rm -f "$(claim_path "$(session_slug "$sess")")" 2>/dev/null || true
+  rm -f "$(prefix_file "$sess")" 2>/dev/null || true
   tab_cache_invalidate "$sess"
   if [ "$MUX" = tmux ]; then
     # `stop` (wsh-live.sh) hands its raw argument straight to this function

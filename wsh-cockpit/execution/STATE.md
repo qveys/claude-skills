@@ -1,16 +1,20 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-06 · **Étape courante : step-1.3 — step-1.2 terminée**
+màj : 2026-08-06 · **Étape courante : step-1.3 terminée et commitée, au tour de step-1.4**
 
-NEXT: step-1.3
+NEXT: step-1.4
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
 
 ## Bloqueurs actifs
 
-(aucun — si la signature 1Password échoue : ouvrir/déverrouiller l'app 1Password sur le Mac,
-c'est le seul remède, puis relancer la fiche)
+- aucun.
+
+  *(résolu 2026-08-06 : le commit signé de step-1.3 échouait sur
+  `1Password: failed to fill whole buffer` — l'app 1Password venait de se mettre à jour
+  et son agent SSH était injoignable. Après redémarrage de l'app, `ssh-add -l` sur le
+  socket 1Password réexpose `id_ed25519_github_signing` et le commit signé passe.)*
 
 ## Avancement
 
@@ -19,7 +23,7 @@ c'est le seul remède, puis relancer la fiche)
 | 0.1 | Amender la spec (findings v11) + plan du lot + découpage en fiches | Fable | ✅ 2026-08-05 |
 | 1.1 | Inventaire de réalité et mesures préalables (`ln` no-clobber, DB Wave, `sql_quote`) | Sonnet | ✅ 2026-08-05 |
 | 1.2 | Primitives du claim (`lib/claim.sh`) + `selftest-claim` | Sonnet | ✅ 2026-08-06 |
-| 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ☐ |
+| 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ✅ 2026-08-06 |
 | 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ☐ |
 | 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ☐ |
 | 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ☐ |
@@ -106,3 +110,44 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   remède fiable, à réutiliser pour les selftests des fiches suivantes. Seul nouveau
   fichier de code : `scripts/lib/claim.sh` ; aucun appel `mv`/`ln` sur un claim hors de
   ce fichier ; `spawn`/`stop`/le registre-à-la-création restent intouchés (fiche 1.3).
+- 2026-08-06 (step-1.3, Sonnet) : **registre à la création livré** — pont session→slug
+  formalisé en fonction partagée `session_slug()` (`lib/session.sh`), consommé par
+  `teardown_session` en plus des familles `seq-`/`oneshot-ssh-` déjà existantes (le
+  report 1.2 avait repoussé cette décision ici). Nouvelles primitives dans
+  `lib/session.sh` : `agent_claim_key()` (= `${WSH_COCKPIT_AGENT:-default}`, "ma clé" —
+  tranché en relisant la spec v12 §2, la fiche seule ne le précisait pas assez),
+  `prefix_file`/`prefix_write`/`prefix_read` (préfixe **enregistré, pas reparsé**,
+  spec v12 §2), `claim_new_session()` (pose claim+préfixe à la création, best-effort,
+  factorisée pour être appelée à l'identique par `spawn` ET `start` — évite une
+  divergence des deux call sites et permet de tester la logique de pose sans passer
+  par un vrai `spawn`), `find_registry_session()` (étape 1 : parmi mes sessions
+  vivantes au registre, filtrage par préfixe enregistré si demandé, sinon
+  last-session-si-au-registre puis unique-candidate, sinon **rc=2 explicite** si
+  N>1 sans départage — jamais un (N+1)-ième cockpit silencieux). `find_reusable_session`
+  devient un wrapper : étape 1 (registre) d'abord, rc=0/2 court-circuitent, rc=1
+  (miss registre) retombe sur l'ancien chemin last-session/newest-for-prefix inchangé
+  (sessions antérieures à 1.3, hors registre). `wsh-live.sh` : `spawn`/`start` gagnent
+  un indicateur interne `--preopen` (portée à l'appel, jamais exporté — réservé au futur
+  wrapper 1.9) qui lève le refus des clés réservées (`user-preopen-*`, `released`) ;
+  `spawn` capture désormais le rc de `find_reusable_session` et sort en erreur explicite
+  (exit 2) sur ambiguïté au lieu de retomber dessus silencieusement ; `start` refuse en
+  outre un nom dont le slug collisionne avec celui d'une session vivante différente.
+  Nouvelle sous-commande `selftest-adopt` (8 cas, dispatch + doc header ajoutés) :
+  mélange volontaire d'appels réels en sous-processus à `start`/`stop`/`spawn` (aucun
+  effet Wave — `start`/`stop` n'appellent jamais `"$0" open`, et les deux seuls appels
+  réels à `spawn` testés sortent *avant* d'atteindre son chemin de création/ouverture :
+  refus de clé réservée, ambiguïté registre) et d'appels directs en process aux
+  primitives (`find_registry_session`, `find_reusable_session`, `prefix_write`) pour
+  isoler l'étape 1 de son repli legacy quand nécessaire. **RED-first démontré** : le
+  bloc de primitives ajouté à `session.sh` neutralisé via `: <<'RED_TEST_DISABLE_1_3'`,
+  `selftest-adopt` lancé en session tmux jetable → échec immédiat rc=127
+  (`session_slug: command not found`) dès le cas 1, bloc restauré ensuite. Bug
+  trouvé et corrigé pendant le passage au vert : le cas 7 (« session créée par `start`
+  inatteignable par préfixe ») utilisait d'abord le wrapper `find_reusable_session`,
+  qui retombe légitimement sur `last-session` — or le vrai sous-processus `start` du
+  cas 7 vient justement de réécrire cette last-session vers la session qu'on voulait
+  prouver inatteignable, faussant le test ; corrigé en testant `find_registry_session`
+  directement (l'étape 1 seule, sans le repli legacy). `selftest-guard` (41/41),
+  `selftest-claim` (8/8), `selftest-live`, `selftest-cache` re-passés en session tmux
+  jetable après coup → tous verts, aucune régression. Étapes 2 (adoption) et 3 (scan)
+  restent hors périmètre, reportées à 1.4/1.5 comme prévu.
