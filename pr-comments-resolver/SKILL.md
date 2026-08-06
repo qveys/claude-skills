@@ -31,7 +31,7 @@ All operations use a single script. Invoke it with an **absolute path** — the
 working directory is typically the PR's repo checkout, not this skill's folder:
 
 ```bash
-python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '<json_input>'
+python3 ~/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '<json_input>'
 ```
 
 The script prints a JSON result to stdout. Always parse stdout as JSON.
@@ -208,7 +208,7 @@ Minimum required: `owner`, `repo`, `prNumber`.
 ### Step 2 – Fetch all comments
 
 ```bash
-python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"list_pr_comments","owner":"...","repo":"...","prNumber":N}'
+python3 ~/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"list_pr_comments","owner":"...","repo":"...","prNumber":N}'
 ```
 
 - Filter out comments where `isResolved = true`.
@@ -266,7 +266,7 @@ run with `"dryRun": true` first and inspect `wouldPush` before committing to a r
 run.
 
 ```bash
-python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"apply_patch", ...}'
+python3 ~/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"apply_patch", ...}'
 ```
 
 Store the returned `commitSha` (or `commitShas` for a batch), associated with the relevant `commentId`(s).
@@ -312,7 +312,7 @@ For a sensitive PR, consider a `"dryRun": true` pass first and review `wouldPost
 before posting for real.
 
 ```bash
-python3 /Users/qveys/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"update_threads", ...}'
+python3 ~/.claude/skills/pr-comments-resolver/scripts/pr_tool.py '{"kind":"update_threads", ...}'
 ```
 
 Pass all updates in a single call. The script posts a reply in each thread and resolves threads via GitHub GraphQL when `resolved = true` and `threadId` is present. Check `results` for per-update failures — a single failure does not block the others.

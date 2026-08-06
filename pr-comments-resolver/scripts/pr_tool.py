@@ -44,9 +44,12 @@ def _resolve_github_token() -> str:
     token = os.environ.get("GITHUB_TOKEN", "")
     if token:
         return token
-    gh_r = subprocess.run(
-        ["gh", "auth", "token"], capture_output=True, text=True
-    )
+    try:
+        gh_r = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True
+        )
+    except (FileNotFoundError, OSError):
+        return ""
     if gh_r.returncode == 0:
         return gh_r.stdout.strip()
     return ""
@@ -77,7 +80,10 @@ GQL_HEADERS: dict[str, str] = {
 
 def _check_token() -> None:
     if not GITHUB_TOKEN:
-        _exit_error("GITHUB_TOKEN environment variable is not set.")
+        _exit_error(
+            "No GitHub token available: set the GITHUB_TOKEN environment variable, "
+            "or install and authenticate the gh CLI (`gh auth login`)."
+        )
 
 
 def _redact(text: str) -> str:
@@ -280,7 +286,10 @@ def apply_patch(inp: dict) -> dict:
         The user's repo config is never touched (no `git config` calls); an
         `authorName`/`authorEmail` override, if given, is passed per commit
         via `git -c user.name=... -c user.email=... commit ...` instead.
-        Pushes go through the existing `origin` remote (no token URL).
+        Pushes go through the existing `origin` remote (no token URL). On
+        failure (git apply, signing, push, or an unexpected exception), the
+        branch is hard-reset back to its pre-run HEAD before the error is
+        returned/raised.
 
     Input – preview mode:
       - {"dryRun": true} runs the full flow (clone or local checks, patch
@@ -319,6 +328,8 @@ def apply_patch(inp: dict) -> dict:
         commits_in = [{"patch": inp["patch"], "commitMessage": inp["commitMessage"]}]
         is_batch = False
     n = len(commits_in)
+    if n == 0:
+        return {"error": "commits list is empty – nothing to apply."}
 
     author_name = inp.get("authorName")
     author_email = inp.get("authorEmail")
@@ -513,12 +524,13 @@ def apply_patch(inp: dict) -> dict:
                 )
             }
 
+        # Remember the pre-run HEAD so we can hard-reset back to it on
+        # failure: _run() creates real commits on this working copy, and
+        # leaving them behind on a failed attempt would silently move the
+        # user's branch and/or leave the tree dirty.
+        initial_sha = _git("rev-parse", "HEAD", cwd=local_repo_path).stdout.strip()
+
         if dry_run:
-            # Remember the pre-dry-run HEAD so we can hard-reset back to it
-            # once we've collected the diagnostic info: _run() creates real
-            # commits on this working copy (never pushed), and leaving them
-            # behind would silently move the user's branch.
-            initial_sha = _git("rev-parse", "HEAD", cwd=local_repo_path).stdout.strip()
             try:
                 return _run(local_repo_path, dry_run=True)
             finally:
@@ -526,7 +538,19 @@ def apply_patch(inp: dict) -> dict:
                 # the user's branch must never keep the dry-run commits.
                 _git("reset", "--hard", initial_sha, cwd=local_repo_path, check=False)
 
-        return _run(local_repo_path)
+        try:
+            result = _run(local_repo_path)
+        except Exception:
+            # Unexpected failure mid-run: restore the branch before letting
+            # the exception propagate (main()'s generic handler formats it).
+            _git("reset", "--hard", initial_sha, cwd=local_repo_path, check=False)
+            raise
+        if "error" in result:
+            # Known failure (git apply, signing, push, ...): the commits
+            # made so far were never pushed, so reset them away rather than
+            # leaving the user's checkout dirty/ahead of origin.
+            _git("reset", "--hard", initial_sha, cwd=local_repo_path, check=False)
+        return result
 
     # --- Clone mode (default): shallow clone into a temp dir, push via token URL. ---
     auth_url = clone_url.replace(

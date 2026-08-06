@@ -13,7 +13,9 @@ Run with:
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -118,6 +120,38 @@ class TestRedact(unittest.TestCase):
         with patch.object(pr_tool, "GITHUB_TOKEN", ""):
             text = "nothing to redact here"
             self.assertEqual(pr_tool._redact(text), text)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_github_token
+# ---------------------------------------------------------------------------
+
+class TestResolveGithubToken(unittest.TestCase):
+    def test_returns_empty_string_when_gh_cli_missing(self):
+        """No GITHUB_TOKEN in env and the `gh` binary absent (subprocess.run
+        raises FileNotFoundError) → resolves to "" without raising."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GITHUB_TOKEN", None)
+            with patch.object(pr_tool.subprocess, "run", side_effect=FileNotFoundError):
+                result = pr_tool._resolve_github_token()
+        self.assertEqual(result, "")
+
+
+# ---------------------------------------------------------------------------
+# _check_token
+# ---------------------------------------------------------------------------
+
+class TestCheckToken(unittest.TestCase):
+    def test_error_message_mentions_both_auth_channels(self):
+        buf = io.StringIO()
+        with patch.object(pr_tool, "GITHUB_TOKEN", ""), \
+             self.assertRaises(SystemExit) as cm, \
+             contextlib.redirect_stdout(buf):
+            pr_tool._check_token()
+        self.assertEqual(cm.exception.code, 1)
+        data = json.loads(buf.getvalue())
+        self.assertIn("GITHUB_TOKEN", data["error"])
+        self.assertIn("gh auth login", data["error"])
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +333,16 @@ class TestUpdateThreads(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestApplyPatch(unittest.TestCase):
+    def test_empty_commits_list_returns_error_without_network_or_git(self):
+        with patch.object(pr_tool, "_http_get") as m_get, \
+             patch.object(pr_tool, "_git") as m_git:
+            result = pr_tool.apply_patch(
+                {"owner": "o", "repo": "r", "prNumber": 1, "commits": []}
+            )
+        self.assertEqual(result, {"error": "commits list is empty – nothing to apply."})
+        m_get.assert_not_called()
+        m_git.assert_not_called()
+
     def test_fork_deleted_head_repo_null(self):
         pr_data = {
             "head": {"ref": "feature-branch", "repo": None},
@@ -357,7 +401,7 @@ class TestApplyPatch(unittest.TestCase):
     def test_local_repo_batch_two_commits_single_push(self):
         with tempfile.TemporaryDirectory() as tmp:
             git_side_effect, state = make_git_side_effect(
-                branch="feature-branch", status="", shas=["sha1", "sha2"], sig="G"
+                branch="feature-branch", status="", shas=["initial-sha", "sha1", "sha2"], sig="G"
             )
             with patch.object(pr_tool, "_http_get", return_value=_pr_data(branch="feature-branch")), \
                  patch.object(pr_tool, "_git", side_effect=git_side_effect):
@@ -375,6 +419,34 @@ class TestApplyPatch(unittest.TestCase):
                 )
         self.assertEqual(result, {"commitShas": ["sha1", "sha2"]})
         self.assertEqual(len(state["push_calls"]), 1)
+        # a successful run must never hard-reset the user's branch
+        self.assertEqual(state["reset_calls"], [])
+
+    def test_local_repo_apply_failure_resets_hard_no_push(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            git_side_effect, state = make_git_side_effect(
+                branch="feature-branch", status="", shas=["initial-sha-fail"], apply_ok=False
+            )
+            with patch.object(pr_tool, "_http_get", return_value=_pr_data(branch="feature-branch")), \
+                 patch.object(pr_tool, "_git", side_effect=git_side_effect):
+                result = pr_tool.apply_patch(
+                    {
+                        "owner": "o",
+                        "repo": "r",
+                        "prNumber": 1,
+                        "localRepoPath": tmp,
+                        "patch": "p",
+                        "commitMessage": "m",
+                    }
+                )
+        # apply fails both direct and --3way (make_git_side_effect's "apply"
+        # branch ignores the extra flag and always fails when apply_ok=False)
+        self.assertIn("error", result)
+        self.assertIn("git apply failed (direct)", result["error"])
+        self.assertIn("--3way also failed", result["error"])
+        self.assertEqual(state["push_calls"], [])
+        self.assertEqual(len(state["reset_calls"]), 1)
+        self.assertEqual(state["reset_calls"][0], ("reset", "--hard", "initial-sha-fail"))
 
     def test_local_repo_dry_run_no_push_resets_to_initial_sha(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -404,7 +476,7 @@ class TestApplyPatch(unittest.TestCase):
     def test_legacy_single_patch_local(self):
         with tempfile.TemporaryDirectory() as tmp:
             git_side_effect, state = make_git_side_effect(
-                branch="feature-branch", status="", shas=["shaX"], sig="G"
+                branch="feature-branch", status="", shas=["initial-shaX", "shaX"], sig="G"
             )
             with patch.object(pr_tool, "_http_get", return_value=_pr_data(branch="feature-branch")), \
                  patch.object(pr_tool, "_git", side_effect=git_side_effect):
