@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-06 · **Étape courante : step-1.5 terminée, au tour de step-1.6**
+màj : 2026-08-06 · **Étape courante : step-1.6 terminée, au tour de step-1.7**
 
-NEXT: step-1.6
+NEXT: step-1.7
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -38,7 +38,7 @@ NEXT: step-1.6
 | 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ✅ 2026-08-06 |
 | 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ✅ 2026-08-06 |
 | 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ✅ 2026-08-06 |
-| 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ☐ |
+| 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ✅ 2026-08-06 |
 | 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ☐ |
 | 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ☐ |
 | 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ☐ |
@@ -245,3 +245,54 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   déjà documenté ailleurs dans le code), non reproduit sur deux ré-exécutions immédiates
   (isolée puis combinée) — pas de régression réelle. Étape 3 close ; 1.6 (`release`, keep sticky,
   continuité `seq`) reste hors périmètre.
+- 2026-08-06 (step-1.6, Sonnet) : **`release` + keep sticky livrés** — `release_session()`
+  (`lib/session.sh`) rend une session disponible SANS jamais toucher tmux/le bloc Wave. Décision
+  de conception centrale : distinguer « session issue de `WSH_COCKPIT_ADOPT` » de « session créée
+  (hors ADOPT) » sans aucun marqueur persistant nouveau, en retestant l'appartenance du nom de
+  session à `$WSH_COCKPIT_ADOPT` **au moment du `release`** (nouvelle primitive
+  `adopt_list_contains()`, calque du parsing comma-split de `try_adopt_session`) — un sous-agent
+  garde la même variable d'environnement pendant tout son cycle de vie (adoption puis
+  release/stop, même process), donc reconstruire l'appartenance à cet instant est fiable sans
+  bookkeeping supplémentaire. Branche « adoptée » : `claim_release()` (déjà I4-enforced,
+  réutilisée telle quelle depuis `claim.sh`) rétrograde en pré-claim `released`, ré-adoptable via
+  étape 2 uniquement. Branche « créée/legacy » : le fichier de claim est supprimé entièrement
+  (retour ABSENT), re-scannable via étape 3. Ni `keep-<slug>`, ni `seq-<slug>`, ni
+  `oneshot-ssh-<slug>` ne sont jamais touchés (continuité du compteur de framing — un footer
+  « └─[#N] exit » périmé ne doit jamais matcher faussement chez le prochain adopteur). `keep`
+  sticky : propriété de la SESSION (pas du claim), exposée en lecture seule par
+  `keep_file()`/`keep_is_set()` — poser le marqueur à la création reste hors périmètre (fiche
+  1.9, le wrapper) ; ce fiche ne fait que le consulter. `wsh-live.sh` : nouveau cas `release)`
+  (argument obligatoire via `${1:?usage...}`, délibérément **aucun** repli sur la dernière
+  session — un sous-agent à clé partagée qui oublie l'argument ne doit jamais relâcher la
+  mauvaise session par défaut) ; `stop)` vérifie désormais `keep_is_set` AVANT le chemin de
+  destruction et route vers `release_session` au lieu de `teardown_session` quand positif, garde
+  own-session inchangée. Doc-header et ligne `usage:` finale mis à jour pour inclure `release`
+  (et, au passage, `selftest-adopt` qui manquait déjà de la ligne `usage:` depuis 1.3 — corrigé).
+  8 nouveaux cas `selftest-adopt` (21-28) : argument manquant → erreur d'usage ; clé non
+  propriétaire → refus I4 avec claim intact ; release d'une adoptée → claim `released` +
+  ré-adoption étape 2 par le même agent avec sonde PROUVÉE ; release d'une créée → claim
+  supprimé + re-scannable ; `seq-<slug>` intact après release (assertion resserrée en cours de
+  session — voir bug ci-dessous) ; keep sticky chemin 1 (adoptée, marqueur déjà posé, `stop` ⇒
+  release, session/bloc vivants, claim rétrogradé) ; keep sticky chemin 2 (créée, marquée keep,
+  relâchée, reprise par un tout autre agent via le scan legacy — keep hérité tel quel car
+  propriété de la session, `stop` ⇒ release encore) ; release par un sous-agent via la VRAIE
+  sous-commande CLI (pas l'appel direct à la primitive, pour couvrir aussi le câblage du
+  dispatch) → claim rétrogradé. **RED-first démontré** : implémentation entière (`session.sh` +
+  `wsh-live.sh`) mise de côté via `git stash push` ciblé sur ces deux seuls fichiers (le dépôt
+  contenait par ailleurs du travail en cours non lié dans d'autres skills — jamais touché),
+  `selftest-adopt` lancé en session tmux jetable → cas 1-21 verts (21 passe déjà légitimement sur
+  le fallback d'usage générique préexistant), 22-28 rouges pour la bonne raison
+  (`release_session`/`keep_file` : command not found, cas 28 sur le message d'usage générique
+  faute du cas `release)`) ; stash restauré, 28/28 verts. Deux bugs de test trouvés et corrigés
+  pendant le passage au vert (pas de bug d'implémentation) : (1) le cas 22 acceptait n'importe
+  quel rc≠0 comme preuve de refus I4, ce qui aurait pu masquer un simple « command not found » —
+  resserré à `rc -eq 1` (contrat exact de `release_session`) ; (2) le cas 25 exigeait `seq`
+  strictement identique après une **ré-adoption**, alors que la sonde de ré-adoption elle-même
+  incrémente légitimement le compteur (continuité = jamais de reset, pas immutabilité totale) —
+  le test a été simplifié pour ne vérifier que l'effet de `release` seul (qui, lui, ne doit
+  jamais toucher `seq`), la ré-adoption retirée du cas. Un flake transitoire du cas 23 observé une
+  fois (adoption initiale échouée sous charge, 28 cas créant chacun 1-2 sessions tmux) puis non
+  reproduit sur deux ré-exécutions immédiates — même nature que le flake déjà noté en 1.5, pas
+  une régression. Non-régression : `selftest-guard` 41/41, `selftest-claim` 8/8, aucune session
+  tmux résiduelle après coup. 1.7 (`gc` : keep épargnées, hygiène des marqueurs, `doctor`) prend
+  le relais.

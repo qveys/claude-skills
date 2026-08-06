@@ -46,7 +46,16 @@
 #                              — when the segment isn't in the captured scrollback, or the
 #                              pane has no markers at all (WSH_LIVE_SEP=0, `keys`, a TUI):
 #                              use `read N` there instead.
-#   stop  [session]            kill the session
+#   stop  [session]            kill the session (or release it, without touching tmux/the
+#                              Wave block, when it carries a sticky keep-<slug> marker —
+#                              spec v12 §3, step-1.6)
+#   release <session>          make a session available again WITHOUT destroying it: an
+#                              adopted session (still in $WSH_COCKPIT_ADOPT) retrogrades to a
+#                              "released" pré-claim, re-adoptable via étape 2 only; a created/
+#                              legacy session's claim is removed outright, re-scannable via
+#                              étape 3. I4-enforced (owner-only). Mandatory argument, no
+#                              last-session default. Never touches tmux, the Wave block,
+#                              keep-<slug>, seq-<slug> or oneshot-ssh-<slug> (spec v12 §3).
 #   current                    print the last session created by `spawn` in this shell tree
 #   doctor                     read-only diagnostic of the whole cockpit chain
 #                              (rc 0/1, never writes anything — safe to run anytime)
@@ -143,8 +152,17 @@
 #                              start refuses a slug-colliding name; reserved-key refusal
 #                              + --preopen lift; stop leaves no orphaned claim/prefix
 #                              marker; real spawn/start subprocess calls used only where
-#                              they exit before ever reaching spawn's open side effect —
-#                              tmux-only; rc 0/1
+#                              they exit before ever reaching spawn's open side effect;
+#                              adoption via étape 2 (step-1.4) with a real probe run;
+#                              étape 3 legacy scan/claim, seq/prefix continuity across it
+#                              (step-1.5); release retrogrades an adopted claim to
+#                              "released" (re-adoptable via étape 2, probed) and removes a
+#                              created claim outright (re-scannable via étape 3); release
+#                              usage error and I4 (non-owner) refusal; seq-<slug>
+#                              untouched by release; sticky keep-<slug> — adopted-then-
+#                              released-then-scanned session — always routes `stop` to
+#                              release, never teardown, session/block left alive
+#                              (step-1.6); tmux-only; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -1266,15 +1284,41 @@ stop)
     session_own_refusal "$SESS"
     exit 8
   fi
+  # Sticky keep (spec v12 §3, step-1.6): a session marked keep-<slug> must
+  # never be destroyed by `stop` — no matter which key currently owns its
+  # claim — only released, so a future adoption/scan can pick it back up.
+  # Checked BEFORE the destroy path below; un-keeping a session is fiche
+  # 1.9's job (posing the marker), not this dispatch's.
   # Actual kill + state cleanup (seq file, sep/step helper options, web view,
   # last-session pointer) lives in teardown_session (lib/session.sh) — shared
   # with `gc`, which needs the exact same per-session cleanup on a sweep.
-  if teardown_session "$SESS"; then
+  if keep_is_set "$SESS"; then
+    if release_session "$SESS"; then
+      echo "released session '$SESS' (keep)"
+    else
+      echo "cannot release '$SESS': not the owning agent" >&2
+      exit 8
+    fi
+  elif teardown_session "$SESS"; then
     echo "killed session '$SESS'"
   else
     echo "no session '$SESS' to kill"
   fi
   ;;
+release)
+  have_mux
+  # Mandatory argument, deliberately NO last-session default (spec v12 §3):
+  # a shared-key sub-agent that forgets the argument must not silently
+  # release whatever session it last touched.
+  SESS="${1:?usage: $0 release <session>}"
+  need_session "$SESS"
+  if release_session "$SESS"; then
+    echo "released session '$SESS'"
+  else
+    echo "cannot release '$SESS': not the owning agent" >&2
+    exit 8
+  fi
+  ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt} [args]" >&2; exit 2 ;;
 esac

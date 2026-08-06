@@ -2528,6 +2528,183 @@ cmd_selftest_adopt() {
       "sess20_new='$sess20_new' free20_untouched=$free20_untouched key20_before='$key20_before' key20_after='$key20_after' newclaim20_key='$newclaim20_key' out20='$out20'"
   fi
 
+  # 21-28 (step-1.6, spec v12 §3, "release" + sticky "keep"). $WSH_COCKPIT_AGENT/
+  # $WSH_COCKPIT_ADOPT keep being reassigned freely below (restored to the
+  # cases 9-16 baseline only at the very end, same discipline as cases 9-20).
+
+  # 21. `release` sans argument -> erreur d'usage (argument obligatoire, pas
+  #     de repli sur la dernière session — spec v12 §3).
+  set +e
+  out21=$(WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" release 2>&1)
+  rc21=$?
+  set -e
+  if [ "$rc21" -ne 0 ] && printf '%s\n' "$out21" | grep -qi 'usage'; then
+    report_adopt_case "21 release sans argument : erreur d'usage" 0
+  else
+    report_adopt_case "21 release sans argument : erreur d'usage" 1 "rc21=$rc21 out21='$out21'"
+  fi
+
+  # 22. `release` par une clé qui ne possède PAS le claim -> refus (I4),
+  #     claim intact.
+  sess22="selftest-adopt-release-owner22-$$"
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$sess22" >/dev/null 2>&1
+  created+=("$sess22")
+  slug22=$(session_slug "$sess22")
+  key22_before=$(claim_read_key "$(claim_path "$slug22")" 2>/dev/null || true)
+  export WSH_COCKPIT_AGENT="not-the-owner-22-$$"
+  unset WSH_COCKPIT_ADOPT
+  set +e; release_session "$sess22"; rc22=$?; set -e
+  key22_after=$(claim_read_key "$(claim_path "$slug22")" 2>/dev/null || true)
+  if [ "$rc22" -eq 1 ] && [ "$key22_after" = "$key22_before" ]; then
+    report_adopt_case "22 release par une clé non propriétaire : refus (I4), claim intact" 0
+  else
+    report_adopt_case "22 release par une clé non propriétaire : refus (I4), claim intact" 1 \
+      "rc22=$rc22 key22_before='$key22_before' key22_after='$key22_after'"
+  fi
+
+  # 23. Release d'une session ADOPTÉE : le claim rétrograde en pré-claim
+  #     "released" (jamais supprimé) -> ré-adoptable via étape 2 UNIQUEMENT,
+  #     par le même agent qui vient de la relâcher, sonde PROUVÉE exécutée à
+  #     la ré-adoption (même exigence que le cas 9).
+  sess23="selftest-adopt-release-adopted23-$$"
+  WSH_COCKPIT_AGENT="user-preopen-23" "$SCRIPT_DIR/wsh-live.sh" start "$sess23" --preopen >/dev/null 2>&1
+  created+=("$sess23")
+  slug23=$(session_slug "$sess23")
+  export WSH_COCKPIT_AGENT="releaser23-$$"
+  export WSH_COCKPIT_ADOPT="$sess23"
+  set +e; try_adopt_session "" ""; rc23a=$?; set -e
+  key23_adopted=$(claim_read_key "$(claim_path "$slug23")" 2>/dev/null || true)
+  set +e; release_session "$sess23"; rc23rel=$?; set -e
+  key23_released=$(claim_read_key "$(claim_path "$slug23")" 2>/dev/null || true)
+  set +e; try_adopt_session "" ""; rc23readopt=$?; set -e
+  probe23_ok=1; printf '%s\n' "$ADOPT_PROBE_OUT" | grep -q '^WSH_SITUATE_HOST=' && probe23_ok=0
+  if [ "$rc23a" -eq 0 ] && [ "$key23_adopted" = "releaser23-$$" ] \
+     && [ "$rc23rel" -eq 0 ] && [ "$key23_released" = "released" ] \
+     && [ "$rc23readopt" -eq 0 ] && [ "$ADOPT_RESULT" = "$sess23" ] && [ "$probe23_ok" -eq 0 ]; then
+    report_adopt_case "23 release d'une adoptée : claim 'released', ré-adoption étape 2 avec sonde" 0
+  else
+    report_adopt_case "23 release d'une adoptée : claim 'released', ré-adoption étape 2 avec sonde" 1 \
+      "rc23a=$rc23a key23_adopted='$key23_adopted' rc23rel=$rc23rel key23_released='$key23_released' rc23readopt=$rc23readopt ADOPT_RESULT='$ADOPT_RESULT' probe23_ok=$probe23_ok"
+  fi
+
+  # 24. Release d'une session CRÉÉE (jamais dans $WSH_COCKPIT_ADOPT) : le
+  #     claim est supprimé entièrement (retour à ABSENT), re-scannable via
+  #     étape 3.
+  sess24="selftest-adopt-release-created24-$$"
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$sess24" >/dev/null 2>&1
+  created+=("$sess24")
+  slug24=$(session_slug "$sess24")
+  export WSH_COCKPIT_AGENT="$ADOPT_KEY"
+  unset WSH_COCKPIT_ADOPT
+  set +e; release_session "$sess24"; rc24=$?; set -e
+  claimed24=1; claim_is_claimed "$slug24" && claimed24=0
+  if [ "$rc24" -eq 0 ] && [ "$claimed24" -eq 1 ]; then
+    report_adopt_case "24 release d'une créée : claim supprimé, session re-scannable" 0
+  else
+    report_adopt_case "24 release d'une créée : claim supprimé, session re-scannable" 1 \
+      "rc24=$rc24 claimed24=$claimed24"
+  fi
+
+  # 25. Continuité du compteur seq-<slug> à travers release : release ne le
+  #     touche JAMAIS (spec v12 §3) — le ré-adopter re-déclenche sa propre
+  #     sonde (donc incrémente à nouveau, légitimement) ; ce qui compte ici
+  #     est que release seul ne le remette pas à zéro/une valeur périmée,
+  #     ce qui ferait faussement matcher un footer "└─[#N] exit" déjà vu.
+  sess25="selftest-adopt-release-seq25-$$"
+  WSH_COCKPIT_AGENT="user-preopen-25" "$SCRIPT_DIR/wsh-live.sh" start "$sess25" --preopen >/dev/null 2>&1
+  created+=("$sess25")
+  export WSH_COCKPIT_AGENT="seqagent25-$$"
+  export WSH_COCKPIT_ADOPT="$sess25"
+  set +e; try_adopt_session "" ""; rc25a=$?; set -e
+  mkdir -p "$STATE_DIR"
+  printf '7\n' >"$(seq_file "$sess25")"
+  set +e; release_session "$sess25"; rc25rel=$?; set -e
+  seq25_after_release=$(cat "$(seq_file "$sess25")" 2>/dev/null || true)
+  if [ "$rc25a" -eq 0 ] && [ "$rc25rel" -eq 0 ] && [ "$seq25_after_release" = "7" ]; then
+    report_adopt_case "25 release laisse seq-<slug> intact" 0
+  else
+    report_adopt_case "25 release laisse seq-<slug> intact" 1 \
+      "rc25a=$rc25a rc25rel=$rc25rel seq25_after_release='$seq25_after_release'"
+  fi
+
+  # 26. Keep sticky, chemin 1 (adoptée) : marqueur keep-<slug> posé AVANT
+  #     l'adoption (simule le wrapper, fiche 1.9, hors périmètre — on ne fait
+  #     que le LIRE ici) ; `stop` sur la session adoptée route vers release,
+  #     JAMAIS teardown : session/bloc restent vivants, claim rétrogradé.
+  sess26="selftest-adopt-keep-adopted26-$$"
+  WSH_COCKPIT_AGENT="user-preopen-26" "$SCRIPT_DIR/wsh-live.sh" start "$sess26" --preopen >/dev/null 2>&1
+  created+=("$sess26")
+  mkdir -p "$STATE_DIR"
+  set +e; : >"$(keep_file "$sess26" 2>/dev/null)"; set -e
+  export WSH_COCKPIT_AGENT="keepadopter26-$$"
+  export WSH_COCKPIT_ADOPT="$sess26"
+  set +e; try_adopt_session "" ""; set -e
+  set +e
+  out26=$(WSH_COCKPIT_AGENT="keepadopter26-$$" WSH_COCKPIT_ADOPT="$sess26" "$SCRIPT_DIR/wsh-live.sh" stop "$sess26" 2>&1)
+  rc26=$?
+  set -e
+  key26_after=$(claim_read_key "$(claim_path "$(session_slug "$sess26")")" 2>/dev/null || true)
+  alive26=1; mux_has "$sess26" && alive26=0
+  if [ "$rc26" -eq 0 ] && [ "$alive26" -eq 0 ] && [ "$key26_after" = "released" ]; then
+    report_adopt_case "26 keep sticky (chemin adoption) : stop => release, session/bloc vivants" 0
+  else
+    report_adopt_case "26 keep sticky (chemin adoption) : stop => release, session/bloc vivants" 1 \
+      "rc26=$rc26 alive26=$alive26 key26_after='$key26_after' out26='$out26'"
+  fi
+
+  # 27. Keep sticky, chemin 2 (créée-relâchée, reprise au scan) : keep posé
+  #     à la création, la session survit à un release (claim supprimé) puis
+  #     à une reprise legacy par un AUTRE agent — le marqueur keep est une
+  #     propriété de la session, pas du claim, donc il est hérité tel quel ;
+  #     `stop` route encore vers release, jamais teardown.
+  sess27="selftest-adopt-keep-scan27-$$"
+  export WSH_COCKPIT_AGENT="keepcreator27-$$"
+  unset WSH_COCKPIT_ADOPT
+  "$SCRIPT_DIR/wsh-live.sh" start "$sess27" >/dev/null 2>&1
+  created+=("$sess27")
+  mkdir -p "$STATE_DIR"
+  set +e; : >"$(keep_file "$sess27" 2>/dev/null)"; set -e
+  set +e; release_session "$sess27"; set -e
+  claimed27_after_release=1; claim_is_claimed "$(session_slug "$sess27")" && claimed27_after_release=0
+  export WSH_COCKPIT_AGENT="keepscanner27-$$"
+  norm27=$(normalize_prefix "")
+  set +e; try_legacy_claim "$sess27" "$norm27"; rc27claim=$?; set -e
+  set +e
+  out27=$(WSH_COCKPIT_AGENT="keepscanner27-$$" "$SCRIPT_DIR/wsh-live.sh" stop "$sess27" 2>&1)
+  rc27=$?
+  set -e
+  alive27=1; mux_has "$sess27" && alive27=0
+  keep27_still_set=1; keep_is_set "$sess27" && keep27_still_set=0
+  if [ "$claimed27_after_release" -eq 1 ] && [ "$rc27claim" -eq 0 ] \
+     && [ "$rc27" -eq 0 ] && [ "$alive27" -eq 0 ] && [ "$keep27_still_set" -eq 0 ]; then
+    report_adopt_case "27 keep sticky (créée-relâchée, reprise au scan) : keep hérité, stop => release" 0
+  else
+    report_adopt_case "27 keep sticky (créée-relâchée, reprise au scan) : keep hérité, stop => release" 1 \
+      "claimed27_after_release=$claimed27_after_release rc27claim=$rc27claim rc27=$rc27 alive27=$alive27 keep27_still_set=$keep27_still_set out27='$out27'"
+  fi
+
+  # 28. Release par un sous-agent en fin de tâche, via le VRAI sous-commande
+  #     `release` (dispatch wsh-live.sh, pas l'appel direct à la primitive
+  #     comme au cas 23) : claim rétrogradé en "released".
+  sess28="selftest-adopt-release-subagent28-$$"
+  WSH_COCKPIT_AGENT="user-preopen-28" "$SCRIPT_DIR/wsh-live.sh" start "$sess28" --preopen >/dev/null 2>&1
+  created+=("$sess28")
+  export WSH_COCKPIT_AGENT="subagent28-$$"
+  export WSH_COCKPIT_ADOPT="$sess28"
+  set +e; try_adopt_session "" ""; set -e
+  set +e
+  out28=$(WSH_COCKPIT_AGENT="subagent28-$$" WSH_COCKPIT_ADOPT="$sess28" "$SCRIPT_DIR/wsh-live.sh" release "$sess28" 2>&1)
+  rc28=$?
+  set -e
+  key28_after=$(claim_read_key "$(claim_path "$(session_slug "$sess28")")" 2>/dev/null || true)
+  alive28=1; mux_has "$sess28" && alive28=0
+  if [ "$rc28" -eq 0 ] && [ "$alive28" -eq 0 ] && [ "$key28_after" = "released" ]; then
+    report_adopt_case "28 release par un sous-agent (vraie sous-commande) : claim rétrogradé" 0
+  else
+    report_adopt_case "28 release par un sous-agent (vraie sous-commande) : claim rétrogradé" 1 \
+      "rc28=$rc28 alive28=$alive28 key28_after='$key28_after' out28='$out28'"
+  fi
+
   rm -f "$(state_file)" 2>/dev/null || true
   if [ "$had_agent9" -eq 1 ]; then export WSH_COCKPIT_AGENT="$saved_agent9"
   else unset WSH_COCKPIT_AGENT; fi

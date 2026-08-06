@@ -551,6 +551,56 @@ try_adopt_session() {  # $1 requested prefix (raw) $2 normalized -> rc 0 adopted
   return 1
 }
 
+# Same comma-split membership test try_adopt_session applies to
+# $WSH_COCKPIT_ADOPT, exposed standalone so release_session() (below) can
+# reuse it without re-running any adoption/probe side effect.
+adopt_list_contains() {  # $1 session name -> rc 0 present in $WSH_COCKPIT_ADOPT
+  local target="$1" cand
+  [ -n "${WSH_COCKPIT_ADOPT:-}" ] || return 1
+  local -a list=()
+  IFS=',' read -r -a list <<<"$WSH_COCKPIT_ADOPT"
+  for cand in ${list[@]+"${list[@]}"}; do
+    [ "$cand" = "$target" ] && return 0
+  done
+  return 1
+}
+
+# POSSÉDÉ -> free, WITHOUT touching tmux/the Wave block (spec v12 §3): makes
+# a session available to a future resolution pass again, as opposed to
+# `stop`'s teardown_session which destroys it. I4 (owner-only) is enforced by
+# claim_release itself; this function only decides WHICH free state the
+# claim lands in:
+#   - session currently listed in MY $WSH_COCKPIT_ADOPT (i.e. I originally
+#     reached it via étape 2 adoption) -> retrograde to the "released"
+#     pré-claim (claim_release) so it is re-adoptable via étape 2 ONLY, never
+#     picked up by the étape 3 legacy scan (claim_is_claimed still true).
+#   - anything else (a session I `start`ed/`spawn`ed myself, outside the
+#     ADOPT pool) -> the claim is removed outright (back to ABSENT), so étape
+#     3's scan can find and legacy-claim it again.
+# $WSH_COCKPIT_ADOPT membership is re-tested at release time rather than
+# recorded anywhere: a sub-agent process keeps the same env var for its
+# whole task lifetime (spawn-time and release/stop-time are the same
+# process), so this reconstructs "was this an ADOPT-pool session" correctly
+# without any extra bookkeeping file. Deliberately does NOT touch
+# keep-<slug>, seq-<slug> or oneshot-ssh-<slug> — those track properties of
+# the SESSION across release/re-adoption, not of the claim being released
+# (resetting seq here would let a stale "└─[#N] exit" footer falsely match
+# for the next adopter).
+release_session() {  # $1 session -> rc 0 released, 1 not owner/absent
+  local sess="$1" slug key last
+  slug=$(session_slug "$sess")
+  key=$(agent_claim_key)
+  if adopt_list_contains "$sess"; then
+    claim_release "$slug" "$key" || return 1
+  else
+    claim_read_key "$(claim_path "$slug")" 2>/dev/null | grep -qx "$key" || return 1
+    rm -f "$(claim_path "$slug")"
+  fi
+  last=$(last_session 2>/dev/null || true)
+  [ "$last" = "$sess" ] && rm -f "$(state_file)"
+  return 0
+}
+
 # Form-based test: does this token LOOK like a session name, regardless of
 # whether such a session exists right now? Deliberately STABLE and LOCAL (the
 # string's shape) as opposed to mux_has, which tests EXISTENCE — a property of
@@ -750,6 +800,16 @@ tty_only() { [ -t 1 ] && printf '%s\n' "$@" || true; }
 
 # Per-session sequence counter file path: normalized slug of session name.
 seq_file() { printf '%s/seq-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+
+# Sticky "keep" marker (spec v12 §3, step-1.6): a property of the SESSION,
+# not of the claim — it survives release and re-adoption by a different
+# agent, unlike claim state. Posing this marker at creation time is the
+# wrapper's job (fiche 1.9, out of scope here); this file only exposes the
+# read-only predicate that `stop` (wsh-live.sh) and release_session() below
+# consult to decide whether a "destroy" request must be downgraded to a
+# release instead.
+keep_file() { printf '%s/keep-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_.-' '_')"; }
+keep_is_set() { [ -e "$(keep_file "$1")" ]; }
 
 # --- One-shot SSH nudge -------------------------------------------------------
 # SKILL.md requires one persistent SSH session per host (auth once, work
