@@ -15,6 +15,15 @@ case "$LINES" in
   ''|*[!0-9]*|0) echo "usage : cockpits.sh [N]" >&2; exit 2 ;;
 esac
 PATTERN="${OEJ_TMUX_PATTERN:-^(cockpit|relay|wave|selftest|diag)-}"
+# Un motif ERE invalide ferait de « grep -E … || true » une liste vide silencieuse (« aucune
+# session ») : on valide le motif d'emblée — grep sort avec 2 sur motif invalide, 1 sur simple
+# absence de correspondance (cas normal, toléré plus bas).
+rc=0
+printf '' | grep -E -- "$PATTERN" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  echo "OEJ_TMUX_PATTERN invalide (ERE) : $PATTERN" >&2
+  exit 2
+fi
 
 if ! command -v tmux >/dev/null 2>&1 || ! tmux ls >/dev/null 2>&1; then
   echo "(aucun serveur tmux actif)"
@@ -24,7 +33,7 @@ fi
 # Une seule capture de la liste : évite la course « dernière session cockpit-* disparue
 # entre deux tmux ls », qui ferait tomber le script sous pipefail.
 listing=$(tmux ls -F '#{session_name}|#{session_created}|#{session_attached}' 2>/dev/null \
-  | grep -E "$PATTERN" || true)
+  | grep -E -- "$PATTERN" || true)
 if [ -z "$listing" ]; then
   echo "(aucune session correspondant à $PATTERN)"
   exit 0
