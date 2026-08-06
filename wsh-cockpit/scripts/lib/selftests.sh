@@ -3576,3 +3576,84 @@ STUB
   if [ "$failures" -eq 0 ]; then echo "selftest-wrapper: all cases passed"; return 0
   else echo "selftest-wrapper: $failures failure(s)" >&2; return 1; fi
 }
+
+cmd_selftest_attach() {
+  # Régression de l'« écran noir » : lancé en `exec mux attach`, le process d'un
+  # bloc Wave meurt avec son attach (Ctrl+A d, session tuée, binaire absent) et
+  # Wave laisse un terminal mort — noir, insensible à TOUTE touche, prefix
+  # compris, donc indiscernable d'un plantage. La commande du bloc doit survivre
+  # au détachement, dire ce qui s'est passé, et permettre de se rattacher.
+  # NOT local: the EXIT trap runs after this function has already returned.
+  ATTACH_TGT="selftest-attach-tgt-$$"
+  ATTACH_SOCK="cockpit-selftest-attach-$$"
+  local failures=0 cmd bin rc bench_alive pane_text
+
+  report_attach_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  selftest_attach_cleanup() {
+    tmux kill-session -t "=$ATTACH_TGT" 2>/dev/null || true
+    tmux -L "$ATTACH_SOCK" kill-server 2>/dev/null || true
+  }
+  trap selftest_attach_cleanup EXIT
+
+  attach_wait() {  # attend une condition (5 s max) au lieu d'un sleep arbitraire
+    local i=0
+    while [ "$i" -lt 25 ]; do
+      if eval "$1" >/dev/null 2>&1; then return 0; fi
+      sleep 0.2; i=$((i + 1))
+    done
+    return 1
+  }
+  attach_has_client() { [ -n "$(tmux list-clients -t "$ATTACH_TGT" -F x 2>/dev/null)" ]; }
+
+  bin=$(command -v tmux)
+  tmux new-session -d -s "$ATTACH_TGT" 2>/dev/null || true
+  cmd=$(mux_block_attach_cmd "$ATTACH_TGT" "$bin")
+
+  # Le banc vit sur un socket tmux séparé : son pane fournit le pty qu'un vrai
+  # bloc Wave fournirait, sans polluer le serveur par défaut. `unset TMUX` est
+  # obligatoire, sinon tmux refuse de s'attacher depuis un pane (imbrication).
+  tmux -L "$ATTACH_SOCK" new-session -d -s bench -x 80 -y 24 2>/dev/null || true
+  tmux -L "$ATTACH_SOCK" send-keys -t bench -l "unset TMUX; $cmd"
+  tmux -L "$ATTACH_SOCK" send-keys -t bench Enter
+
+  # 1. La commande du bloc attache réellement la session.
+  if attach_wait attach_has_client; then
+    report_attach_case "1 la commande de bloc attache la session" 0
+  else
+    report_attach_case "1 la commande de bloc attache la session" 1 "aucun client sur $ATTACH_TGT"
+  fi
+
+  # 2. Le bloc SURVIT au détachement — c'est la régression : avec `exec`, le pane
+  #    est remplacé par l'attach, sa mort ferme la dernière fenêtre du banc.
+  tmux detach-client -s "$ATTACH_TGT" 2>/dev/null || true
+  sleep 0.5
+  bench_alive=0; tmux -L "$ATTACH_SOCK" has-session -t bench 2>/dev/null || bench_alive=1
+  report_attach_case "2 le bloc survit au détachement" "$bench_alive" \
+    "le process du bloc est mort avec l'attach (écran noir muet)"
+
+  # 3. Il dit pourquoi, au lieu de rester noir et muet.
+  pane_text=$(tmux -L "$ATTACH_SOCK" capture-pane -p -t bench 2>/dev/null || true)
+  case "$pane_text" in *"[cockpit]"*) rc=0 ;; *) rc=1 ;; esac
+  report_attach_case "3 le bloc explique le détachement" "$rc" "aucun message [cockpit] dans le pane"
+
+  # 4. Entrée rattache, sans avoir à rouvrir un bloc.
+  tmux -L "$ATTACH_SOCK" send-keys -t bench Enter 2>/dev/null || true
+  if attach_wait attach_has_client; then
+    report_attach_case "4 Entrée rattache le bloc" 0
+  else
+    report_attach_case "4 Entrée rattache le bloc" 1 "toujours aucun client après Entrée"
+  fi
+
+  selftest_attach_cleanup
+  trap - EXIT
+  if [ "$failures" -eq 0 ]; then echo "selftest-attach: all cases passed"; return 0
+  else echo "selftest-attach: $failures failure(s)" >&2; return 1; fi
+}

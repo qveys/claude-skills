@@ -214,6 +214,11 @@
 #                              tmux session + real claim, no Wave `open`) and a fake
 #                              `claude` stub on PATH — never pops a real Wave block,
 #                              never launches the real claude; tmux-only; rc 0/1
+#   selftest-attach            the block's attach command survives a detach: the
+#                              block stays alive, says why it detached, and
+#                              re-attaches on Enter — instead of dying with the
+#                              attach and leaving a black, key-swallowing dead
+#                              terminal; tmux-only; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -247,7 +252,9 @@
 #      SQLite (db_workspace.activetabid) and override WAVETERM_TABID with it.
 #   2. WAVE BLOCK PATH. The shell Wave spawns for a block does NOT inherit the
 #      homebrew PATH, so a bare `tmux` is `command not found` (exit 127). We call
-#      tmux by ABSOLUTE path and `exec` it so the block *is* the attach.
+#      tmux by ABSOLUTE path (see mux_block_attach_cmd), and we deliberately do
+#      NOT `exec` it: a block that *is* the attach dies with it and leaves a dead
+#      terminal — a black screen swallowing every key, prefix included.
 set -euo pipefail
 
 SESS_DEFAULT="cockpit"
@@ -954,10 +961,9 @@ MSG
     exit 6
   fi
 
-  # Anchor on the LIVE tab (overriding any stale WAVETERM_TABID), and exec the
-  # mux by ABSOLUTE path because the Wave block's shell lacks the homebrew PATH.
-  if [ "$MUX" = tmux ]; then EXEC_CMD="exec '$MUX_BIN' attach -t '$SESS'"
-  else EXEC_CMD="exec '$MUX_BIN' attach '$SESS'"; fi
+  # Anchor on the LIVE tab (overriding any stale WAVETERM_TABID), and run the mux
+  # by ABSOLUTE path because the Wave block's shell lacks the homebrew PATH.
+  EXEC_CMD=$(mux_block_attach_cmd "$SESS" "$MUX_BIN")
   OUT=$(WAVETERM_TABID="$TAB" wsh run -c "$EXEC_CMD" 2>&1) || true
   NEWID=$(printf '%s' "$OUT" | grep -oE 'block:[0-9a-f-]+' | head -1 | cut -d: -f2)
   if [ -z "$NEWID" ]; then
@@ -1138,6 +1144,9 @@ selftest-tab)
   ;;
 selftest-wrapper)
   cmd_selftest_wrapper
+  ;;
+selftest-attach)
+  cmd_selftest_attach
   ;;
 push)
   have_mux
@@ -1416,5 +1425,5 @@ release)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt|selftest-tab|selftest-wrapper} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt|selftest-tab|selftest-wrapper|selftest-attach} [args]" >&2; exit 2 ;;
 esac
