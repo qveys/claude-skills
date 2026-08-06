@@ -1,6 +1,6 @@
 ---
 name: chantier-relais
-description: Transforme un plan ou gros projet en chantier exécutable par sessions Claude courtes et autonomes — fiches d'étapes autoportantes à petit contexte, relais automatique entre sessions (next.sh) avec le bon modèle par étape, et pilotage à distance (tailscale ssh, tmux, iPhone). Utiliser dès que l'utilisateur veut découper un plan en étapes exécutables par petites sessions, mentionne « chantier », « relais », « fiches d'exécution », « une étape par session », « /clear entre chaque étape », veut router le modèle (Sonnet/Opus/Haiku) étape par étape, ou veut suivre/piloter un projet multi-sessions à distance. S'applique aussi quand un plan existant est trop gros pour une seule session Claude.
+description: Utiliser dès que l'utilisateur veut découper un plan ou un gros projet en étapes exécutables par petites sessions Claude autonomes, mentionne « chantier », « relais », « fiches d'exécution », « une étape par session », « /clear entre chaque étape », veut router le modèle (Sonnet/Opus/Haiku/Fable) étape par étape, veut suivre ou piloter un chantier multi-sessions à distance (tailscale ssh, tmux, iPhone), ou quand un plan existant est trop gros pour une seule session Claude.
 ---
 
 # Chantier-relais — plan d'abord, exécution par fiches, relais automatique
@@ -54,23 +54,11 @@ Lancement : `./execution/next.sh` depuis la racine du projet — idéalement dan
 
 Tout l'état vit dans deux endroits accessibles à distance : **STATE.md** (fichier) et **le pane tmux** du relais. Le script `scripts/relay-ctl.sh` de ce skill les pilote — localement ou via `tailscale ssh` depuis n'importe quelle machine du tailnet (Mac, iPhone avec Termius/app Tailscale) :
 
-```bash
-RC=~/.claude/skills/chantier-relais/scripts/relay-ctl.sh
-$RC status --dir <projet>          # NEXT, session tmux, ce qui tourne, dernières lignes
-$RC watch [n] --dir <projet>       # voir le pane (n lignes)
-$RC set step-0.2 --dir <projet>    # changer NEXT (aussi: PAUSE, FIN)
-$RC go --dir <projet>              # (re)lancer le relais — refuse si claude tourne déjà
-$RC say "réponse à la question" …  # répondre à la session Claude en cours — refuse si c'est un shell
-$RC exit --dir <projet>            # envoyer /exit → passage de relais à distance
-$RC stop --dir <projet>            # Ctrl+C (interrompre relais/session)
-
-# Depuis une autre machine :
-tailscale ssh <user>@<host> '~/.claude/skills/chantier-relais/scripts/relay-ctl.sh status --dir <projet>'
-```
+`~/.claude/skills/chantier-relais/scripts/relay-ctl.sh <status|watch [n]|set <val>|go|say <texte>|exit|stop> --dir <projet>`
 
 La session ciblée est celle **du projet** : `relay-<slug>*` ou `cockpit-<slug>*`, `<slug>` venant du nom de dossier de `--dir` (`--session` / `RELAY_SESSION` pour forcer). Aucune session au slug étranger n'est choisie d'office — sans candidate, la commande le dit et s'arrête plutôt que de piloter le pane d'un autre travail.
 
-Les gardes de `say`/`exit`/`go` (shell vs claude au premier plan) évitent le pire du pilotage aveugle : injecter du texte dans un shell ou une commande dans un chat. Pour le détail (vue navigateur lecture seule via ttyd + `tailscale serve` — jamais funnel —, usage iPhone, sécurité), lire `references/remote-control.md`.
+Les gardes de `say`/`exit`/`go` (shell vs claude au premier plan) évitent le pire du pilotage aveugle : injecter du texte dans un shell ou une commande dans un chat. Détail des commandes, exemples `tailscale ssh`, usage iPhone et vue navigateur en lecture seule : `references/remote-control.md`.
 
 ## Anti-patterns
 

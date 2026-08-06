@@ -93,4 +93,3 @@ Mettre à jour `STATE.md` → commit → push → annoncer de taper `/exit` (rel
 - Prévoir une **fiche d'inventaire/réalité** tôt (qu'est-ce que l'outil/l'existant couvre déjà ?) et noter dans STATE.md qu'elle peut réduire ou annuler des fiches suivantes.
 - Les étapes exigeant l'humain (créer des tokens, fournir une liste) : les isoler dans leur propre fiche en début de chaîne, et documenter dans STATE.md le détail exact pour les faire — c'est ce qui rend `PAUSE` actionnable à distance.
 - Numéroter phase.étape (`step-2.3`) et garder le slug parlant : le relais matche `step-X.Y-*.md`.
-```

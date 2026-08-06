@@ -79,6 +79,9 @@ wait_idle() {
 
 # Un claude tourne-t-il quelque part sous le pane ? (il peut être enfant direct
 # du shell, ou petit-enfant via next.sh — pane_current_command ne suffit pas)
+# Comparaison sur le basename, exacte (pas de sous-chaîne) : c'est la garde de
+# say/exit, un faux positif (ex. un wrapper "claude-notify") écrirait à l'aveugle
+# dans un shell nu.
 claude_under() {
   ps_out=$(ps -axo pid=,ppid=,comm=)
   set_pids=" $1 "; grew=1
@@ -89,7 +92,7 @@ claude_under() {
       case "$set_pids" in *" $pid "*) continue ;; esac
       set_pids="$set_pids$pid "
       grew=1
-      case "$comm" in *claude*) return 0 ;; esac
+      case "${comm##*/}" in claude) return 0 ;; esac
     done <<EOF
 $ps_out
 EOF
@@ -124,7 +127,8 @@ case "$CMD" in
     ;;
   set)
     [ -r "$STATE" ] || die "pas de $STATE"
-    case "$TEXT" in step-*|PAUSE|FIN) : ;; *) die "valeur invalide « $TEXT » (attendu : step-X.Y, PAUSE ou FIN)" ;; esac
+    printf '%s' "$TEXT" | grep -Eq '^step-[0-9]+(\.[0-9]+)+$|^(PAUSE|FIN)$' \
+      || die "valeur invalide « $TEXT » (attendu : step-X.Y, PAUSE ou FIN)"
     tmp="$STATE.tmp.$$"
     sed "s/^NEXT:.*/NEXT: $TEXT/" "$STATE" > "$tmp" && mv "$tmp" "$STATE" && echo "✓ $(next_line)"
     ;;
