@@ -18,6 +18,11 @@ verdict contredisant une disposition — c'est le feedback explicite de l'utilis
 
 ## Verdicts (dans cet ordre de test)
 
+**Hors verdicts — `TYPE_DERNIERE_ENTREE=PARSE_ERROR`** : la dernière ligne du transcript est
+illisible (ou le fichier est vide) ; ne pas juger cette ligne, ne pas la compter dans les
+totaux de verdicts — la signaler à part (section ⚠️ du rendu) et relire la vraie fin du
+fichier (`tail -n 120 <fichier> | jq`) avant tout classement.
+
 ### VIDE
 - Pas de sujet ET pas de texte assistant en fin de fichier — c'est l'unique critère,
   appliqué par `collect.sh` lui-même.
@@ -56,6 +61,8 @@ Au moins un de ces signaux :
 - Erreur terminale : « Request timed out », « api_error », réponse tronquée.
 - `intr>0` sans message de clôture postérieur.
 - FIN vide sur une session HUMAIN non triviale.
+- FIN porte le marqueur `[FIN=USER : …]` : la session s'arrête sur un message utilisateur
+  resté sans réponse (la demande citée dans le marqueur est le « reste à faire »).
 
 **Rendu** : ❌ si le signal déclencheur est une erreur terminale (« Request timed out »,
 « api_error », réponse tronquée) ; ⏸️ dans tous les autres cas (interruption `intr>0`, FIN

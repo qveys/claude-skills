@@ -48,7 +48,10 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
 
 3. **Verdicts.** Lire `references/verdicts.md` et appliquer les règles sur chaque **ligne de
    données restante** (celles qui ne commencent pas par `# AGG|`), dans l'ordre (VIDE → AUTO →
-   À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE). Les lignes `# AGG|AUTO_SECREVIEW|…` et
+   À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE). Exception d'extraction : une ligne avec
+   `TYPE_DERNIERE_ENTREE=PARSE_ERROR` (transcript illisible) ne reçoit AUCUN verdict — la
+   signaler à part dans la section ⚠️ et l'exclure des compteurs, jusqu'à relecture manuelle
+   (`tail -n 120 <fichier> | jq`). Les lignes `# AGG|AUTO_SECREVIEW|…` et
    `# AGG|VIDE|…` sont déjà pré-agrégées par `collect.sh` : ne pas les rejuger une par une, se
    recopier telles quelles dans les sections AUTO/vides du rendu avec leurs compteurs
    (total/conclues/a_examiner/findings_listes ou total/ids) ; `# AGG|PREWARM|…` n'entre dans
@@ -116,7 +119,8 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
    - `CLOS` (fait, caduc, abandonné, traité hors Claude) → filtré dès `collect.sh`, ne
      réapparaîtra plus jamais dans un récap.
    - `ATTEND` / `REPRENDRE` → la session reste listée, avec la note de Quentin en contexte.
-   Avant de juger (étape 3), lire `~/.claude/ou-en-suis-je/dispositions.tsv` s'il existe :
+   Avant de juger (étape 3), lire `${OEJ_DIR:-~/.claude/ou-en-suis-je}/dispositions.tsv`
+   s'il existe (même convention de chemin que `collect.sh` et `dispose.sh`) :
    les dispositions priment sur les règles de verdict (les notes ATTEND/REPRENDRE remplacent
    le « reste à faire » déduit). C'est cette boucle qui empêche le récap de se tromper deux
    fois sur la même session.
