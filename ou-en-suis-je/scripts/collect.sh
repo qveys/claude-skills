@@ -12,6 +12,8 @@
 #   intr=N               : occurrences de « Request interrupted » dans les 8 dernières lignes
 #   TAG                  : HUMAIN | AUTO_SECREVIEW | PREWARM | SIDECHAIN
 #   FIN                  : queue (~260 car.) du dernier texte assistant — la matière première du verdict
+#                          (préfixée du marqueur « [FIN=USER : …] » quand la dernière entrée est un
+#                          message utilisateur resté sans réponse — cf. references/verdicts.md)
 #
 # Sortie PAR DÉFAUT pré-triée : les reviews sécurité CI (TAG=AUTO_SECREVIEW), les préchauffages
 # (TAG=PREWARM, LaunchAgent) et les sessions vides (ni sujet ni texte assistant) ne sortent plus en
@@ -45,18 +47,35 @@ PROJECT=""
 EXCLUDE=""
 INCLUDE_SIDECHAINS=0
 RAW=0
+USAGE="usage : collect.sh [--days N] [--project SUBSTR] [--exclude ID8] [--include-sidechains] [--raw]"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --days) DAYS="$2"; shift 2 ;;
-    --project) PROJECT="$2"; shift 2 ;;
-    --exclude) EXCLUDE="$2"; shift 2 ;;
+    --days|--project|--exclude)
+      # Valeur obligatoire : sans ce garde, « collect.sh --days » déréférencerait $2 sous set -u.
+      [ $# -ge 2 ] || { echo "$USAGE" >&2; exit 2; }
+      case "$1" in
+        --days) DAYS="$2" ;;
+        --project) PROJECT="$2" ;;
+        --exclude) EXCLUDE="$2" ;;
+      esac
+      shift 2 ;;
     --include-sidechains) INCLUDE_SIDECHAINS=1; shift ;;
     --raw) RAW=1; shift ;;
-    *) echo "argument inconnu : $1" >&2; exit 2 ;;
+    *) echo "argument inconnu : $1" >&2; echo "$USAGE" >&2; exit 2 ;;
   esac
 done
+# --days doit être un entier strictement positif : un « find -mtime -abc » ou « -0 » casserait
+# la collecte avec une erreur cryptique au lieu d'un message clair.
+case "$DAYS" in
+  ''|*[!0-9]*|0) echo "--days doit être un entier > 0 (reçu : « $DAYS »)" >&2; exit 2 ;;
+esac
 
 command -v jq >/dev/null 2>&1 || { echo "jq est requis (brew install jq / apt install jq)" >&2; exit 3; }
+# strflocaltime() (jq ≥ 1.6) est indispensable à la colonne DERNIERE_ACTIVITE : sans ce garde,
+# un jq trop ancien ferait silencieusement retomber chaque ligne sur le repli stat (mtime),
+# faussant le regroupement « jour par jour » — mieux vaut échouer tout de suite, clairement.
+jq -n 'now | strflocaltime("%Y")' >/dev/null 2>&1 \
+  || { echo "jq ≥ 1.6 requis : strflocaltime() est absent de ce jq ($(jq --version 2>/dev/null || echo '?'))" >&2; exit 3; }
 
 PROJ_DIR="$HOME/.claude/projects"
 if [ ! -d "$PROJ_DIR" ]; then
@@ -121,6 +140,9 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
   _last1=""
   [ "$n120" -gt 0 ] && _last1="${tail120[$((n120-1))]}"
   ltype=$(jq -r '.type // "?"' <<<"$_last1" 2>/dev/null || echo 'PARSE_ERROR')
+  # Fichier vide → _last1 vide → jq ne sort rien MAIS sort en succès : sans ce repli, la
+  # colonne TYPE_DERNIERE_ENTREE resterait vide et casserait la stabilité des colonnes.
+  [ -n "$ltype" ] || ltype='PARSE_ERROR'
   printf -v _win8 '%s\n' "${tail120[@]:$start8}"
   intr=$(grep -c 'Request interrupted' <<<"$_win8" || true)
 
@@ -157,6 +179,17 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
   # les élague pour ne jamais démarrer FIN sur un caractère tronqué.
   fin=$(printf '%s' "$fin" | tail -c 260 | perl -pe 's/^[\x80-\xBF]+//')
   [ -n "$fin" ] || fin="(aucun texte assistant en fin de fichier)"
+  # Session close sur un message UTILISATEUR resté sans réponse (dernière entrée type=user) :
+  # FIN ne montrerait qu'un ancien bilan assistant et masquerait la demande en attente. On
+  # préfixe FIN d'un marqueur explicite, avec la demande si elle est extractible — la règle de
+  # verdict correspondante (À_REPRENDRE, rendu ⏸️) vit dans references/verdicts.md.
+  if [ "$ltype" = "user" ]; then
+    lastu=$(jq -r 'select(.type=="user") | .message.content | if type=="string" then . else (.[]? | select(.type=="text") | .text) end' <<<"$_win120" 2>/dev/null \
+      | grep -vE '^[[:space:]]*(<|Caveat)' | tail -n 1 | cut -c 1-120 \
+      | perl -pe 's/(?:[\xC2-\xDF]|[\xE0-\xEF][\x80-\xBF]{0,1}|[\xF0-\xF4][\x80-\xBF]{0,2})$//' \
+      | sed 's/|/¦/g' || true)
+    fin="[FIN=USER${lastu:+ : $lastu}] $fin"
+  fi
 
   line=$(printf '%s|%s|%s|%sKo|%s|intr=%s|%s|%s|…%s' \
     "$proj" "$id" "$ts" "$size_kb" "$ltype" "$intr" "$tag" "$subject" "$fin")
