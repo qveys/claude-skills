@@ -41,6 +41,7 @@ tailscale serve --bg 7681                                              # exposé
 
 ## Sécurité et limites
 
+- La session est choisie par le **slug du projet** (`relay-<slug>*` / `cockpit-<slug>*` dérivés de `--dir`), jamais « la dernière session cockpit-\* de la machine » : sur un poste qui en fait tourner plusieurs, ce repli visait le pane d'un autre travail — typiquement un shell SSH distant, où `stop` aurait envoyé un Ctrl+C et `go` une commande. Forcer avec `--session <nom>` (qui sert aussi de nom à la session créée par `go`) ou `RELAY_SESSION`.
 - `say`/`exit` refusent d'écrire si aucun Claude ne tourne dans le pane (sinon le texte serait exécuté par le shell) ; `go` refuse si le pane est occupé (sinon la commande serait tapée dans le chat de la session en cours). Ces gardes reposent sur la détection d'un processus `claude` sous le pane — fiable pour le relais standard, à revérifier si le pane fait tourner autre chose d'exotique.
 - Tout ce qui passe par `say` arrive comme message utilisateur dans la session Claude, avec les mêmes pouvoirs que le clavier local : ne l'utiliser que sur un canal de confiance (tailnet).
 - `set` ne prend effet qu'au prochain tour de boucle du relais : si une session est en cours, elle termine sa fiche d'abord — c'est voulu (jamais d'interruption à chaud ; pour interrompre vraiment : `stop`).
