@@ -154,12 +154,20 @@ find_registry_session() {  # $1 requested prefix (raw, "" = none given) $2 norma
   return 2
 }
 
-# Newest alive tmux session matching cockpit-<prefix>-* (lex sort ≈ time suffix).
+# Newest alive tmux session matching cockpit-<prefix>-* (lex sort ≈ time
+# suffix). Claimed sessions (I3, claim.sh) are excluded from the scan
+# entirely — by anyone, not just other agents: a session already claimed
+# by ME would have surfaced via find_registry_session (étape 1) already,
+# so reaching here claimed-by-me would only mean a stale/inconsistent
+# registry, not a legitimate hit; a session claimed by someone else must
+# never be silently handed to a different agent (spec v12 §2, step-1.5).
 newest_session_for_prefix() {
-  local prefix="$1" best=""
+  local prefix="$1" best="" s slug
   local pattern="cockpit-${prefix}-"
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    slug=$(session_slug "$s")
+    claim_is_claimed "$slug" && continue
     if [ -z "$best" ] || [[ "$s" > "$best" ]]; then
       best="$s"
     fi
@@ -371,7 +379,9 @@ find_reusable_session() {
     return 2
   fi
 
-  if remembered=$(last_session 2>/dev/null) && session_safe_to_reuse "$remembered"; then
+  if remembered=$(last_session 2>/dev/null) \
+     && ! claim_is_claimed "$(session_slug "$remembered")" \
+     && session_safe_to_reuse "$remembered"; then
     printf '%s\n' "$remembered"
     return 0
   fi
@@ -380,6 +390,46 @@ find_reusable_session() {
     return 0
   fi
   return 1
+}
+
+# Reprise d'une session legacy (spec v12 §2, step-1.5): find_reusable_session
+# only ever hands back a session unclaimed by anyone (claim_is_claimed
+# exclusion, above) THROUGH ITS LEGACY FALLBACK — a registry hit (étape 1)
+# always returns an already-mine-claimed session instead. Callers tell the
+# two apart post-hoc (! claim_is_claimed on the resolved name) rather than
+# via a global set inside find_reusable_session, because that function is
+# routinely called through `$(...)` (including by selftest-adopt cases
+# 5/6a-6c/16 directly) — a global assigned inside a command-substitution
+# subshell would never reach the caller.
+#
+# A never-claimed session's state is unknown, exactly like an adopted one
+# (never created by us) — same argument as fiche 1.4, reusing its probe
+# mechanic verbatim (adopt_run_probe/adopt_print_probe). Unlike adoption
+# there is no pre-claim to consume: the transition is the direct
+# ABSENT -> POSSÉDÉ form of claim_create (ABSENT -> PRÉ-CLAIM is the OTHER
+# thing that primitive is used for, at wrapper bootstrap — see claim.sh).
+# A failed probe reverts the claim to a "released" pré-claim (claim_release)
+# rather than dropping it back to ABSENT: claim_is_claimed tests existence
+# only, so "released" still counts as claimed and keeps this same session
+# from being re-offered to the next naive spawn in a probe-fail loop — it
+# remains reachable only via the explicit WSH_COCKPIT_ADOPT mechanism.
+LEGACY_RESULT=""
+try_legacy_claim() {  # $1 sess $2 normalized prefix -> rc 0 claimed+probed, 1 raced/probe failed
+  LEGACY_RESULT=""
+  local sess="$1" norm="${2:-}" slug key
+  slug=$(session_slug "$sess")
+  key=$(agent_claim_key)
+  claim_create "$slug" "$key" || return 1
+  adopt_run_probe "$sess"
+  if [ "$ADOPT_PROBE_RC" -ne 0 ]; then
+    claim_release "$slug" "$key"
+    return 1
+  fi
+  prefix_write "$sess" "$norm"
+  echo "legacy cockpit '$sess' entered the registry (claimed + probed)"
+  adopt_print_probe "$sess"
+  LEGACY_RESULT="$sess"
+  return 0
 }
 
 # -- Adoption (étape 2, spec v12 §2) --------------------------------------

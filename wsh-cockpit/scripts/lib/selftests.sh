@@ -2401,6 +2401,133 @@ cmd_selftest_adopt() {
       "rcreg16=$rcreg16 rclegacy16=$rclegacy16 legacy16='$legacy16' rcadopt16=$rcadopt16 result16='$result16'"
   fi
 
+  # 17-22 (step-1.5, spec v12 §2, étape 3 "scan"): the cockpit-<prefix>-*
+  # scan excludes every claimed session (I3), a claimed sibling never
+  # over-matches a shorter slug, an unclaimed legacy session gets claimed +
+  # probed on reuse, and `--force` bypasses all of the above while leaving
+  # existing claims untouched.
+  unset WSH_COCKPIT_ADOPT
+  rm -f "$(state_file)" 2>/dev/null || true
+
+  # 17. Les trois formes de claim (I3 : définitif d'un tiers, pré-claim du
+  #     wrapper, transfert .won-* en cours) excluent TOUTES la session du
+  #     scan — une quatrième session, non claimée, reste seule éligible même
+  #     si elle est lexicographiquement la plus ANCIENNE du groupe (sans
+  #     l'exclusion, `newest_session_for_prefix` retiendrait la plus RÉCENTE,
+  #     qui est ici systématiquement une des trois claimées).
+  pfx17="selftest-adopt-scan17-$$"
+  norm17=$(normalize_prefix "$pfx17")
+  s17_free="cockpit-${norm17}-100000"
+  s17_def="cockpit-${norm17}-200000"
+  s17_pre="cockpit-${norm17}-300000"
+  s17_won="cockpit-${norm17}-400000"
+  create_session "$s17_free"
+  create_session "$s17_def"
+  create_session "$s17_pre"
+  create_session "$s17_won"
+  created+=("$s17_free" "$s17_def" "$s17_pre" "$s17_won")
+  claim_create "$(session_slug "$s17_def")" "someone-else-17-$$" >/dev/null 2>&1
+  claim_create "$(session_slug "$s17_pre")" "user-preopen-17" >/dev/null 2>&1
+  claim_create "$(session_slug "$s17_won")" "user-preopen-17w" >/dev/null 2>&1
+  claim_consume "$(session_slug "$s17_won")" "$$" >/dev/null 2>&1
+  export WSH_COCKPIT_AGENT="scan17agent-$$"
+  set +e
+  r17=$(find_reusable_session "$pfx17"); rc17=$?
+  set -e
+  if [ "$rc17" -eq 0 ] && [ "$r17" = "$s17_free" ]; then
+    report_adopt_case "17 les trois formes de claim excluent le scan (définitif/pré-claim/.won-*)" 0
+  else
+    report_adopt_case "17 les trois formes de claim excluent le scan (définitif/pré-claim/.won-*)" 1 \
+      "rc17=$rc17 r17='$r17' (attendu '$s17_free')"
+  fi
+
+  # 18. Le glob exact (I3) ne sur-matche pas une sœur suffixée "-1" : un
+  #     claim définitif sur le slug SIBLING ("<slug>-1") ne doit jamais
+  #     faire passer le slug de base pour claimé.
+  pfx18="selftest-adopt-scan18-$$"
+  norm18=$(normalize_prefix "$pfx18")
+  s18_base="cockpit-${norm18}-100000"
+  s18_sibling="${s18_base}-1"
+  create_session "$s18_base"
+  create_session "$s18_sibling"
+  created+=("$s18_base" "$s18_sibling")
+  claim_create "$(session_slug "$s18_sibling")" "someone-else-18-$$" >/dev/null 2>&1
+  base18_claimed=1; claim_is_claimed "$(session_slug "$s18_base")" || base18_claimed=0
+  set +e
+  r18=$(newest_session_for_prefix "$norm18"); rc18=$?
+  set -e
+  if [ "$base18_claimed" -eq 0 ] && [ "$rc18" -eq 0 ] && [ "$r18" = "$s18_base" ]; then
+    report_adopt_case "18 le claim d'une sœur -1 ne sur-matche pas le slug de base" 0
+  else
+    report_adopt_case "18 le claim d'une sœur -1 ne sur-matche pas le slug de base" 1 \
+      "base18_claimed=$base18_claimed rc18=$rc18 r18='$r18' (attendu '$s18_base')"
+  fi
+
+  # 19. Reprise d'une session legacy jamais claimée : `try_legacy_claim`
+  #     pose le claim du créateur (ma clé) ET exécute la sonde, avec PREUVE
+  #     qu'elle a réellement tourné dans le pane (même exigence que le cas 9,
+  #     fiche 1.4) — pas seulement rc=0.
+  pfx19="selftest-adopt-scan19-$$"
+  norm19=$(normalize_prefix "$pfx19")
+  s19="cockpit-${norm19}-190000"
+  create_session "$s19"
+  created+=("$s19")
+  export WSH_COCKPIT_AGENT="legacy19agent-$$"
+  set +e
+  try_legacy_claim "$s19" "$norm19" >/dev/null 2>&1
+  rc19=$?
+  set -e
+  k19=$(claim_read_key "$(claim_path "$(session_slug "$s19")")" 2>/dev/null || true)
+  p19=$(prefix_read "$s19" 2>/dev/null || true)
+  probe19_ok=1; printf '%s\n' "$ADOPT_PROBE_OUT" | grep -q '^WSH_SITUATE_HOST=' && probe19_ok=0
+  if [ "$rc19" -eq 0 ] && [ "$LEGACY_RESULT" = "$s19" ] && [ "$k19" = "legacy19agent-$$" ] \
+     && [ "$p19" = "$norm19" ] && [ "$probe19_ok" -eq 0 ]; then
+    report_adopt_case "19 reprise legacy : claim du créateur posé + sonde PROUVÉE exécutée" 0
+  else
+    report_adopt_case "19 reprise legacy : claim du créateur posé + sonde PROUVÉE exécutée" 1 \
+      "rc19=$rc19 LEGACY_RESULT='$LEGACY_RESULT' k19='$k19' p19='$p19' probe19_ok=$probe19_ok probe_out='$ADOPT_PROBE_OUT'"
+  fi
+
+  # 20. `spawn --force` : création directe même avec un candidat legacy
+  #     libre présent (scan/legacy-claim jamais atteints — le candidat reste
+  #     non-claimé après coup) ET les claims déjà possédés par l'agent
+  #     restent intacts. `wsh` est masqué du PATH pour ce seul sous-processus
+  #     (open échoue tôt sur "wsh not found", exit 5, AVANT tout wsh run —
+  #     donc aucun effet Wave ; création+claim ont déjà eu lieu avant ce
+  #     point, sous le même `set -e` ligne-à-ligne).
+  sess20_existing="selftest-adopt-force-existing20-$$"
+  WSH_COCKPIT_AGENT="$ADOPT_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$sess20_existing" >/dev/null 2>&1
+  created+=("$sess20_existing")
+  slug20_existing=$(session_slug "$sess20_existing")
+  key20_before=$(claim_read_key "$(claim_path "$slug20_existing")" 2>/dev/null || true)
+
+  pfx20="selftest-adopt-force20-$$"
+  norm20=$(normalize_prefix "$pfx20")
+  s20_free="cockpit-${norm20}-999999"
+  create_session "$s20_free"
+  created+=("$s20_free")
+
+  NOWSH_PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  rm -f "$(state_file)" 2>/dev/null || true
+  set +e
+  out20=$(WSH_COCKPIT_AGENT="$ADOPT_KEY" PATH="$NOWSH_PATH" "$SCRIPT_DIR/wsh-live.sh" spawn "$pfx20" --force 2>&1)
+  set -e
+  sess20_new=$(printf '%s\n' "$out20" | sed -n "s/^created fresh .* session '\(.*\)'\$/\1/p")
+  created+=("${sess20_new:-selftest-adopt-force20-none-$$}")
+
+  free20_untouched=1; claim_is_claimed "$(session_slug "$s20_free")" || free20_untouched=0
+  key20_after=$(claim_read_key "$(claim_path "$slug20_existing")" 2>/dev/null || true)
+  newclaim20_key=""
+  [ -n "$sess20_new" ] && newclaim20_key=$(claim_read_key "$(claim_path "$(session_slug "$sess20_new")")" 2>/dev/null || true)
+  if [ -n "$sess20_new" ] && [ "$sess20_new" != "$s20_free" ] && mux_has "$sess20_new" \
+     && [ "$free20_untouched" -eq 0 ] && [ "$key20_before" = "$ADOPT_KEY" ] \
+     && [ "$key20_after" = "$ADOPT_KEY" ] && [ "$newclaim20_key" = "$ADOPT_KEY" ]; then
+    report_adopt_case "20 spawn --force : session neuve, candidat legacy libre ignoré, claims intacts" 0
+  else
+    report_adopt_case "20 spawn --force : session neuve, candidat legacy libre ignoré, claims intacts" 1 \
+      "sess20_new='$sess20_new' free20_untouched=$free20_untouched key20_before='$key20_before' key20_after='$key20_after' newclaim20_key='$newclaim20_key' out20='$out20'"
+  fi
+
   rm -f "$(state_file)" 2>/dev/null || true
   if [ "$had_agent9" -eq 1 ]; then export WSH_COCKPIT_AGENT="$saved_agent9"
   else unset WSH_COCKPIT_AGENT; fi

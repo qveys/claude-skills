@@ -490,6 +490,18 @@ spawn)
         echo "ambiguous: more than one of your sessions (registry) matches and none is the last-used one — pass a prefix to disambiguate, or --force for a fresh cockpit" >&2
         exit 2
       fi
+      # find_reusable_session hands back an unclaimed session only via its
+      # legacy fallback (a registry hit is always already claimed by ME) —
+      # step-1.5, spec v12 §2: entering the registry now (claim + probe) so
+      # this parc antérieur session stops being silently shareable.
+      if [ "$RC" -eq 0 ] && ! claim_is_claimed "$(session_slug "$SESS")"; then
+        if try_legacy_claim "$SESS" "$NORM"; then
+          SESS="$LEGACY_RESULT"
+          ADOPTED_NOW=1
+        else
+          RC=1
+        fi
+      fi
     fi
   else
     RC=1

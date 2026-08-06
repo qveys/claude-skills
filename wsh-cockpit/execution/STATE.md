@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-06 · **Étape courante : step-1.4 terminée et commitée (8a2689d), au tour de step-1.5**
+màj : 2026-08-06 · **Étape courante : step-1.5 terminée, au tour de step-1.6**
 
-NEXT: step-1.5
+NEXT: step-1.6
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -37,7 +37,7 @@ NEXT: step-1.5
 | 1.2 | Primitives du claim (`lib/claim.sh`) + `selftest-claim` | Sonnet | ✅ 2026-08-06 |
 | 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ✅ 2026-08-06 |
 | 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ✅ 2026-08-06 |
-| 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ☐ |
+| 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ✅ 2026-08-06 |
 | 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ☐ |
 | 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ☐ |
 | 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ☐ |
@@ -203,3 +203,45 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   trouvé pendant le passage au vert. Non-régression : `selftest-guard` 41/41, `selftest-claim`
   8/8, aucune session tmux ni fichier temporaire résiduel après coup. Étape 3 (scan) reste hors
   périmètre, reportée à 1.5 comme prévu.
+- 2026-08-06 (step-1.5, Sonnet) : **scan étape 3 livré** — invariant I3 (« claimé, par
+  quiconque, dans n'importe quel état passé ABSENT ») formalisé en prédicat `claim_is_claimed()`
+  (`lib/claim.sh`) : fichier de claim exact **ou** son `.won-<pid>` — délibérément pas un glob
+  `<slug>*`, qui sur-matcherait une sœur suffixée (`<slug>-1`). `newest_session_for_prefix()` et
+  la branche `remembered` de `find_reusable_session()` (`lib/session.sh`) excluent désormais
+  toute session claimée du balayage `cockpit-<préfixe>-*`. Reprise d'une session legacy trouvée
+  libre : nouvelle fonction `try_legacy_claim()` (claim du créateur posé via `claim_create`,
+  sonde `adopt_run_probe`/`adopt_print_probe` réutilisée telle quelle depuis 1.4 — gate sur le rc
+  de la sonde, `claim_release` en cas d'échec plutôt qu'un retour à ABSENT, pour ne pas
+  ré-offrir la même session en boucle). Décision de conception : `try_legacy_claim` est une
+  fonction **séparée**, appelée directement (jamais via `$(...)`) par `wsh-live.sh` après
+  extraction du nom — `find_reusable_session` doit rester pure et sans effet de bord car les cas
+  5/6a-6c/16 de `selftest-adopt` l'appellent directement en substitution de commande et
+  n'attendent qu'un nom en retour ; y injecter le claim+sonde aurait perdu leur état global
+  (`LEGACY_RESULT`/`ADOPT_PROBE_OUT`) dans le sous-shell de la substitution. `wsh-live.sh` :
+  câblage étape 3 entre l'étape 2 (adoption) et la création — `! claim_is_claimed` distingue
+  après coup un hit registre (déjà mien) d'un hit legacy (à réclamer), sans indicateur interne
+  qui se perdrait à travers la substitution. `spawn --force` confirmé inchangé : le bloc
+  `if [ "$FORCE" -eq 0 ]` saute intégralement les étapes 1-2-3, jamais de claim existant de
+  l'agent touché. 4 nouveaux cas `selftest-adopt` (17-20) : les trois formes de claim (définitif
+  d'un tiers, pré-claim `user-preopen-*`, `.won-*` en cours) excluent le scan tandis qu'une
+  quatrième session libre reste seule éligible ; une sœur `-1` claimée ne sur-matche jamais le
+  slug de base ; reprise legacy prouvée par claim posé + sonde réellement exécutée (grep de
+  `WSH_SITUATE_HOST=` dans `ADOPT_PROBE_OUT`, même exigence de preuve que le cas 9) ; `spawn
+  --force` en sous-processus réel avec un candidat legacy libre présent, testé sans risque de
+  popup Wave via un `PATH` restreint masquant `wsh` pour ce seul appel (`command -v wsh` échoue
+  tôt dans `open`, exit 5, *avant* tout `wsh run` — la création + le claim, eux, ont déjà eu
+  lieu plus haut dans le script sous le même `set -e`), assertant session neuve + candidat
+  libre intact + claims préexistants de l'agent inchangés. **RED-first démontré en deux temps**
+  (deux mécanismes distincts à isoler) : (1) `claim_is_claimed` et `try_legacy_claim` neutralisés
+  (implémentation triviale) → cas 17/18/19 rouges, 1-16 et 20 restent verts (20 est indépendant
+  de ces deux fonctions, `--force` les court-circuite) ; (2) implémentation réelle restaurée,
+  garde `if [ "$FORCE" -eq 0 ]` de `wsh-live.sh` neutralisée en `if true` → cas 20 rouge seul
+  (`sess20_new=''` : le chemin de reprise, pas de création, est emprunté — aucun message
+  « created fresh » à capturer), 1-19 restent verts. Implémentation réelle restaurée dans les
+  deux fichiers, plus aucune trace de neutralisation. Non-régression, deux passages complets en
+  session tmux jetable : `selftest-guard` 41/41, `selftest-claim` 8/8, `selftest-adopt` 20/20 —
+  un unique flake transitoire du cas 9 observé lors du premier passage combiné (probablement une
+  course avec le sweep `gc` best-effort lancé en tâche de fond par chaque `spawn`, comportement
+  déjà documenté ailleurs dans le code), non reproduit sur deux ré-exécutions immédiates
+  (isolée puis combinée) — pas de régression réelle. Étape 3 close ; 1.6 (`release`, keep sticky,
+  continuité `seq`) reste hors périmètre.

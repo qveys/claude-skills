@@ -58,6 +58,26 @@ claim_key_reserved() {  # $1 key -> rc 0 if reserved
   esac
 }
 
+# I3 (spec v12 §2, scan exclusion, step-1.5): a slug counts as CLAIMED — by
+# anyone, in any state past ABSENT (pré-claim, EN-COURS transfer, or
+# POSSÉDÉ) — when its definitive claim file exists OR a .won-<pid> transfer
+# is in flight. Deliberately NOT a glob on "<slug>*": that form would
+# over-match a sibling slug that merely starts with this one (e.g. slug
+# "foo" vs sibling "foo-1") — only the exact claim path, or that exact
+# path's own ".won-*" suffix, count. The glob below tolerates zero matches
+# under `set -euo pipefail` (bash 3.2, no nullglob): an unexpanded pattern
+# is left literal and `[ -e ]` on it is simply false (same idiom fixed for
+# claim.sh's own stale-marker counting in step-1.2).
+claim_is_claimed() {  # $1 slug -> rc 0 claimed, 1 free (ABSENT)
+  local slug="$1" path f
+  path=$(claim_path "$slug")
+  [ -e "$path" ] && return 0
+  for f in "$path".won-*; do
+    [ -e "$f" ] && return 0
+  done
+  return 1
+}
+
 # -- internal helpers -----------------------------------------------------
 
 # O_EXCL create: fails if $1 already exists. Used by every ABSENT-origin
