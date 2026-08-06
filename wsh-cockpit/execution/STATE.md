@@ -1,28 +1,32 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-06 · **Étape courante : step-1.4 implémentée (16/16 verts) mais NON commitée —
-bloquée sur 1Password verrouillé, commit signé impossible**
+màj : 2026-08-06 · **Étape courante : step-1.4 terminée et commitée (8a2689d), au tour de step-1.5**
 
-NEXT: PAUSE
+NEXT: step-1.5
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
 
 ## Bloqueurs actifs
 
-- **1Password verrouillé, commit signé de step-1.4 impossible** (2026-08-06) : `git commit -S`
-  échoue avec `1Password: agent returned an error` / `failed to write commit object`.
-  `ssh-add -l` → « The agent has no identities. » Un redémarrage de l'app (`quit` + `open -a
-  "1Password"`, précédent qui avait résolu le même symptôme pour step-1.3) n'a **pas** suffi
-  cette fois — le process 1Password est bien relancé (confirmé via System Events) mais l'agent
-  SSH ne réexpose toujours pas `id_ed25519_github_signing` après 15×2 s de scrutation, signe
-  probable d'un **coffre verrouillé** (déverrouillage biométrique/mot de passe maître requis,
-  action humaine hors de portée de cette session). **Action pilote demandée : déverrouiller
-  1Password** (Touch ID ou mot de passe maître), puis vérifier `ssh-add -l` fait apparaître
-  `id_ed25519_github_signing` avant de relancer le relais sur cette même fiche. Le code de
-  step-1.4 est complet et vert (16/16 `selftest-adopt`, 41/41 `selftest-guard`, 8/8
-  `selftest-claim`) et **déjà `git add`-é** (staged, non commité) — rien à refaire, seul le
-  commit + push restent à exécuter.
+- aucun.
+
+  *(résolu 2026-08-06 : le commit signé de step-1.4 échouait en deux temps distincts.
+  D'abord `1Password: failed to fill whole buffer` — le process 1Password était resté figé en
+  `--just-updated --should-restart` après une mise à jour, un `quit`/`open -a` en douceur ne
+  suffisait pas à le déloger ; il a fallu un `kill` dur du process bloqué puis une relance
+  propre. Ensuite, une fois l'IPC rétablie, `op-ssh-sign` répondait précisément
+  `1Password: No SSH private key found for the specified public key` — le vault contenant
+  `id_ed25519_github_signing` n'était plus coché dans 1Password → Réglages → Développeur →
+  Agent SSH après la mise à jour ; re-cocher le vault dans l'UI (action pilote) a résolu le
+  point. Par ailleurs, `ssh-add -l` dans l'environnement sandboxé de l'agent pointe sur l'agent
+  SSH macOS par défaut, pas sur le socket 1Password (`~/Library/Group
+  Containers/2BUA8C4S2C.com.1password/t/agent.sock`) — un `ssh-add -l` négatif depuis ce
+  contexte ne prouve donc rien sur l'état réel de l'agent 1Password ; seul `git commit -S` (ou
+  un `ssh-add -l` visant explicitement ce socket) est un test fiable. Le commit signé a fini
+  par passer avec `dangerouslyDisableSandbox` sur l'appel `git commit -S` — un sandbox par
+  défaut peut couper l'IPC avec l'app 1Password même quand tout le reste (vault déverrouillé,
+  clé présente) est correct.)*
 
 ## Avancement
 
@@ -32,7 +36,7 @@ NEXT: PAUSE
 | 1.1 | Inventaire de réalité et mesures préalables (`ln` no-clobber, DB Wave, `sql_quote`) | Sonnet | ✅ 2026-08-05 |
 | 1.2 | Primitives du claim (`lib/claim.sh`) + `selftest-claim` | Sonnet | ✅ 2026-08-06 |
 | 1.3 | Registre à la création (`spawn`/`start`, `prefix-<slug>`, étape 1) | Sonnet | ✅ 2026-08-06 |
-| 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ⏸ code vert, commit bloqué (1Password) |
+| 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ✅ 2026-08-06 |
 | 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ☐ |
 | 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ☐ |
 | 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ☐ |
