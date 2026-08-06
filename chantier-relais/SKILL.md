@@ -68,6 +68,8 @@ $RC stop --dir <projet>            # Ctrl+C (interrompre relais/session)
 tailscale ssh <user>@<host> '~/.claude/skills/chantier-relais/scripts/relay-ctl.sh status --dir <projet>'
 ```
 
+La session ciblée est celle **du projet** : `relay-<slug>*` ou `cockpit-<slug>*`, `<slug>` venant du nom de dossier de `--dir` (`--session` / `RELAY_SESSION` pour forcer). Aucune session au slug étranger n'est choisie d'office — sans candidate, la commande le dit et s'arrête plutôt que de piloter le pane d'un autre travail.
+
 Les gardes de `say`/`exit`/`go` (shell vs claude au premier plan) évitent le pire du pilotage aveugle : injecter du texte dans un shell ou une commande dans un chat. Pour le détail (vue navigateur lecture seule via ttyd + `tailscale serve` — jamais funnel —, usage iPhone, sécurité), lire `references/remote-control.md`.
 
 ## Anti-patterns
