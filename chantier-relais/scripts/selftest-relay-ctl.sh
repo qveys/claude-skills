@@ -20,9 +20,9 @@ ok() { n=$((n + 1)); echo "ok $n — $1"; }
 ko() { n=$((n + 1)); fail=$((fail + 1)); echo "FAIL $n — $1" >&2; }
 
 # --- environnement isolé -------------------------------------------------
-WRAP_DIR=$(mktemp -d "${TMPDIR:-/private/tmp}/selftest-rc-wrap.XXXXXX")
-PROJ=$(mktemp -d "${TMPDIR:-/private/tmp}/selftest-rc-proj.XXXXXX")
-PROJ2=$(mktemp -d "${TMPDIR:-/private/tmp}/selftest-rc-proj2.XXXXXX")
+WRAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/selftest-rc-wrap.XXXXXX")
+PROJ=$(mktemp -d "${TMPDIR:-/tmp}/selftest-rc-proj.XXXXXX")
+PROJ2=$(mktemp -d "${TMPDIR:-/tmp}/selftest-rc-proj2.XXXXXX")
 
 cleanup() {
   "$REAL_TMUX" -L "$SOCK" kill-server >/dev/null 2>&1 || true
@@ -63,7 +63,7 @@ wait_idle() {
 }
 
 # --- 1. l'astuce PATH → wrapper → socket isolé fonctionne ----------------
-tmux new-session -d -s "wrapper-check-$$" -c /private/tmp
+tmux new-session -d -s "wrapper-check-$$" -c "${TMPDIR:-/tmp}"
 if isotmux has-session -t "wrapper-check-$$" 2>/dev/null; then
   ok "wrapper tmux (PATH) route bien vers le socket isolé $SOCK"
 else
@@ -112,7 +112,7 @@ done
 # --- 3. sélection par slug : aucune session au bon slug -------------------
 # Une session d'un AUTRE projet existe sur le serveur isolé : elle ne doit
 # jamais être choisie à la place d'une candidate absente pour $PROJ.
-isotmux new-session -d -s "relay-autreprojet" -c /private/tmp
+isotmux new-session -d -s "relay-autreprojet" -c "${TMPDIR:-/tmp}"
 
 for cmd in watch exit stop; do
   out=$(rc "$cmd" --dir "$PROJ" 2>&1)
@@ -132,7 +132,7 @@ isotmux kill-session -t "relay-autreprojet" >/dev/null 2>&1 || true
 NOSLUG="$PROJ2/____"
 mkdir -p "$NOSLUG/execution"
 printf '# STATE — chantier sans slug\nNEXT: step-0.1\n' > "$NOSLUG/execution/STATE.md"
-isotmux new-session -d -s "relay--123456" -c /private/tmp
+isotmux new-session -d -s "relay--123456" -c "${TMPDIR:-/tmp}"
 out=$(rc watch --dir "$NOSLUG" 2>&1)
 code=$?
 if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'aucune session relais'; then
