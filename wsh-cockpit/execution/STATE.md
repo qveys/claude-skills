@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-06 · **Étape courante : step-1.6 terminée, au tour de step-1.7**
+màj : 2026-08-06 · **Étape courante : step-1.7 terminée, au tour de step-1.8**
 
-NEXT: step-1.7
+NEXT: step-1.8
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -39,7 +39,7 @@ NEXT: step-1.7
 | 1.4 | Adoption étape 2 (`WSH_COCKPIT_ADOPT`, sonde, rollback) | Sonnet | ✅ 2026-08-06 |
 | 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ✅ 2026-08-06 |
 | 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ✅ 2026-08-06 |
-| 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ☐ |
+| 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ✅ 2026-08-06 |
 | 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ☐ |
 | 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ☐ |
 | 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ☐ |
@@ -296,3 +296,59 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   une régression. Non-régression : `selftest-guard` 41/41, `selftest-claim` 8/8, aucune session
   tmux résiduelle après coup. 1.7 (`gc` : keep épargnées, hygiène des marqueurs, `doctor`) prend
   le relais.
+- 2026-08-06 (step-1.7, Sonnet) : **plancher `keep` + hygiène des marqueurs + check `doctor`
+  livrés**. Plancher : `gc_effective_idle(requested, is_keep)` (`lib/gc.sh`), fonction pure
+  séparée plutôt que d'enrichir `gc_should_kill` — préserve la testabilité directe de cette
+  dernière (déjà documentée comme délibérément pure) ; composée dans la boucle de `cmd_gc`
+  (`eff_idle=$(gc_effective_idle "$IDLE" "$is_keep")`, `keep_is_set` consultée par candidat).
+  24h de plancher (`GC_KEEP_FLOOR_IDLE=86400`) quel que soit un `--idle` plus court, avec repli
+  sur le balayage normal passé ce plancher (évite l'interblocage d'une keep que seul l'humain
+  peut fermer). Hygiène : `gc_hygiene_pass(dry_run, scope)` nettoie les familles de marqueurs
+  orphelins sous `$STATE_DIR` (`keep-`, `prefix-`, `seq-`, `oneshot-ssh-`, `pane-`, `tab-`,
+  `adopt-claim-`, `block-`, `cm-`, `last-session-`, `adopt-dead-warned-`) dont la session
+  sous-jacente est morte, jamais une session vivante — liveness décidée via `mux_list_sessions`
+  (générique tmux/zellij, jamais un appel backend direct) ; échec/incertitude de listage ⇒ passe
+  entièrement inerte (même philosophie que la garde own-session déjà présente dans `cmd_gc`).
+  Planchers anti-course : 5 min générique, 10 min (`2 × ${WSH_WAIT_TIMEOUT:-300}`, calculé à
+  l'appel pour respecter une valeur d'environnement personnalisée) pour les `.won-<pid>`, 24h pour
+  `adopt-dead-warned-<slug>` (nom réel du code, `session.sh:444` — la fiche évoque en prose
+  `adopt-warned-<clé>@<slug>`, divergence purement rédactionnelle, jamais un fichier réellement
+  émis sous ce nom). Passe dédiée `.won-<pid>` : pid mort (`kill -0`) **et** âge > plancher ⇒
+  session encore vivante → restauration au pré-claim via `claim_rollback` (jamais de manipulation
+  directe du chemin, cohérent avec la convention « recalculer, ne jamais faire circuler les
+  chemins » déjà en place dans `claim.sh`) ; session morte → purge. Le balayage générique
+  n'avale jamais un `.won-*` (exclu explicitement de la famille `adopt-claim-`). `block-`/`cm-`
+  : fermeture best-effort avant `rm` — extraction de `block_id_close_path(path)` depuis
+  `block_id_close(sess)` (`lib/wave.sh`, ce dernier devient un wrapper d'une ligne) car l'hygiène
+  ne connaît une session morte que par son slug, jamais son nom original nécessaire à
+  `block_id_file(sess)`. Isolation des tests : nouveau paramètre `scope` sur `gc_hygiene_pass`
+  (filtre par sous-chaîne de basename) — `selftest-gc` l'utilise avec un jeton unique par run
+  (`HYGPFX="selftestgc$"`) plutôt qu'un `STATE_DIR` isolé, cohérent avec la convention déjà en
+  place du dépôt (tester contre le vrai `STATE_DIR`, jamais un override). `doctor` : nouveau
+  check informatif (avant la section « extras »), signale un `adopt-claim-<slug>` dont la clé
+  n'est ni `released` ni `user-preopen-*` et dont la session tmux correspondante est idle +
+  inattachée au-delà de `${WSH_LIVE_GC_IDLE:-86400}` — jamais d'action, `doctor` reste strictement
+  lecture seule, et délibérément **pas** la même politique que l'hygiène de `gc` (une session
+  simplement idle n'est pas une preuve de `release` oubliée, seule une session **morte**
+  justifie une action automatique). Ce check n'entrait pas dans le périmètre RED-first de la
+  fiche (qui cible explicitement `selftest-gc`/`selftest-adopt`) — vérifié manuellement à la
+  place : fabrication d'une vraie session tmux idle + claim correspondant avec
+  `WSH_LIVE_GC_IDLE=1`, confirmation du `warn` attendu (et de l'`ok` en son absence), `doctor`
+  toujours exit 0 (les `warn` ne comptent pas dans `$fails`). **RED-first démontré** :
+  `git stash push --keep-index` ciblé sur `gc.sh`+`wave.sh` seuls (implémentation absente, tests
+  déjà en place) → `selftest-gc` cas 6/9/12/13/14 verts par construction (assertions négatives
+  sans mécanisme pour les violer), cas **7/8/10/11 rouges** comme attendu (familles de marqueurs
+  orphelins non nettoyées), script interrompu net au cas 15 (`gc_effective_idle: command not
+  found`) — preuve suffisante que les nouveaux cas exercent bien le nouveau code ; stash restauré,
+  **20/20 verts**. Non-régression, `selftest-guard` 41/41 et `selftest-claim` 8/8 verts à chaque
+  passage. `selftest-adopt` : 28/28 en isolation (deux passages propres), mais un flake du run
+  **combiné** guard+claim+adopt observé (cas 9 puis 28 puis, en isolation, 26 — jamais le même
+  cas, jamais reproductible à la demande) — même signature qu'un flake déjà noté aux journaux
+  1.5 et 1.6 (course avec le sweep `gc` best-effort lancé en tâche de fond par chaque
+  `spawn`/`start`, cf. `wsh-live.sh:463,593`). Vérification rigoureuse cette fois plutôt qu'une
+  simple présomption de continuité : le même run combiné rejoué sur le code **d'avant step-1.7**
+  (`gc.sh`/`wave.sh` restashés le temps du test) reproduit le même flake (« not the owning
+  agent », cas 25/28 cette fois) — confirmation directe A/B que ce n'est pas une régression
+  introduite ici. Aucune session tmux ni marqueur résiduel après coup (nettoyage manuel des
+  artefacts de la session de test elle-même, hors du périmètre des selftests). 1.8 (`open --tab
+  <nom>`) prend le relais.

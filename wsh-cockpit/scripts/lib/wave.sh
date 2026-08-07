@@ -142,19 +142,28 @@ block_id_store() {
   printf '%s\n' "$id" >"$(block_id_file "$sess")" 2>/dev/null || true
 }
 
-# Best-effort close of the block remembered for $sess, called from
-# teardown_session. Never fails the caller: no state file, no `wsh`, or a
-# block that already auto-closed ("not found") are all silently fine — only
-# the specific id `open` recorded is ever targeted, never a pane scan.
-block_id_close() {
-  local sess="$1" bf id
-  bf=$(block_id_file "$sess")
+# Best-effort close of a block-<slug> marker given its PATH directly — the
+# primitive block_id_close(sess) below wraps. Split out (step-1.7) so gc's
+# marker-hygiene pass can close a DEAD session's block the same way even
+# though it only ever has the marker file (a slug), never the session's
+# original un-slugified name that block_id_file(sess) would need to
+# re-derive the same path.
+block_id_close_path() {  # $1 marker path (block-<slug>)
+  local bf="$1" id
   [ -f "$bf" ] || return 0
   id=$(tr -d '[:space:]' <"$bf" 2>/dev/null || true)
   rm -f "$bf" 2>/dev/null || true
   [ -n "$id" ] || return 0
   command -v wsh >/dev/null 2>&1 || return 0
   wsh deleteblock -b "$id" >/dev/null 2>&1 || true
+}
+
+# Best-effort close of the block remembered for $sess, called from
+# teardown_session. Never fails the caller: no state file, no `wsh`, or a
+# block that already auto-closed ("not found") are all silently fine — only
+# the specific id `open` recorded is ever targeted, never a pane scan.
+block_id_close() {
+  block_id_close_path "$(block_id_file "$1")"
 }
 
 # Print "NAME|COUNT" for a tab oid: its display name (e.g. "T2") and the TOTAL

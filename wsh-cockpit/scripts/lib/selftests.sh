@@ -339,9 +339,17 @@ cmd_selftest_gc() {
   # 4-5. real session, real subcommand: --dry-run never kills; a real sweep does.
   # --only-session narrows the sweep to THIS throwaway session — without it,
   # `gc --idle=0` would sweep every unattached cockpit-* session on the
-  # machine, including a developer's own detached cockpits.
+  # machine, including a developer's own detached cockpits. SESS2/SESS3 are
+  # step-1.7's own throwaway sessions (hygiene .won-restore / keep-floor
+  # cases below); also NOT local, same rationale as SESS.
+  HYGPFX="selftestgc$$"
+  SESS2="cockpit-${HYGPFX}-hyg2"
+  SESS3="cockpit-${HYGPFX}-hyg3"
   live_selftest_gc_cleanup() {
     "$0" stop "$SESS" >/dev/null 2>&1 || true
+    "$0" stop "$SESS2" >/dev/null 2>&1 || true
+    "$0" stop "$SESS3" >/dev/null 2>&1 || true
+    rm -f "$STATE_DIR"/*"$HYGPFX"* 2>/dev/null || true
   }
   trap live_selftest_gc_cleanup EXIT
   create_session "$SESS"   # detached by construction — never attached
@@ -357,6 +365,200 @@ cmd_selftest_gc() {
   set -e
   if mux_has "$SESS"; then report_gc_case "5 real sweep kills idle session" 1 "session still alive after gc --idle=0"
   else report_gc_case "5 real sweep kills idle session" 0; fi
+
+  # -- step-1.7: marker hygiene pass + keep-floor (spec v12 §3) -----------
+  # gc_hygiene_pass is called DIRECTLY as a function (not through the `gc`
+  # subcommand) so every case can pass a dedicated $HYGPFX scope — its
+  # basename-substring filter (gc.sh) means these cases can NEVER touch a
+  # real marker of the user's, even if the real $STATE_DIR already has
+  # unrelated orphans sitting in it (this test does not use an isolated
+  # STATE_DIR/HOME, per the codebase's established convention of dedicated
+  # slugs/prefixes against the real one instead).
+  mkdir -p "$STATE_DIR"
+
+  # A pid that has just exited: reliably dead, without the ambient risk of
+  # a hardcoded large number colliding with a real process on the machine.
+  gc_dead_pid() { ( : ) & local p=$!; wait "$p" 2>/dev/null || true; printf '%s\n' "$p"; }
+  # Backdate a marker's mtime by N minutes (macOS/BSD touch — this project
+  # targets Darwin only, see CONVENTIONS.md).
+  gc_backdate() { touch -t "$(date -v-"${2:-10}"M '+%Y%m%d%H%M.%S')" "$1"; }
+
+  # 6. a fresh marker (age ~0) is NEVER eaten, even for a slug that is dead.
+  slug6="${HYGPFX}-fresh"
+  kf6="$STATE_DIR/keep-$slug6"
+  : >"$kf6"
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  if [ -e "$kf6" ]; then report_gc_case "6 fresh marker never eaten even if slug is dead" 0
+  else report_gc_case "6 fresh marker never eaten even if slug is dead" 1 "fresh keep-$slug6 was removed"; fi
+
+  # 7. a full orphaned marker family (dead slug, old) is swept: claim, keep,
+  # prefix, seq, oneshot-ssh, tab, pane, block, cm.
+  slug7="${HYGPFX}-fam"
+  f7_claim="$STATE_DIR/adopt-claim-$slug7"
+  f7_keep="$STATE_DIR/keep-$slug7"
+  f7_prefix="$STATE_DIR/prefix-$slug7"
+  f7_seq="$STATE_DIR/seq-$slug7"
+  f7_oneshot="$STATE_DIR/oneshot-ssh-$slug7"
+  f7_tab="$STATE_DIR/tab-$slug7"
+  f7_pane="$STATE_DIR/pane-$slug7"
+  f7_block="$STATE_DIR/block-$slug7"
+  f7_cm="$STATE_DIR/cm-$slug7"
+  printf 'default\n1\n' >"$f7_claim"
+  : >"$f7_keep"; : >"$f7_prefix"; : >"$f7_seq"; : >"$f7_oneshot"
+  : >"$f7_tab"; : >"$f7_pane"; printf 'not-a-real-block-id\n' >"$f7_block"
+  : >"$f7_cm"   # not a socket — hygiene must rm it directly, never `ssh -O exit` it
+  for f7 in "$f7_claim" "$f7_keep" "$f7_prefix" "$f7_seq" "$f7_oneshot" "$f7_tab" "$f7_pane" "$f7_block" "$f7_cm"; do
+    gc_backdate "$f7" 10
+  done
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  rc=0
+  for f7 in "$f7_claim" "$f7_keep" "$f7_prefix" "$f7_seq" "$f7_oneshot" "$f7_tab" "$f7_pane" "$f7_block" "$f7_cm"; do
+    [ -e "$f7" ] && rc=1
+  done
+  report_gc_case "7 orphaned marker family swept (claim/keep/prefix/seq/oneshot-ssh/tab/pane/block/cm)" "$rc" "some markers of dead slug '$slug7' survived"
+
+  # 8. last-session-<key>: content-based, not slug-based (state_file's
+  # suffix is an AGENT KEY, never a session slug) — pointing at a dead
+  # session, old enough, gets swept.
+  f8="$STATE_DIR/last-session-${HYGPFX}key8"
+  printf 'cockpit-%s-neverlive\n' "$HYGPFX" >"$f8"
+  gc_backdate "$f8" 10
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  if [ -e "$f8" ]; then report_gc_case "8 last-session pointing at a dead session swept" 1 "$f8 survived"
+  else report_gc_case "8 last-session pointing at a dead session swept" 0; fi
+
+  # 9. last-session-<key> pointing at a LIVE session is kept, regardless of age.
+  create_session "$SESS2"
+  f9="$STATE_DIR/last-session-${HYGPFX}key9"
+  printf '%s\n' "$SESS2" >"$f9"
+  gc_backdate "$f9" 10
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  if [ -e "$f9" ] && [ "$(cat "$f9")" = "$SESS2" ]; then report_gc_case "9 last-session pointing at a live session kept" 0
+  else report_gc_case "9 last-session pointing at a live session kept" 1 "$f9 was removed or altered"; fi
+
+  # 10. .won of a dead pid, old enough, LIVE session -> restored to pre-claim
+  # (no-clobber ln/rm, fiche 1.2 I1).
+  slug10=$(session_slug "$SESS2")
+  pid10=$(gc_dead_pid)
+  won10=$(claim_won_path "$slug10" "$pid10")
+  printf 'user-preopen-1\n%s\n' "$pid10" >"$won10"
+  gc_backdate "$won10" 11
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  claim10="$(claim_path "$slug10")"
+  if [ ! -e "$won10" ] && [ -f "$claim10" ] && [ "$(claim_read_key "$claim10")" = "user-preopen-1" ]; then
+    report_gc_case "10 dead-pid .won restored to pre-claim (session alive)" 0
+  else
+    report_gc_case "10 dead-pid .won restored to pre-claim (session alive)" 1 "won=$([ -e "$won10" ] && echo present || echo gone) claim=$([ -f "$claim10" ] && echo present || echo absent)"
+  fi
+  rm -f "$claim10" 2>/dev/null || true
+
+  # 11. .won of a dead pid, old enough, DEAD session -> purged.
+  slug11="${HYGPFX}-wonpurge"
+  pid11=$(gc_dead_pid)
+  won11=$(claim_won_path "$slug11" "$pid11")
+  mkdir -p "$STATE_DIR"
+  printf 'released\n%s\n' "$pid11" >"$won11"
+  gc_backdate "$won11" 11
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  if [ -e "$won11" ]; then report_gc_case "11 dead-pid .won purged (session dead)" 1 "$won11 survived"
+  else report_gc_case "11 dead-pid .won purged (session dead)" 0; fi
+
+  # 12. .won too young (< 2*WSH_WAIT_TIMEOUT) is left alone even for a dead
+  # pid and a dead session — a legitimate probe can run the full timeout.
+  slug12="${HYGPFX}-wonyoung"
+  pid12=$(gc_dead_pid)
+  won12=$(claim_won_path "$slug12" "$pid12")
+  mkdir -p "$STATE_DIR"
+  printf 'released\n%s\n' "$pid12" >"$won12"
+  gc_backdate "$won12" 1
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  if [ -e "$won12" ]; then report_gc_case "12 young dead-pid .won left alone" 0
+  else report_gc_case "12 young dead-pid .won left alone" 1 "$won12 was removed"; fi
+
+  # 13. .won of a LIVE pid ($$, this very process) is left alone even old
+  # and even for a dead session — pid-alive always blocks the dedicated pass.
+  slug13="${HYGPFX}-wonlivepid"
+  won13=$(claim_won_path "$slug13" "$$")
+  mkdir -p "$STATE_DIR"
+  printf 'released\n%s\n' "$$" >"$won13"
+  gc_backdate "$won13" 11
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  if [ -e "$won13" ]; then report_gc_case "13 live-pid .won left alone" 0
+  else report_gc_case "13 live-pid .won left alone" 1 "$won13 was removed despite a live pid"; fi
+  rm -f "$won13" 2>/dev/null || true
+
+  # 14. session listing failure -> the whole pass is inert (never treats a
+  # failed/uncertain listing as "zero sessions"). tmux is hidden from PATH
+  # for exactly this one call — same idiom as selftest-adopt's NOWSH_PATH.
+  slug14="${HYGPFX}-listfail"
+  kf14="$STATE_DIR/keep-$slug14"
+  : >"$kf14"
+  gc_backdate "$kf14" 10
+  save_path14="$PATH"
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+  set +e
+  gc_hygiene_pass 0 "$HYGPFX" >/dev/null 2>&1
+  set -e
+  PATH="$save_path14"
+  if [ -e "$kf14" ]; then report_gc_case "14 listing failure leaves hygiene inert" 0
+  else report_gc_case "14 listing failure leaves hygiene inert" 1 "$kf14 was removed despite an unreachable listing"; fi
+
+  # 15-17. gc_effective_idle (pure): keep-floor arithmetic in isolation.
+  val=$(gc_effective_idle 0 1)
+  if [ "$val" = "86400" ]; then report_gc_case "15 gc_effective_idle floors a keep session at 24h" 0
+  else report_gc_case "15 gc_effective_idle floors a keep session at 24h" 1 "got $val, want 86400"; fi
+
+  val=$(gc_effective_idle 999999 1)
+  if [ "$val" = "999999" ]; then report_gc_case "16 gc_effective_idle never LOWERS an already-high idle" 0
+  else report_gc_case "16 gc_effective_idle never LOWERS an already-high idle" 1 "got $val, want 999999"; fi
+
+  val=$(gc_effective_idle 0 0)
+  if [ "$val" = "0" ]; then report_gc_case "17 gc_effective_idle leaves a non-keep session untouched" 0
+  else report_gc_case "17 gc_effective_idle leaves a non-keep session untouched" 1 "got $val, want 0"; fi
+
+  # 18-19. gc_should_kill composed with gc_effective_idle: the keep-floor
+  # actually protects (young) and actually expires (>24h) — real tmux gives
+  # no way to force session_activity into the past, so this is proven the
+  # same pure way as gc_should_kill's own cases 1-3 above.
+  set +e
+  gc_should_kill "$now" "$((now - 100))" "0" "$(gc_effective_idle 0 1)"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then report_gc_case "18 keep session, idle=0, young detached: floor keeps it" 0
+  else report_gc_case "18 keep session, idle=0, young detached: floor keeps it" 1 "killed despite the 24h floor"; fi
+
+  set +e
+  gc_should_kill "$now" "$((now - 90000))" "0" "$(gc_effective_idle 0 1)"
+  rc=$?
+  set -e
+  report_gc_case "19 keep session detached past 24h falls back to normal sweep" "$rc"
+
+  # 20. end-to-end wiring proof: a REAL keep session survives a real
+  # `gc --idle=0` sweep (cf. case 5's non-keep session, which does not).
+  create_session "$SESS3"
+  mkdir -p "$STATE_DIR"
+  : >"$(keep_file "$SESS3")"
+  set +e
+  "$0" gc --idle=0 --only-session="$SESS3" >/dev/null 2>&1
+  set -e
+  if mux_has "$SESS3"; then report_gc_case "20 keep session survives a real gc --idle=0 sweep" 0
+  else report_gc_case "20 keep session survives a real gc --idle=0 sweep" 1 "keep session was killed despite the sticky marker"; fi
 
   if [ "$failures" -ne 0 ]; then
     echo "selftest-gc: $failures failure(s)" >&2
