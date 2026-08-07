@@ -68,7 +68,7 @@ resolve_sid() {
 
 need_sid() {
   S=$(session)
-  SID=$(resolve_sid "$S") || die "aucune session relais pour « $(project_slug) » — 'go' pour la lancer, ou --session <nom>"
+  SID=$(resolve_sid "$S") || die "aucune session relais pour « $(project_slug) » — 'go' pour la lancer, ou --session <nom> / RELAY_SESSION"
 }
 
 pane_pid() { "$TMUX_BIN" display-message -p -t "$1" '#{pane_pid}' 2>/dev/null; }
@@ -113,7 +113,7 @@ case "$CMD" in
     echo "état     : $(next_line)"
     grep -m1 '^màj' "$STATE" 2>/dev/null | sed 's/^/état     : /'
     SID=$(resolve_sid "$S") || {
-      echo "session  : aucune pour « $(project_slug) » (lancer : relay-ctl.sh go --dir $DIR)"; exit 0
+      echo "session  : aucune pour « $(project_slug) » (lancer : relay-ctl.sh go --dir $DIR, ou préciser --session <nom> / RELAY_SESSION)"; exit 0
     }
     PP=$(pane_pid "$SID")
     if claude_under "$PP"; then ACT="session Claude ACTIVE"
@@ -149,6 +149,7 @@ case "$CMD" in
       SID=$(resolve_sid "$S") || die "session $S créée mais introuvable dans list-sessions"
       echo "session créée : $S"
       wait_idle "$SID"  # personne d'autre ne peut l'occuper : c'est son shell qui démarre
+      pane_busy "$(pane_pid "$SID")" && die "le pane de $S reste occupé après son démarrage"
     fi
     "$TMUX_BIN" send-keys -t "$SID" -l "(cd -- $(printf %q "$DIR") && ./execution/next.sh) 2>&1"
     "$TMUX_BIN" send-keys -t "$SID" Enter
