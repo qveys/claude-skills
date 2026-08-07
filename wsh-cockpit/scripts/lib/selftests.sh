@@ -2918,3 +2918,191 @@ cmd_selftest_adopt() {
   if [ "$failures" -eq 0 ]; then echo "selftest-adopt: all cases passed"; return 0
   else echo "selftest-adopt: $failures failure(s)" >&2; return 1; fi
 }
+
+# `open --tab <nom>` resolution (step-1.8, spec v12 §4): sql_quote() and
+# resolve_tab_by_name() exercised against a throwaway FIXTURE sqlite DB
+# (schema db_workspace/db_tab, minimal — the two columns the v12 query
+# reads), never the real Wave DB, deterministic on purpose. Pure function
+# test, no tmux session needed (same spirit as selftest-claim).
+cmd_selftest_tab() {
+  local failures=0
+
+  report_tab_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo "selftest-tab: skip (no sqlite3 on PATH)"
+    return 0
+  fi
+
+  # tmpdir/saved_ws/had_ws deliberately NOT local — same rationale as
+  # cmd_selftest_sep's tmpdir: the EXIT trap below fires after this function
+  # returns, when a `local` would already be out of scope.
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/wsh-tab-test.XXXXXX")
+  trap 'rm -rf "$tmpdir" 2>/dev/null || true' EXIT
+  had_ws=0; saved_ws=""
+  [ -n "${WAVETERM_WORKSPACEID+x}" ] && { had_ws=1; saved_ws="$WAVETERM_WORKSPACEID"; }
+  selftest_tab_cleanup() {
+    if [ "$had_ws" -eq 1 ]; then export WAVETERM_WORKSPACEID="$saved_ws"
+    else unset WAVETERM_WORKSPACEID; fi
+  }
+  trap 'selftest_tab_cleanup; rm -rf "$tmpdir" 2>/dev/null || true' EXIT
+
+  local db ro
+  db="$tmpdir/fixture.db"
+  ro="file:$db?mode=ro"
+  sqlite3 "$db" \
+    'CREATE TABLE db_workspace (oid TEXT PRIMARY KEY, data TEXT); CREATE TABLE db_tab (oid TEXT PRIMARY KEY, data TEXT);'
+
+  # ws1: the workspace under test. pinnedtabids present (non-empty) with a
+  # single pinned "Dup"; tabids holds two more unpinned "Dup" whose ARRAY
+  # ORDER (dup3 before dup2) is deliberately the REVERSE of their db_tab
+  # insertion order below — proves the elected order follows
+  # json_each.key/array position, not sqlite rowid/insertion order.
+  local ws1='ws1' ws2='ws2'
+  sqlite3 "$db" "INSERT INTO db_workspace (oid, data) VALUES ($(sql_quote "$ws1"), $(sql_quote \
+    '{"tabids":["tabZ","tabY","dup3","dup2","hquote","hpercent","hnewline","hinject"],"pinnedtabids":["dup1"]}'));"
+  # ws2: a second workspace, deliberately WITHOUT a pinnedtabids key at all
+  # (absence of the key, not just an empty array — case 5) and holding a
+  # tab homonym of ws1's "Alpha" (cross-workspace exclusion, case 2).
+  sqlite3 "$db" "INSERT INTO db_workspace (oid, data) VALUES ($(sql_quote "$ws2"), $(sql_quote \
+    '{"tabids":["wsb-alpha"]}'));"
+
+  insert_tab() {  # $1 oid  $2 name (raw; none of the fixture's names need
+                   # JSON escaping — no '"' or backslash among them)
+    sqlite3 "$db" "INSERT INTO db_tab (oid, data) VALUES ($(sql_quote "$1"), $(sql_quote "{\"name\":\"$2\"}"));"
+  }
+  insert_tab dup2 "Dup"
+  insert_tab dup3 "Dup"
+  insert_tab tabZ "Alpha"
+  insert_tab tabY "Beta"
+  insert_tab dup1 "Dup"
+  insert_tab hquote "it's a tab"
+  insert_tab hpercent "100% done"
+  insert_tab hnewline 'multi\nligne'
+  insert_tab hinject "x'; DROP TABLE db_tab;--"
+  insert_tab wsb-alpha "Alpha"
+
+  local rc
+
+  # 0. sql_quote() itself: no-op on a plain string, doubles an embedded '.
+  if [ "$(sql_quote "abc")" = "'abc'" ]; then
+    report_tab_case "0a sql_quote: chaîne simple" 0
+  else
+    report_tab_case "0a sql_quote: chaîne simple" 1 "got '$(sql_quote "abc")'"
+  fi
+  if [ "$(sql_quote "it's")" = "'it''s'" ]; then
+    report_tab_case "0b sql_quote: quote simple doublée" 0
+  else
+    report_tab_case "0b sql_quote: quote simple doublée" 1 "got '$(sql_quote "it's")'"
+  fi
+
+  # 1. résolution simple par nom, bornée à ws1 — et pas de fuite du candidat
+  # homonyme de ws2 (TAB_BY_NAME_ALL n'a qu'une ligne).
+  export WAVETERM_WORKSPACEID="$ws1"
+  rc=0; resolve_tab_by_name "Alpha" "$ro" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$TAB_BY_NAME_RESULT" = "tabZ" ] \
+     && [ "$(printf '%s\n' "$TAB_BY_NAME_ALL" | wc -l | tr -d ' ')" -eq 1 ]; then
+    report_tab_case "1 résolution simple par nom (ws1)" 0
+  else
+    report_tab_case "1 résolution simple par nom (ws1)" 1 "rc=$rc result='$TAB_BY_NAME_RESULT' all='$TAB_BY_NAME_ALL'"
+  fi
+
+  # 2/5. ws2 : homonyme d'un AUTRE workspace ne matche jamais (résout à
+  # wsb-alpha seul, jamais tabZ) — et sa DB n'a pas de clé pinnedtabids du
+  # tout, prouvant que l'union défensive reste valide sans elle.
+  export WAVETERM_WORKSPACEID="$ws2"
+  rc=0; resolve_tab_by_name "Alpha" "$ro" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$TAB_BY_NAME_RESULT" = "wsb-alpha" ]; then
+    report_tab_case "2/5 homonyme d'un autre workspace ignoré + pinnedtabids absent (ws2)" 0
+  else
+    report_tab_case "2/5 homonyme d'un autre workspace ignoré + pinnedtabids absent (ws2)" 1 "rc=$rc result='$TAB_BY_NAME_RESULT'"
+  fi
+  export WAVETERM_WORKSPACEID="$ws1"
+
+  # 3. doublons : élue = première dans l'ordre épinglés (dup1) puis tabids à
+  # index croissant (dup3 avant dup2, malgré l'insertion inversée) ; warning
+  # listant TOUS les candidats dans cet ordre exact.
+  rc=0; resolve_tab_by_name "Dup" "$ro" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$TAB_BY_NAME_RESULT" = "dup1" ] \
+     && [ "$TAB_BY_NAME_ALL" = "$(printf 'dup1\ndup3\ndup2')" ]; then
+    report_tab_case "3 doublons: pinné d'abord, ordre array-index malgré insertion inversée, tous les candidats" 0
+  else
+    report_tab_case "3 doublons" 1 "rc=$rc result='$TAB_BY_NAME_RESULT' all='$TAB_BY_NAME_ALL'"
+  fi
+
+  # 4. noms hostiles : résolution correcte, jamais d'erreur de syntaxe.
+  local hostile
+  for hostile in "it's a tab:hquote" "100% done:hpercent" "x'; DROP TABLE db_tab;--:hinject"; do
+    local qname="${hostile%%:*}" oid="${hostile##*:}"
+    rc=0; resolve_tab_by_name "$qname" "$ro" || rc=$?
+    if [ "$rc" -eq 0 ] && [ "$TAB_BY_NAME_RESULT" = "$oid" ]; then
+      report_tab_case "4 nom hostile '$qname' résolu" 0
+    else
+      report_tab_case "4 nom hostile '$qname'" 1 "rc=$rc result='$TAB_BY_NAME_RESULT'"
+    fi
+  done
+  # Retour à la ligne RÉEL dans le nom cherché (distinct du '\n' JSON stocké).
+  local qnl
+  qnl=$'multi\nligne'
+  rc=0; resolve_tab_by_name "$qnl" "$ro" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$TAB_BY_NAME_RESULT" = "hnewline" ]; then
+    report_tab_case "4 nom hostile avec retour à la ligne réel résolu" 0
+  else
+    report_tab_case "4 nom hostile avec retour à la ligne réel" 1 "rc=$rc result='$TAB_BY_NAME_RESULT'"
+  fi
+  # Aucune altération après la tentative d'injection : les 10 lignes de
+  # db_tab sont toutes encore là.
+  local cnt
+  cnt=$(sqlite3 "$ro" "SELECT count(*) FROM db_tab;" 2>/dev/null || true)
+  if [ "$cnt" = "10" ]; then
+    report_tab_case "4 aucune altération de db_tab après injection (10 lignes intactes)" 0
+  else
+    report_tab_case "4 aucune altération de db_tab après injection" 1 "count=$cnt (want 10)"
+  fi
+
+  # 6. WAVETERM_WORKSPACEID absent -> rc=2, échec explicite, PAS de fallback
+  # arbitraire (spec v12 §4, point b).
+  unset WAVETERM_WORKSPACEID
+  rc=0; resolve_tab_by_name "Alpha" "$ro" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    report_tab_case "6 WAVETERM_WORKSPACEID absent -> rc=2 (hors Wave, pas de fallback)" 0
+  else
+    report_tab_case "6 WAVETERM_WORKSPACEID absent -> rc=2" 1 "rc=$rc"
+  fi
+  export WAVETERM_WORKSPACEID="$ws1"
+
+  # 7. onglet introuvable -> rc=3 (le caller avertit + retombe sur le
+  # comportement actuel, testé au niveau wsh-live.sh, pas ici).
+  rc=0; resolve_tab_by_name "NoSuchTab" "$ro" || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    report_tab_case "7 onglet introuvable -> rc=3" 0
+  else
+    report_tab_case "7 onglet introuvable -> rc=3" 1 "rc=$rc"
+  fi
+
+  # 8. DB Wave inatteignable (wsh absent du PATH) -> rc=1, sans passer par le
+  # fallback codé en dur de wave_db_ro (spec v12 §4, point c) : appelé SANS
+  # l'override $2 cette fois, pour exercer le vrai chemin wave_db_ro_strict.
+  local emptybin
+  emptybin="$tmpdir/emptybin"
+  mkdir -p "$emptybin"
+  rc=0; ( PATH="$emptybin"; resolve_tab_by_name "Alpha" ) || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    report_tab_case "8 wsh introuvable -> rc=1 (échec propre, pas de fallback AppSupport)" 0
+  else
+    report_tab_case "8 wsh introuvable -> rc=1" 1 "rc=$rc"
+  fi
+
+  selftest_tab_cleanup
+  trap - EXIT
+  rm -rf "$tmpdir" 2>/dev/null || true
+  if [ "$failures" -eq 0 ]; then echo "selftest-tab: all cases passed"; return 0
+  else echo "selftest-tab: $failures failure(s)" >&2; return 1; fi
+}

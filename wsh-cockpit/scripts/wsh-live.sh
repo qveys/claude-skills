@@ -11,8 +11,10 @@
 # (`wsh ssh -n host`, `ssh host`, `docker exec -it ...`) and keep using send/read.
 #
 # Subcommands:
-#   spawn [prefix] [--force] [--situate] [--pre <host>]
+#   spawn [prefix] [--force] [--situate] [--pre <host>] [--tab <name>]
 #                              open/reuse cockpit: reuse last alive session by default;
+#                              --tab is relayed as-is to `open` (see below) whenever
+#                              spawn ends up calling it;
 #                              --force always creates a fresh session + auto-open Wave;
 #                              --situate also runs the hostname/pwd/whoami probe
 #                              (send + wait-done + read) internally before returning,
@@ -24,7 +26,16 @@
 #                              the helpers on <host> before the pane even ssh-hops there
 #                              (shorthand for `remote-init --pre <host>` right after spawn)
 #   start [session] [--reuse]  create the session + print the attach command
-#   open  [session]            AUTO-OPEN a visible Wave block attached to the session
+#   open  [session] [--tab <name>]
+#                              AUTO-OPEN a visible Wave block attached to the session;
+#                              --tab resolves the Wave tab to anchor on BY NAME (spec
+#                              v12 §4, step-1.8) instead of the usual live-tab guess —
+#                              bounded to the current WAVETERM_WORKSPACEID, requires
+#                              being inside Wave (no arbitrary fallback if not); a
+#                              name not found in this workspace warns and falls back
+#                              to the normal live-tab resolution; duplicates elect the
+#                              first match (pinned tabs, then tab order) and warn
+#                              listing every candidate
 #   send  '<command>' [sess] [--session NAME|-s NAME]
 #                              type a command into the pane and press Enter
 #   keys  '<tmux-keys>' [sess] [--session NAME|-s NAME]
@@ -163,6 +174,20 @@
 #                              released-then-scanned session — always routes `stop` to
 #                              release, never teardown, session/block left alive
 #                              (step-1.6); tmux-only; rc 0/1
+#   selftest-tab               sql_quote()/resolve_tab_by_name() (step-1.8, spec v12
+#                              §4) against a throwaway FIXTURE sqlite DB, never the
+#                              real Wave DB: simple resolution; homonym in another
+#                              workspace never matches (and that other workspace's
+#                              pinnedtabids key is entirely absent, proving the
+#                              defensive union stays valid without it); duplicates
+#                              elect the pinned one first then array-position order
+#                              even with reversed row-insertion order, warning list
+#                              has all candidates; hostile names (quote, %, real
+#                              newline, `x'; DROP TABLE db_tab;--`) resolve cleanly
+#                              with zero alteration; WAVETERM_WORKSPACEID absent ->
+#                              rc=2 (no arbitrary fallback); not found -> rc=3; `wsh`
+#                              missing -> rc=1 (no hardcoded AppSupport fallback);
+#                              pure function test, no tmux session needed; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -466,17 +491,21 @@ spawn)
   PREFIX=""
   PRE_HOST=""
   PREOPEN=0
+  TAB_NAME=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --force|--fresh) FORCE=1; shift ;;
       --situate) SITUATE=1; shift ;;
       --pre) PRE_HOST="${2:?usage: spawn --pre <host> (connection string, e.g. qveys@srv1453980)}"; shift 2 ;;
+      # Relayed as-is to `open` (spec v12 §4, step-1.8) whenever spawn ends
+      # up calling it below — see open's own --tab for the resolution rules.
+      --tab) TAB_NAME="${2:?usage: spawn --tab <name> (Wave tab name to anchor the block on)}"; shift 2 ;;
       # Internal only (spec v12 §1): lifts the reserved-key refusal below for
       # the wrapper's own bootstrap spawn (WSH_COCKPIT_AGENT=user-preopen-<n>,
       # set by the caller's environment — this flag never itself sets or
       # exports that key). Not documented for interactive use.
       --preopen) PREOPEN=1; shift ;;
-      -*) echo "unknown flag: $1 (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami, --pre <host> to pre-stage remote helpers before the hop)" >&2; exit 2 ;;
+      -*) echo "unknown flag: $1 (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami, --pre <host> to pre-stage remote helpers before the hop, --tab <name> to anchor on a named Wave tab)" >&2; exit 2 ;;
       *) PREFIX="$1"; shift ;;
     esac
   done
@@ -534,7 +563,8 @@ spawn)
       echo "clients already attached — cockpit should still be visible in Wave"
     else
       echo "no client attached — re-opening Wave block"
-      "$0" open "$SESS"
+      if [ -n "$TAB_NAME" ]; then "$0" open "$SESS" --tab "$TAB_NAME"
+      else "$0" open "$SESS"; fi
     fi
     echo "SESSION=$SESS"
     tty_only "Use this session for all subsequent send/read calls in this workflow." \
@@ -553,7 +583,8 @@ spawn)
   remember_session "$SESS"
   claim_new_session "$SESS" "$(normalize_prefix "$PREFIX")"
   echo "created fresh $MUX session '$SESS'"
-  "$0" open "$SESS"
+  if [ -n "$TAB_NAME" ]; then "$0" open "$SESS" --tab "$TAB_NAME"
+  else "$0" open "$SESS"; fi
   echo "SESSION=$SESS"
   tty_only "Use this session for all subsequent send/read calls in this workflow."
   # Same best-effort rule as the reuse path above — a spawn that created its
@@ -847,14 +878,47 @@ open)
   # Auto-open a VISIBLE Wave block attached to the shared cockpit, so the user
   # doesn't have to type `tmux attach` themselves. Robust to a stale Wave env.
   have_mux
-  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  TAB_NAME=""
+  ARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tab) TAB_NAME="${2:?usage: open [session] --tab <name>}"; shift 2 ;;
+      *) ARGS+=("$1"); shift ;;
+    esac
+  done
+  SESS=$(resolve_session "${ARGS[0]:-}"); need_session "$SESS"
   if [ "$MUX" = tmux ]; then MUX_BIN=$(command -v tmux); else MUX_BIN=$(zellij_bin); fi
   ATTACH=$(mux_attach_cmd "$SESS")
   command -v wsh >/dev/null 2>&1 || {
     echo "wsh not found — can't auto-open a Wave block. Attach by hand:" >&2
     echo "  ${ATTACH}" >&2; exit 5; }
 
-  if ! TAB=$(resolve_live_tab_cached "$SESS"); then
+  TAB=""
+  if [ -n "$TAB_NAME" ]; then
+    TAB_RC=0
+    resolve_tab_by_name "$TAB_NAME" || TAB_RC=$?
+    case "$TAB_RC" in
+      0)
+        TAB="$TAB_BY_NAME_RESULT"
+        if [ "$(printf '%s' "$TAB_BY_NAME_ALL" | wc -l | tr -d ' ')" -gt 1 ]; then
+          echo "⚠️  multiple tabs named '$TAB_NAME' in this workspace — using the first (pinned, then tab order): $(printf '%s' "$TAB_BY_NAME_ALL" | tr '\n' ' ')" >&2
+        fi
+        ;;
+      2)
+        echo "--tab '$TAB_NAME' requires running inside Wave (WAVETERM_WORKSPACEID not set) — refusing to guess a tab" >&2
+        exit 6
+        ;;
+      1)
+        echo "--tab '$TAB_NAME': Wave's live state DB is unreachable (wsh/wavepath/sqlite3) — refusing to guess a tab" >&2
+        exit 6
+        ;;
+      3)
+        echo "no tab named '$TAB_NAME' in this workspace — falling back to the current/live tab" >&2
+        ;;
+    esac
+  fi
+
+  if [ -z "$TAB" ] && ! TAB=$(resolve_live_tab_cached "$SESS"); then
     cat >&2 <<MSG
 could not find a live Wave tab to anchor the block on (stale/empty Wave state).
 Ask the user to attach manually in any terminal or Wave block:
@@ -1042,6 +1106,9 @@ selftest-claim)
   ;;
 selftest-adopt)
   cmd_selftest_adopt
+  ;;
+selftest-tab)
+  cmd_selftest_tab
   ;;
 push)
   have_mux
@@ -1320,5 +1387,5 @@ release)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt|selftest-tab} [args]" >&2; exit 2 ;;
 esac

@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-06 · **Étape courante : step-1.7 terminée, au tour de step-1.8**
+màj : 2026-08-07 · **Étape courante : step-1.8 terminée, au tour de step-1.9**
 
-NEXT: step-1.8
+NEXT: step-1.9
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -40,7 +40,7 @@ NEXT: step-1.8
 | 1.5 | Scan étape 3 (exclusion claims, reprise legacy, `--force`) | Sonnet | ✅ 2026-08-06 |
 | 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ✅ 2026-08-06 |
 | 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ✅ 2026-08-06 |
-| 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ☐ |
+| 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ✅ 2026-08-07 |
 | 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ☐ |
 | 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ☐ |
 | 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ☐ |
@@ -352,3 +352,47 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   introduite ici. Aucune session tmux ni marqueur résiduel après coup (nettoyage manuel des
   artefacts de la session de test elle-même, hors du périmètre des selftests). 1.8 (`open --tab
   <nom>`) prend le relais.
+- 2026-08-07 (step-1.8, Sonnet) : **`open --tab <nom>` livré** — trois nouvelles primitives dans
+  `lib/wave.sh` : `sql_quote()` (doublement de l'apostrophe simple, encapsulé en littéral SQL —
+  motivé en step-0.1/1.1 par l'intransportabilité des dot-commands sqlite3 pour un retour à la
+  ligne) ; `wave_db_ro_strict()` (résolution stricte de la DB Wave, `wsh wavepath data`
+  **uniquement**, jamais le fallback codé en dur `~/Library/Application Support/waveterm/` déjà
+  signalé périmé en step-1.1 — `wsh` absent ou chemin introuvable ⇒ rc=1, échec net) ;
+  `resolve_tab_by_name(name, ro?)` (requête CTE v12 verbatim de la spec §4, bornée à
+  `WAVETERM_WORKSPACEID` — absent ⇒ rc=2 explicite, jamais de fallback hors-Wave ; onglet
+  introuvable ⇒ rc=3 ; DB/`wsh` indisponible ⇒ rc=1 ; doublons départagés par
+  `ORDER BY pinned ASC, ord ASC`, ordre du workspace). Second paramètre `ro` optionnel = seam de
+  test (calque du paramètre `scope` de `gc_hygiene_pass`, step-1.7) : `selftest-tab` l'utilise
+  pour pointer une DB fixture, jamais la vraie DB Wave. Retour par variables globales
+  (`TAB_BY_NAME_RESULT`/`TAB_BY_NAME_ALL`), même idiome que `ADOPT_RESULT`. `wsh-live.sh` :
+  `open` parse désormais `--tab <nom>` (extraction via tableau `ARGS=()`, compatible bash 3.2) —
+  résolu, la clé n'a **aucun repli** vers `resolve_live_tab_cached` sur rc=1/2 (`exit 6` net) ;
+  introuvable (rc=3) tombe en avertissement puis repli sur le cache existant, comportement
+  inchangé si `--tab` absent. `spawn` gagne `--tab <nom>` en pass-through vers les deux appels à
+  `"$0" open`. Doc-headers (`open`, `spawn`, nouveau bloc `selftest-tab`) et ligne `usage:` mis à
+  jour. **RED-first démontré** : les trois primitives neutralisées dans `wave.sh` via
+  `: <<'RED_TEST_DISABLE_1_8'`, `selftest-tab` lancé en session tmux jetable → `sql_quote:
+  command not found` dès le cas 0a, erreur de syntaxe SQL sur littéraux vides en cascade,
+  `DONE_RC=1` — preuve que le nouveau selftest exerce bien le nouveau code ; bloc restauré,
+  `bash -n` + grep du marqueur (0 occurrence) confirment une restauration propre. Fixture DB
+  dédiée (`db_workspace`/`db_tab`) conçue pour prouver plusieurs invariants à la fois : ws2 sans
+  clé `pinnedtabids` du tout (pas juste vide) démontre à la fois l'union défensive sans elle
+  (cas 5) et l'exclusion cross-workspace d'un onglet homonyme (cas 2) ; `dup2`/`dup3` insérés en
+  base dans l'ordre INVERSE de leur position dans le tableau JSON `tabids`, prouvant que l'ordre
+  élu suit la position array (`json_each.key`), jamais le rowid/ordre d'insertion sqlite ; cas 8
+  (`wsh` absent ⇒ rc=1, pas de fallback AppSupport) testé via un `PATH` restreint en sous-shell
+  pointant sur un répertoire vide, pour exercer le vrai chemin `wave_db_ro_strict()` plutôt
+  qu'une injection de chemin de test. Deux bugs de **test** (pas d'implémentation) trouvés et
+  corrigés pendant le passage au vert : (1) cas 1, `printf '%s' "$TAB_BY_NAME_ALL" | wc -l`
+  compte 0 pour un résultat mono-ligne sans retour à la ligne final (`wc -l` compte des
+  terminateurs, pas des lignes) — corrigé en `printf '%s\n'` ; (2) cas 4 « retour à la ligne
+  réel », `qnl="multi$(printf '\n')ligne"` produisait en réalité une chaîne SANS retour à la
+  ligne — la substitution de commande `$(...)` strip TOUJOURS les retours à la ligne finaux,
+  donc `$(printf '\n')` vaut la chaîne vide — corrigé en `qnl=$'multi\nligne'` (quoting ANSI-C,
+  qui préserve le caractère littéral). `selftest-tab` : 13/13 cas verts après correction.
+  Non-régression (session tmux jetable dédiée) : `selftest-cache` ok, `selftest-guard` 41/41,
+  `selftest-claim` 8/8. `selftest-adopt` : flake déjà documenté aux journaux 1.5/1.6/1.7
+  reproduit une fois de plus (cas 28 puis cas 26 sur deux relances isolées, puis 0 échec sur une
+  troisième) — répertoire de travail intouché par cette fiche (seuls `wave.sh`, `wsh-live.sh`,
+  `selftests.sh` modifiés ; ni `claim.sh` ni `session.sh`), donc pas une régression de step-1.8.
+  1.9 (wrapper `claude-cockpit.sh`, `selftest-wrapper`, PATH) prend le relais.
