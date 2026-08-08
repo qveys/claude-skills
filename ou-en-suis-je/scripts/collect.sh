@@ -172,7 +172,12 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
   # Forme slice :0 obligatoire : "${tail120[@]}" sur un tableau vide (fichier .jsonl vide)
   # est une « unbound variable » sous set -u en bash 3.2 et tuerait toute la boucle.
   printf -v _win120 '%s\n' "${tail120[@]:0}"
-  fin=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' <<<"$_win120" 2>/dev/null \
+  # .message.content peut être une chaîne (forme simple) ou un tableau de blocs
+  # (forme riche, avec des blocs {type:"text",...}) selon les entrées : mêmes deux
+  # formes que le sujet ci-dessus, même traitement — sinon un message assistant en
+  # forme string tombe sur le repli « aucun texte » et se fait classer à tort comme
+  # inachevé.
+  fin=$(jq -r 'select(.type=="assistant") | .message.content | if type=="string" then . else (.[]? | select(.type=="text") | .text) end' <<<"$_win120" 2>/dev/null \
     | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/|/¦/g' || true)
   # tail -c coupe en OCTETS : peut tomber au milieu d'un caractère UTF-8 multi-octets et laisser
   # FIN commencer par des octets de continuation (0x80–0xBF), invalides en tête de séquence — on
