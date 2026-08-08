@@ -3106,3 +3106,276 @@ cmd_selftest_tab() {
   if [ "$failures" -eq 0 ]; then echo "selftest-tab: all cases passed"; return 0
   else echo "selftest-tab: $failures failure(s)" >&2; return 1; fi
 }
+
+# selftest-wrapper (fiche step-1.9): exercises claude-cockpit.sh end-to-end
+# WITHOUT ever popping a real Wave block and WITHOUT ever launching a real
+# `claude` — the two things automated selftests must never trigger (see
+# execution/CONVENTIONS.md and the "aucun effet Wave" precedent already set
+# by selftest-adopt's use of `start`).
+#
+# Harness (built fresh per invocation, in a throwaway tmpdir):
+#   $tmpdir/claude-cockpit.sh  -> symlink to the REAL script under test.
+#     `dirname "$0"` on a symlink resolves to the SYMLINK's own directory
+#     (not its target's), so the real script's own SCRIPT_DIR computation
+#     lands on $tmpdir here — which is exactly what lets the two swaps below
+#     work without any test-only seam in the production script itself.
+#   $tmpdir/lib                -> symlink to the REAL scripts/lib (so both
+#     claude-cockpit.sh's own sourcing and the fake wsh-live.sh below run
+#     against the real primitives, not a reimplementation of them).
+#   $tmpdir/wsh-live.sh         a REAL, executable fake: its `spawn` replicates
+#     wsh-live.sh's own fresh-creation tail verbatim (unique_session_name ->
+#     create_session -> remember_session -> claim_new_session -> "SESSION=")
+#     MINUS the "$0" open "$SESS" call — every other subcommand (stop/
+#     release/...) execs straight through to the real wsh-live.sh, which
+#     never pops a Wave block for those. Logs its own argv+env to
+#     $WRAPTEST_SPAWN_LOG on every spawn call (proves per-group relay +
+#     env isolation); exits 7 for a prefix matching $FAKE_SPAWN_FAIL_PREFIX
+#     (proves the "abort before launching claude" path without needing a
+#     real spawn failure).
+#   $tmpdir/bin/claude          a REAL, executable stub: logs its own
+#     argv+env to $WRAPTEST_CLAUDE_LOG, never touches tmux/Wave/the real
+#     claude binary, exits $WRAPTEST_CLAUDE_EXIT (default 0).
+# claude-cockpit.sh is invoked with PATH="$tmpdir/bin:$PATH" so `claude`
+# resolves to the stub, and $0's own dirname resolution finds the fake
+# wsh-live.sh as its sibling — no env-var override hook needed in the
+# production script for any of this.
+cmd_selftest_wrapper() {
+  local failures=0
+
+  report_wrapper_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  local wrap="$SCRIPT_DIR/claude-cockpit.sh"
+  if [ ! -f "$wrap" ]; then
+    echo "selftest-wrapper: $wrap does not exist yet" >&2
+    return 1
+  fi
+
+  # tmpdir/created deliberately NOT local — same rationale as cmd_selftest_tab's
+  # tmpdir: the EXIT trap fires after this function returns.
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/wsh-wrapper-test.XXXXXX")
+  local -a created=()
+  selftest_wrapper_cleanup() {
+    local s
+    for s in ${created[@]+"${created[@]}"}; do
+      teardown_session "$s" >/dev/null 2>&1 || true
+    done
+    rm -rf "$tmpdir" 2>/dev/null || true
+  }
+  trap selftest_wrapper_cleanup EXIT
+
+  ln -s "$wrap" "$tmpdir/claude-cockpit.sh"
+  ln -s "$SCRIPT_DIR/lib" "$tmpdir/lib"
+  mkdir -p "$tmpdir/bin"
+
+  cat >"$tmpdir/wsh-live.sh" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
+STATE_DIR="${WSH_COCKPIT_STATE_DIR:-$HOME/.cache/wsh-cockpit}"
+MUX="tmux"
+. "$SCRIPT_DIR/lib/mux.sh"
+. "$SCRIPT_DIR/lib/claim.sh"
+. "$SCRIPT_DIR/lib/session.sh"
+case "${1:-}" in
+  spawn)
+    shift
+    {
+      echo "ARGS: $*"
+      env
+      echo "---"
+    } >>"$WRAPTEST_SPAWN_LOG"
+    PFX=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force|--situate|--preopen) shift ;;
+        --pre|--tab) shift 2 ;;
+        -*) shift ;;
+        *) PFX="$1"; shift ;;
+      esac
+    done
+    if [ -n "${FAKE_SPAWN_FAIL_PREFIX:-}" ] && [ "$PFX" = "$FAKE_SPAWN_FAIL_PREFIX" ]; then
+      echo "fake-spawn: simulated failure for prefix '$PFX'" >&2
+      exit 7
+    fi
+    SESS=$(unique_session_name "$PFX")
+    create_session "$SESS"
+    remember_session "$SESS"
+    claim_new_session "$SESS" "$(normalize_prefix "$PFX")"
+    echo "created fresh $MUX session '$SESS' (selftest fake — no Wave open)"
+    echo "SESSION=$SESS"
+    ;;
+  *)
+    exec "$REAL_WSH_LIVE" "$@"
+    ;;
+esac
+FAKE
+  chmod +x "$tmpdir/wsh-live.sh"
+
+  cat >"$tmpdir/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+{
+  echo "ARGS: $*"
+  env
+} >"$WRAPTEST_CLAUDE_LOG"
+exit "${WRAPTEST_CLAUDE_EXIT:-0}"
+STUB
+  chmod +x "$tmpdir/bin/claude"
+
+  export REAL_WSH_LIVE="$SCRIPT_DIR/wsh-live.sh"
+
+  # -- Case A: 2 groups, --tab pass-through, --keep extraction, env isolation,
+  #    exact WSH_COCKPIT_ADOPT/WSH_COCKPIT_AGENT, and the exit sweep. -------
+  local pfx1="wraptest-a1-$$" pfx2="wraptest-a2-$$"
+  local spawnlog="$tmpdir/spawn-a.log" claudelog="$tmpdir/claude-a.log"
+  : >"$spawnlog"; rm -f "$claudelog"
+  # Exported in THIS test's own shell (not the wrapper's) to prove the
+  # wrapper actively strips it, rather than merely never setting it itself.
+  export WSH_COCKPIT_PREFIX="should-not-leak-$$"
+  export WRAPTEST_SPAWN_LOG="$spawnlog" WRAPTEST_CLAUDE_LOG="$claudelog"
+  unset WRAPTEST_CLAUDE_EXIT FAKE_SPAWN_FAIL_PREFIX 2>/dev/null || true
+
+  local rc=0
+  PATH="$tmpdir/bin:$PATH" "$tmpdir/claude-cockpit.sh" \
+    "$pfx1" --tab sometab --and "$pfx2" --keep -- echo hi \
+    >"$tmpdir/a.out" 2>"$tmpdir/a.err" || rc=$?
+  unset WSH_COCKPIT_PREFIX
+  report_wrapper_case "A0 run exits 0 (both groups + claude stub succeeded)" \
+    "$([ "$rc" -eq 0 ] && echo 0 || echo 1)" "rc=$rc stderr=$(cat "$tmpdir/a.err")"
+
+  local sess1 sess2
+  sess1=$(grep '^SESSION=' "$tmpdir/a.out" | sed -n '1s/^SESSION=//p')
+  sess2=$(grep '^SESSION=' "$tmpdir/a.out" | sed -n '2s/^SESSION=//p')
+  created+=("$sess1" "$sess2")
+  report_wrapper_case "A1 exactly 2 SESSION= lines, both non-empty" \
+    "$([ -n "$sess1" ] && [ -n "$sess2" ] && [ "$sess1" != "$sess2" ] && echo 0 || echo 1)" \
+    "sess1='$sess1' sess2='$sess2'"
+
+  # Group 1's fake-spawn call: prefix + --tab relayed, --force/--preopen
+  # added, --keep absent (group 1 never had it), agent key scoped, no
+  # WSH_COCKPIT_PREFIX leak.
+  local block1
+  block1=$(awk '/^ARGS:/{n++} n==1' "$spawnlog")
+  report_wrapper_case "A2 group1 relay: prefix + --tab sometab + --force + --preopen, no --keep" \
+    "$(printf '%s\n' "$block1" | grep -q "^ARGS: .*$pfx1 --tab sometab.*--force.*--preopen" \
+       && ! printf '%s\n' "$block1" | grep -q -- '--keep' && echo 0 || echo 1)" \
+    "block1='$block1'"
+  report_wrapper_case "A3 group1 scoped WSH_COCKPIT_AGENT=user-preopen-1, no WSH_COCKPIT_PREFIX" \
+    "$(printf '%s\n' "$block1" | grep -qx 'WSH_COCKPIT_AGENT=user-preopen-1' \
+       && ! printf '%s\n' "$block1" | grep -q '^WSH_COCKPIT_PREFIX=' && echo 0 || echo 1)" \
+    "block1='$block1'"
+
+  local block2
+  block2=$(awk '/^ARGS:/{n++} n==2' "$spawnlog")
+  report_wrapper_case "A4 group2 relay: prefix + --force + --preopen, --keep extracted (not forwarded)" \
+    "$(printf '%s\n' "$block2" | grep -q "^ARGS: .*$pfx2.*--force.*--preopen" \
+       && ! printf '%s\n' "$block2" | grep -q -- '--keep' && echo 0 || echo 1)" \
+    "block2='$block2'"
+  report_wrapper_case "A5 group2 scoped WSH_COCKPIT_AGENT=user-preopen-2, no WSH_COCKPIT_PREFIX" \
+    "$(printf '%s\n' "$block2" | grep -qx 'WSH_COCKPIT_AGENT=user-preopen-2' \
+       && ! printf '%s\n' "$block2" | grep -q '^WSH_COCKPIT_PREFIX=' && echo 0 || echo 1)" \
+    "block2='$block2'"
+
+  # claude stub: exact args, exact WSH_COCKPIT_ADOPT, claude-<runid> shape,
+  # no WSH_COCKPIT_PREFIX, no user-preopen-* key anywhere in its env.
+  report_wrapper_case "A6 claude stub was launched" \
+    "$([ -f "$claudelog" ] && echo 0 || echo 1)" "no $claudelog"
+  if [ -f "$claudelog" ]; then
+    report_wrapper_case "A7 claude stub got exactly the post-'--' args (echo hi)" \
+      "$(grep -qx 'ARGS: echo hi' "$claudelog" && echo 0 || echo 1)" \
+      "$(grep '^ARGS:' "$claudelog")"
+    report_wrapper_case "A8 claude stub sees WSH_COCKPIT_ADOPT=sess1,sess2 in order" \
+      "$(grep -qx "WSH_COCKPIT_ADOPT=$sess1,$sess2" "$claudelog" && echo 0 || echo 1)" \
+      "$(grep '^WSH_COCKPIT_ADOPT=' "$claudelog")"
+    report_wrapper_case "A9 claude stub sees WSH_COCKPIT_AGENT=claude-<epoch>-<pid>" \
+      "$(grep -Eq '^WSH_COCKPIT_AGENT=claude-[0-9]+-[0-9]+$' "$claudelog" && echo 0 || echo 1)" \
+      "$(grep '^WSH_COCKPIT_AGENT=' "$claudelog")"
+    report_wrapper_case "A10 claude stub never sees WSH_COCKPIT_PREFIX" \
+      "$(! grep -q '^WSH_COCKPIT_PREFIX=' "$claudelog" && echo 0 || echo 1)" \
+      "$(grep '^WSH_COCKPIT_PREFIX=' "$claudelog")"
+    report_wrapper_case "A11 claude stub never sees a user-preopen-<n> agent key" \
+      "$(! grep -q '^WSH_COCKPIT_AGENT=user-preopen-' "$claudelog" && echo 0 || echo 1)" \
+      "$(grep '^WSH_COCKPIT_AGENT=' "$claudelog")"
+  fi
+
+  # Exit sweep, after the stub returned normally: sess1 (no --keep) destroyed
+  # with no orphaned claim/prefix marker; sess2 (--keep) still alive, claim
+  # freed (not left owned), sticky keep-<slug> marker itself untouched.
+  local h1=1 h2=1
+  mux_has "$sess1" && h1=0
+  mux_has "$sess2" && h2=0
+  report_wrapper_case "A12 non-keep session1 destroyed by the exit sweep" \
+    "$([ "$h1" -eq 1 ] && echo 0 || echo 1)" "mux_has sess1 rc=$h1"
+  report_wrapper_case "A13 keep session2 still alive after the exit sweep (released, not stopped)" \
+    "$([ "$h2" -eq 0 ] && echo 0 || echo 1)" "mux_has sess2 rc=$h2"
+  report_wrapper_case "A14 session1's claim/prefix markers cleaned up (no orphan)" \
+    "$([ ! -e "$(claim_path "$(session_slug "$sess1")")" ] && [ ! -e "$(prefix_file "$sess1")" ] && echo 0 || echo 1)" \
+    "claim=$(claim_path "$(session_slug "$sess1")") prefix=$(prefix_file "$sess1")"
+  if [ "$h2" -eq 0 ]; then
+    report_wrapper_case "A15 session2's claim freed (not left owned) after release" \
+      "$(! claim_is_claimed "$(session_slug "$sess2")" && echo 0 || echo 1)" \
+      "key=$(claim_read_key "$(claim_path "$(session_slug "$sess2")")" 2>/dev/null || true)"
+    report_wrapper_case "A16 session2's sticky keep marker survives the release" \
+      "$(keep_is_set "$sess2" && echo 0 || echo 1)" "keep_file=$(keep_file "$sess2")"
+  fi
+
+  # -- Case B: a value literally containing "--" (superset of "--and") must
+  #    refuse BEFORE any spawn call, and never launch the claude stub. -----
+  local b_case
+  for b_case in "evil--and-thing" "just--dashes"; do
+    local spawnlogb="$tmpdir/spawn-b.log" claudelogb="$tmpdir/claude-b.log"
+    : >"$spawnlogb"; rm -f "$claudelogb"
+    export WRAPTEST_SPAWN_LOG="$spawnlogb" WRAPTEST_CLAUDE_LOG="$claudelogb"
+    rc=0
+    PATH="$tmpdir/bin:$PATH" "$tmpdir/claude-cockpit.sh" "$b_case" -- echo hi \
+      >"$tmpdir/b.out" 2>"$tmpdir/b.err" || rc=$?
+    report_wrapper_case "B refuses value '$b_case' (rc!=0, no spawn, no claude launch)" \
+      "$([ "$rc" -ne 0 ] && [ ! -s "$spawnlogb" ] && [ ! -f "$claudelogb" ] && echo 0 || echo 1)" \
+      "rc=$rc spawnlog=$(cat "$spawnlogb" 2>/dev/null) stderr=$(cat "$tmpdir/b.err")"
+  done
+
+  # -- Case C: two groups resolving to the same prefix must refuse BEFORE
+  #    any spawn call. ---------------------------------------------------
+  local spawnlogc="$tmpdir/spawn-c.log" claudelogc="$tmpdir/claude-c.log"
+  : >"$spawnlogc"; rm -f "$claudelogc"
+  export WRAPTEST_SPAWN_LOG="$spawnlogc" WRAPTEST_CLAUDE_LOG="$claudelogc"
+  local samepfx="wraptest-c-$$"
+  rc=0
+  PATH="$tmpdir/bin:$PATH" "$tmpdir/claude-cockpit.sh" "$samepfx" --and "$samepfx" -- echo hi \
+    >"$tmpdir/c.out" 2>"$tmpdir/c.err" || rc=$?
+  report_wrapper_case "C refuses two groups sharing the same prefix (rc!=0, no spawn, no claude launch)" \
+    "$([ "$rc" -ne 0 ] && [ ! -s "$spawnlogc" ] && [ ! -f "$claudelogc" ] && echo 0 || echo 1)" \
+    "rc=$rc spawnlog=$(cat "$spawnlogc" 2>/dev/null) stderr=$(cat "$tmpdir/c.err")"
+
+  # -- Case F: a group's spawn genuinely failing aborts BEFORE claude is
+  #    launched; earlier groups already opened in this run stay open. -----
+  local okpfx="wraptest-f-ok-$$" failpfx="wraptest-f-fail-$$"
+  local spawnlogf="$tmpdir/spawn-f.log" claudelogf="$tmpdir/claude-f.log"
+  : >"$spawnlogf"; rm -f "$claudelogf"
+  export WRAPTEST_SPAWN_LOG="$spawnlogf" WRAPTEST_CLAUDE_LOG="$claudelogf"
+  export FAKE_SPAWN_FAIL_PREFIX="$failpfx"
+  rc=0
+  PATH="$tmpdir/bin:$PATH" "$tmpdir/claude-cockpit.sh" "$okpfx" --and "$failpfx" -- echo hi \
+    >"$tmpdir/f.out" 2>"$tmpdir/f.err" || rc=$?
+  unset FAKE_SPAWN_FAIL_PREFIX
+  local sess_ok
+  sess_ok=$(grep '^SESSION=' "$tmpdir/f.out" | sed -n '1s/^SESSION=//p')
+  [ -n "$sess_ok" ] && created+=("$sess_ok")
+  report_wrapper_case "F aborts without launching claude when a group's spawn fails" \
+    "$([ "$rc" -ne 0 ] && [ ! -f "$claudelogf" ] && echo 0 || echo 1)" \
+    "rc=$rc stderr=$(cat "$tmpdir/f.err")"
+  report_wrapper_case "F earlier-opened group's cockpit is left open (no rollback)" \
+    "$([ -n "$sess_ok" ] && mux_has "$sess_ok" && echo 0 || echo 1)" "sess_ok='$sess_ok'"
+
+  unset REAL_WSH_LIVE WRAPTEST_SPAWN_LOG WRAPTEST_CLAUDE_LOG 2>/dev/null || true
+  selftest_wrapper_cleanup
+  trap - EXIT
+  if [ "$failures" -eq 0 ]; then echo "selftest-wrapper: all cases passed"; return 0
+  else echo "selftest-wrapper: $failures failure(s)" >&2; return 1; fi
+}

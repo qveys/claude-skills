@@ -188,6 +188,28 @@
 #                              rc=2 (no arbitrary fallback); not found -> rc=3; `wsh`
 #                              missing -> rc=1 (no hardcoded AppSupport fallback);
 #                              pure function test, no tmux session needed; rc 0/1
+#   selftest-wrapper           claude-cockpit.sh end-to-end (step-1.9, spec v12 §1):
+#                              "--and"-delimited group parsing; --keep extracted (not
+#                              forwarded to spawn) while --tab and every other flag
+#                              are relayed verbatim; refuses BEFORE any spawn call
+#                              when a value literally contains "--" (superset of
+#                              "--and") or when two groups resolve to the same
+#                              normalized prefix; each group's spawn call runs
+#                              scoped WSH_COCKPIT_AGENT=user-preopen-<n>, never
+#                              exported to the wrapper itself or to claude; claude
+#                              sees the exact WSH_COCKPIT_ADOPT=sess1,sess2,...
+#                              list and WSH_COCKPIT_AGENT=claude-<epoch>-<pid>, never
+#                              WSH_COCKPIT_PREFIX nor a user-preopen-<n> key; a
+#                              group's genuine spawn failure aborts before claude is
+#                              ever launched, earlier-opened cockpits in that same
+#                              run left open (no rollback); after claude returns
+#                              normally, the exit sweep releases keep-marked
+#                              sessions and stops/destroys the rest, with no
+#                              orphaned claim/prefix marker left behind. Runs
+#                              entirely against a throwaway fake wsh-live.sh (real
+#                              tmux session + real claim, no Wave `open`) and a fake
+#                              `claude` stub on PATH — never pops a real Wave block,
+#                              never launches the real claude; tmux-only; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -1110,6 +1132,9 @@ selftest-adopt)
 selftest-tab)
   cmd_selftest_tab
   ;;
+selftest-wrapper)
+  cmd_selftest_wrapper
+  ;;
 push)
   have_mux
   # [session] is genuinely optional: with only <local> <remote-path> the
@@ -1387,5 +1412,5 @@ release)
   fi
   ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt|selftest-tab} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt|selftest-tab|selftest-wrapper} [args]" >&2; exit 2 ;;
 esac

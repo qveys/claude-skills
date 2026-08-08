@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-07 · **Étape courante : step-1.8 terminée, au tour de step-1.9**
+màj : 2026-08-09 · **Étape courante : step-1.9 terminée, au tour de step-1.10**
 
-NEXT: step-1.9
+NEXT: step-1.10
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -41,7 +41,7 @@ NEXT: step-1.9
 | 1.6 | `release <session>` + keep sticky + continuité `seq` | Sonnet | ✅ 2026-08-06 |
 | 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ✅ 2026-08-06 |
 | 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ✅ 2026-08-07 |
-| 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ☐ |
+| 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ✅ 2026-08-09 |
 | 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ☐ |
 | 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ☐ |
 | 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ☐ |
@@ -396,3 +396,68 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   troisième) — répertoire de travail intouché par cette fiche (seuls `wave.sh`, `wsh-live.sh`,
   `selftests.sh` modifiés ; ni `claim.sh` ni `session.sh`), donc pas une régression de step-1.8.
   1.9 (wrapper `claude-cockpit.sh`, `selftest-wrapper`, PATH) prend le relais.
+- 2026-08-09 (step-1.9, Sonnet, implémentation déléguée à un sous-agent builder Sonnet —
+  politique de délégation du chantier, coordination + revue faites par la session principale) :
+  **wrapper `claude-cockpit.sh` livré** — nouveau fichier `scripts/claude-cockpit.sh` (non
+  sourcé, exécuté directement), sibling de `wsh-live.sh`. Parsing en deux passes : passe 1
+  valide TOUS les groupes (séparés par `--and`) avant tout `spawn` — refuse si une valeur
+  (prefix ou valeur de flag) contient littéralement `--` (sur-ensemble volontaire de `--and`,
+  toute valeur de cette forme est ambiguë avec la grammaire de la CLI) ou si deux groupes
+  résolvent au même prefix normalisé via `normalize_prefix` appelée sous le même scoping
+  exact que le vrai `spawn` (`WSH_COCKPIT_AGENT=user-preopen-<n>`, `WSH_COCKPIT_PREFIX`
+  absent) — le contrôle de collision ne peut donc jamais diverger de ce que `spawn` résoudrait
+  réellement ; passe 2 spawn chaque groupe dans l'ordre, `WSH_COCKPIT_AGENT=user-preopen-<n>`
+  scopé au seul appel (`env VAR=... "$WSH_LIVE" spawn ...`, jamais exporté au wrapper ni à
+  claude), `--force --preopen` systématiques, `--keep` extrait (jamais transmis à `spawn`) et
+  pose immédiatement le marqueur sticky `keep-<slug>` (`touch "$(keep_file "$sess")"`) sitôt le
+  nom de session connu — la pose elle-même était explicitement hors périmètre de step-1.6
+  (marqueur consulté en lecture seule jusqu'ici), c'est cette fiche qui la livre. Nom de session
+  récupéré via le contrat stdout déjà existant de `spawn` (`SESSION=$SESS`, grep+tail). Puis
+  `WSH_COCKPIT_ADOPT=sess1,sess2,...` (liste ordonnée) et `WSH_COCKPIT_AGENT=claude-<epoch>-<pid>`
+  exportées pour le process `claude` lancé en avant-plan (jamais `exec`, le wrapper doit
+  reprendre la main pour le balayage de sortie) ; `WSH_COCKPIT_PREFIX` explicitement absente de
+  cet environnement (retirée même si héritée de l'environnement du wrapper — `normalize_prefix`
+  la consulte avant `WSH_COCKPIT_AGENT`, une fuite aurait tout court-circuité). Balayage de
+  sortie (après tout retour du stub claude, succès ou échec — seul un crash du wrapper lui-même
+  saute le balayage) : énumération calquée sur `cmd_gc` (`mux_list_sessions | grep '^cockpit-'`
+  → `session_slug` → `claim_read_key` du chemin de claim), jamais un glob brut sur `$STATE_DIR`
+  qui ferait remonter du résidu de sessions mortes (hors sujet ici, c'est la passe d'hygiène de
+  `gc`) ; une session dont la clé actuelle est `claude-<runid>` (adoptée pendant le run) ou
+  toujours `user-preopen-<n>` (jamais adoptée) est relâchée (`release`, si keep) ou détruite
+  (`stop`, sinon) — le wrapper impersonne la clé propriétaire (`WSH_COCKPIT_AGENT="$owner"`)
+  pour que l'appel `release`/`stop` passe l'enforcement I4 (owner-only) de `release_session`, et
+  ne repasse `WSH_COCKPIT_ADOPT="$ADOPT_LIST"` qu'à la branche `claude-<runid>` (reconstruit
+  fidèlement l'appartenance ADOPT au moment du release, exactement la mécanique actée en
+  step-1.6 — la branche `user-preopen-<n>` n'a jamais été adoptée, `release_session` doit la
+  traiter en branche « créée », pas « adoptée »). Un `spawn` de groupe qui échoue avorte
+  immédiatement (claude jamais lancé), les cockpits des groupes précédents dans le même run
+  restent ouverts (pas de rollback, diagnostic pilote). Exposition PATH : symlink
+  `~/.local/bin/claude-cockpit` → chemin absolu du script (`~/.local/bin` déjà dans le `$PATH`
+  de la machine, confirmé avant délégation ; le symlink préexistant `~/.local/bin/claude` —
+  le vrai CLI — n'a pas été touché) ; `~/.zshrc` non modifié, commande d'installation documentée
+  en tête du script (`SKILL.md` n'existe pas encore, reporté à 1.10). **RED-first démontré** :
+  `selftest-wrapper` lancé avant l'existence de `claude-cockpit.sh` → échec propre immédiat
+  (garde explicite en tête de `cmd_selftest_wrapper`, rc=1) ; 22 cas ajoutés à
+  `scripts/lib/selftests.sh` (nouveau bloc, même moule que `selftest-tab` de step-1.8 : `claude`
+  ET `wsh-live.sh` mockés par des stubs dans un `$PATH` de test dédié — le faux `wsh-live.sh`
+  crée de VRAIES sessions tmux via les primitives réelles de `lib/session.sh`/`lib/claim.sh`
+  pour que le balayage de sortie soit testé contre un état réel, jamais un `wsh run`/Wave réel).
+  Bug trouvé et corrigé pendant le passage au vert (implémentation, pas test) : `spawn_group()`
+  parsait `PG_PREFIX` mais ne le relayait jamais au vrai appel `spawn` (seuls les flags
+  `PG_RELAY` l'étaient) — les deux groupes se retrouvaient sans prefix propre, faussant 4 cas
+  (A2/A4 sur le relais, et le cas F où le déclencheur d'échec simulé ne matchait plus jamais,
+  laissant le groupe « en échec » réussir silencieusement et le balayage de sortie détruire la
+  session que le cas attendait intacte) — corrigé en préfixant `PG_PREFIX` au tableau `relay`
+  avant `PG_RELAY`. 22/22 verts ensuite, reconfirmé par la session coordinatrice en session tmux
+  jetable après revue. Non-régression : `selftest-guard`, `selftest-claim`, `selftest-adopt`
+  tous verts (82 `ok`, 0 `FAIL` combinés), revérifiés par relecture directe du code (signatures
+  `keep_file`/`claim_path`/`claim_read_key`/`mux_list_sessions`/le contrat `SESSION=` de `spawn`
+  confrontées au code réel plutôt qu'à la mémoire du rapport) plutôt que par confiance aveugle
+  au rapport du sous-agent. Scénario bout-en-bout manuel (2 groupes réels dont un `--keep`,
+  stub claude, vrai `wsh-live.sh`) confirmé conforme au critère done : non-keep détruite, keep
+  vivante + claim relâché + marqueur keep survivant. Résidu de marqueurs morts (`keep-`,
+  `last-session-user-preopen-*`, un `.won-*` sous plancher anti-course 10 min) laissé par les
+  runs de selftests (builder + revérification) nettoyé via `gc` réel (chemin déjà testé) plutôt
+  qu'un `rm` à la main ; le `.won-*` restant sous plancher est attendu, s'auto-nettoiera au
+  prochain `gc` passé les 10 min, non bloquant. Aucun flake observé sur cette fiche. 1.10 (docs :
+  `SKILL.md`, session-lifecycle, gotchas, README) prend le relais.
