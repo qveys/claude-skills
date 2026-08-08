@@ -105,7 +105,9 @@ tab_cache_file() { printf '%s/tab-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -c
 # Call with no session name (or an empty one) to behave exactly like the
 # uncached resolve_live_tab — used by `doctor`, which must never write state.
 resolve_live_tab_cached() {
-  local sess="$1" cache tab ro
+  # ${1:-}, not $1: the documented no-session mode above (called by `doctor`)
+  # omits the argument entirely, which would abort under set -u otherwise.
+  local sess="${1:-}" cache tab ro
   if [ -n "$sess" ]; then
     cache=$(tab_cache_file "$sess")
     if [ -f "$cache" ]; then
