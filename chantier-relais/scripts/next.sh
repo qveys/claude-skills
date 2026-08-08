@@ -15,6 +15,8 @@ chantier=$(sed -n '1s/^# *STATE *[—-]* *\(chantier \)\{0,1\}//p' "$DIR/STATE.m
 [ -n "$chantier" ] || chantier=$(basename "$PWD")
 
 prev_next=""
+replays=0
+max_replays="${RELAY_MAX_REPLAYS:-1}"
 while :; do
   next=$(grep -m1 '^NEXT:' "$DIR/STATE.md" | awk '{print $2}')
   case "${next:-}" in
@@ -37,7 +39,14 @@ while :; do
   esac
 
   if [ -n "$next" ] && [ "$next" = "$prev_next" ]; then
+    replays=$((replays + 1))
+    if [ "$replays" -gt "$max_replays" ]; then
+      echo "■ NEXT: $next inchangé après rejeu — mettre à jour STATE.md ou relancer le relais."
+      break
+    fi
     echo "⚠ NEXT inchangé ($next) — la fiche va être rejouée (rituel de fin oublié ?)."
+  else
+    replays=0
   fi
 
   echo ""
