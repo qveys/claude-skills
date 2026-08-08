@@ -205,39 +205,49 @@ cmd_selftest_live() {
   # arithmetic): the TYPED line is unevaluated shell text, so an arithmetic
   # expression like $((3*3)) would show up as literal "$((3*3))", not "9",
   # until it actually runs — a plain string sidesteps that trap entirely.
-  unset WSH_LIVE_SEP_REINIT WSH_STEP_INLINE 2>/dev/null || true
-  set +e
-  "$0" remote-init "$SESS" >/dev/null 2>&1
-  "$0" send 'echo RI_INLINE_MARK' "$SESS" >/dev/null 2>&1
-  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
-  rc=$?
-  set -e
-  out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
-  local flat9; flat9=$(printf '%s' "$out" | tr -d '\n')
-  if [ "$rc" -eq 0 ] \
-     && printf '%s' "$flat9" | grep -Fq '__wc=' \
-     && printf '%s' "$out" | grep -Fq 'RI_INLINE_MARK'; then
-    report_live_case "9 remote-init inline" 0
+  # tmux-only: remote_mode_set is a no-op under zellij (no per-session option
+  # store), so this assertion doesn't apply there — skip it like check 6.
+  if [ "$MUX" != tmux ]; then
+    echo "skip 9 remote-init inline (backend $MUX — no per-session option store)"
   else
-    report_live_case "9 remote-init inline" 1 "rc=$rc missing inline __wc= marker and/or RI_INLINE_MARK"
+    unset WSH_LIVE_SEP_REINIT WSH_STEP_INLINE 2>/dev/null || true
+    set +e
+    "$0" remote-init "$SESS" >/dev/null 2>&1
+    "$0" send 'echo RI_INLINE_MARK' "$SESS" >/dev/null 2>&1
+    "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+    rc=$?
+    set -e
+    out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
+    local flat9; flat9=$(printf '%s' "$out" | tr -d '\n')
+    if [ "$rc" -eq 0 ] \
+       && printf '%s' "$flat9" | grep -Fq '__wc=' \
+       && printf '%s' "$out" | grep -Fq 'RI_INLINE_MARK'; then
+      report_live_case "9 remote-init inline" 0
+    else
+      report_live_case "9 remote-init inline" 1 "rc=$rc missing inline __wc= marker and/or RI_INLINE_MARK"
+    fi
   fi
 
   # 10. local-init reverts THIS session back to the short __wsh-call form —
   # match the exact literal line sep_wrap emits for THIS send (a distinct
   # marker text), so leftover inline text from step 9's scrollback can't
-  # produce a false pass.
-  set +e
-  "$0" local-init "$SESS" >/dev/null 2>&1
-  "$0" send 'echo RI_LOCAL_MARK' "$SESS" >/dev/null 2>&1
-  "$0" wait-done "$SESS" 30 >/dev/null 2>&1
-  rc=$?
-  set -e
-  out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
-  if [ "$rc" -eq 0 ] \
-     && printf '%s' "$out" | tr -d '\n' | grep -Eq "__wsh '[0-9]+' 'echo RI_LOCAL_MARK'"; then
-    report_live_case "10 local-init reverts" 0
+  # produce a false pass. Same tmux-only limitation as check 9.
+  if [ "$MUX" != tmux ]; then
+    echo "skip 10 local-init reverts (backend $MUX — no per-session option store)"
   else
-    report_live_case "10 local-init reverts" 1 "rc=$rc expected short-form __wsh call for RI_LOCAL_MARK not found"
+    set +e
+    "$0" local-init "$SESS" >/dev/null 2>&1
+    "$0" send 'echo RI_LOCAL_MARK' "$SESS" >/dev/null 2>&1
+    "$0" wait-done "$SESS" 30 >/dev/null 2>&1
+    rc=$?
+    set -e
+    out=$("$0" read "$SESS" 60 2>&1 | tr -d '\r')
+    if [ "$rc" -eq 0 ] \
+       && printf '%s' "$out" | tr -d '\n' | grep -Eq "__wsh '[0-9]+' 'echo RI_LOCAL_MARK'"; then
+      report_live_case "10 local-init reverts" 0
+    else
+      report_live_case "10 local-init reverts" 1 "rc=$rc expected short-form __wsh call for RI_LOCAL_MARK not found"
+    fi
   fi
 
   # 11. step-run combines banner-step + framed send + wait-done into ONE call:
@@ -826,4 +836,919 @@ cmd_selftest_output() {
     exit 1
   fi
   echo "selftest-output: ok"
+}
+
+cmd_selftest_guard() {
+  have_mux
+  if [ "$MUX" != tmux ]; then
+    echo "selftest-guard: skip (tmux-only — the guard rests on tmux display-message)"
+    return 0
+  fi
+  # M4 (docs/gotchas.md): this runs on the DEFAULT tmux server, not an
+  # isolated one — case 10 groups a throwaway session onto whatever real
+  # session is currently running this selftest. Warn up front so a reader
+  # of the output (not just the source) sees it before it happens.
+  echo "selftest-guard: note — runs on the default tmux server; case 10 briefly groups a throwaway session onto this call's own live session (see docs/gotchas.md)"
+  # NOT local: cleanup runs from the EXIT trap after this function returned
+  # (same rationale as cmd_selftest_gc's SESS).
+  GUARD_BUSY="cockpit-selftest-guard-busy-$$"
+  GUARD_IDLE="cockpit-selftest-guard-idle-$$"
+  GUARD_KEY="selftest-guard-$$"
+  GUARD_GROUP="cockpit-selftest-guard-group-$$"
+  GUARD_DECOY="cockpit-selftest-guard-decoy-$$"
+  GUARD_PANES="cockpit-selftest-guard-panes-$$"
+  GUARD_T6_PREFIX="cockpit-t6anchor-$$"
+  GUARD_T6_SESS="${GUARD_T6_PREFIX}-1"
+  GUARD_NB_PREFIX="cockpit-t7nb-$$"
+  GUARD_NB_SESS="${GUARD_NB_PREFIX}-full"
+  GUARD_INDET="cockpit-selftest-guard-indet-$$"
+  GUARD_GCOWN="cockpit-selftest-guard-gcown-$$"
+  GUARD_GCOTHER="cockpit-selftest-guard-gcother-$$"
+  GUARD_W2="cockpit-selftest-guard-w2-$$"
+  # Case 23 runs gc via send-keys (see below) — the only way to observe its
+  # rc from outside that pane is to have the sent command write it to a
+  # file itself. Dedicated to this one case, cleaned by the trap below.
+  GUARD_GCOWN_RCFILE="${TMPDIR:-/tmp}/wsh-cockpit-selftest-guard-gcown-rc.$$"
+  # Task 3, lot 2 (cases 30-36): form-first discrimination + --session flag.
+  # GUARD_T3_ALIVE is remembered as the last session under GUARD_T3_KEY so
+  # cases 31/32 can tell the fix apart from the pre-fix bug: silently
+  # dropping the dead-shaped token used to fall back to this remembered
+  # session (rc != 4) instead of failing loud on the token itself. GUARD_T3_DEAD
+  # is a name that LOOKS like a session (matches looks_like_session) but is
+  # never created. GUARD_T3_KEY2 is a separate, never-remembered key so case
+  # 33 resolves to SESS_DEFAULT untainted by GUARD_T3_ALIVE.
+  GUARD_T3_ALIVE="cockpit-selftest-guard-t3-$$"
+  GUARD_T3_DEAD="cockpit-selftest-guard-mort-$$"
+  GUARD_T3_KEY="selftest-guard-t3-$$"
+  GUARD_T3_KEY2="selftest-guard-t3b-$$"
+  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep err rcline gcrc
+
+  report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
+    if [ "$2" -eq 0 ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1${3:+: $3}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # Anchored with "=" (exact-name match only): without it, kill-session
+  # resolves -t by exact match, then prefix, then fnmatch — a stray session
+  # whose name only PREFIXES one of these could be killed by mistake. See
+  # cases 9-10 below for the same hazard hitting session_safe_to_reuse.
+  selftest_guard_cleanup() {
+    tmux kill-session -t "=$GUARD_BUSY" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_IDLE" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_GROUP" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_PANES" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_NB_SESS" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_INDET" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_W2" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_T3_ALIVE" 2>/dev/null || true
+    rm -f "$GUARD_GCOWN_RCFILE" 2>/dev/null || true
+    rm -f "$(seq_file "$GUARD_W2")" 2>/dev/null || true
+    rm -f "$(seq_file "$GUARD_T3_ALIVE")" 2>/dev/null || true
+    rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
+    rm -f "$STATE_DIR/last-session-$GUARD_T3_KEY" 2>/dev/null || true
+  }
+  trap selftest_guard_cleanup EXIT
+
+  # 1. outside tmux, own_tmux_session must fail cleanly with rc == 1
+  #    precisely — not just "rc != 0", which a missing/renamed function
+  #    (rc=127) would also satisfy.
+  set +e
+  ( unset TMUX; own_tmux_session >/dev/null 2>&1 )
+  rc=$?
+  set -e
+  if [ "$rc" -eq 1 ]; then report_guard_case "1 own_tmux_session outside tmux -> rc==1" 0
+  else report_guard_case "1 own_tmux_session outside tmux -> rc==1" 1 "rc=$rc (expected 1)"; fi
+
+  # 2+3. only meaningful when THIS test itself runs inside tmux.
+  if [ -n "${TMUX:-}" ]; then
+    set +e; own=$(own_tmux_session); rc=$?; set -e
+    if [ "$rc" -eq 0 ] && [ -n "$own" ]; then report_guard_case "2 own_tmux_session names current session" 0
+    else report_guard_case "2 own_tmux_session names current session" 1 "rc=$rc own='$own'"; fi
+    set +e; session_safe_to_reuse "$own" 2>/dev/null; rc=$?; set -e
+    if [ "$rc" -ne 0 ]; then report_guard_case "3 own session refused" 0
+    else report_guard_case "3 own session refused" 1 "rc=0 on '$own'"; fi
+  else
+    echo "note: cases 2-3 skipped (not inside tmux)"
+  fi
+
+  # 4. a session whose foreground is NOT a bare shell is refused.
+  tmux new-session -d -s "$GUARD_BUSY" 'exec top'
+  tries=0; cmd=""
+  while [ "$tries" -lt 20 ]; do
+    cmd=$(mux_pane_command "$GUARD_BUSY")
+    [ "$cmd" = top ] && break
+    tries=$((tries + 1)); sleep 0.2
+  done
+  set +e; session_safe_to_reuse "$GUARD_BUSY" 2>/dev/null; rc=$?; set -e
+  if [ "$rc" -ne 0 ]; then report_guard_case "4 non-shell foreground refused" 0
+  else report_guard_case "4 non-shell foreground refused" 1 "rc=0 (cmd='$cmd')"; fi
+
+  # 5. a bare-shell session is accepted.
+  tmux new-session -d -s "$GUARD_IDLE"
+  set +e; session_safe_to_reuse "$GUARD_IDLE" 2>/dev/null; rc=$?; set -e
+  if [ "$rc" -eq 0 ]; then report_guard_case "5 bare shell accepted" 0
+  else report_guard_case "5 bare shell accepted" 1 "rc=$rc"; fi
+
+  # 6. empty pane_current_command (zellij / transient) = unverifiable-but-SAFE.
+  set +e
+  ( mux_pane_command() { printf ''; }; session_safe_to_reuse "$GUARD_IDLE" 2>/dev/null )
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then report_guard_case "6 empty pane command treated safe" 0
+  else report_guard_case "6 empty pane command treated safe" 1 "rc=$rc"; fi
+
+  # 7. find_reusable_session must NOT hand back a remembered-but-unsafe session.
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$GUARD_BUSY" > "$STATE_DIR/last-session-$GUARD_KEY"
+  set +e
+  found=$( WSH_COCKPIT_AGENT="$GUARD_KEY"; export WSH_COCKPIT_AGENT
+           find_reusable_session "selftest-guard-none" 2>/dev/null )
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && [ -z "$found" ]; then report_guard_case "7 unsafe remembered session not reused" 0
+  else report_guard_case "7 unsafe remembered session not reused" 1 "rc=$rc found='$found'"; fi
+
+  # 8. start --reuse on the caller's own session must refuse with exit 8.
+  #    Confined under GUARD_KEY so the red phase can never pollute the real
+  #    agent state (remember_session on the caller's own session is exactly
+  #    the original incident).
+  if [ -n "${TMUX:-}" ]; then
+    own=$(tmux display-message -p '#S')
+    set +e
+    WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" start "$own" --reuse >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ]; then report_guard_case "8 start --reuse refuses own session (exit 8)" 0
+    else report_guard_case "8 start --reuse refuses own session (exit 8)" 1 "rc=$rc (expected 8)"; fi
+  else
+    echo "note: case 8 skipped (not inside tmux)"
+  fi
+
+  # 9. alias by prefix: tmux resolves -t by exact name, then prefix, then
+  #    fnmatch — a strict prefix of the caller's own session name that
+  #    still resolves (unambiguously) to that same session must be refused
+  #    just like the exact name (case 3). Skip if the prefix is empty or
+  #    resolves ambiguously/not-at-all in this environment: no proof either
+  #    way, not a failure.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    pfx=${own%?}
+    resolved=$(tmux display-message -p -t "$pfx" '#{session_name}' 2>/dev/null || true)
+    if [ -z "$pfx" ] || [ "$resolved" != "$own" ]; then
+      echo "note: case 9 skipped (prefix '$pfx' of '$own' resolved to '$resolved', not unambiguous)"
+    else
+      set +e; session_safe_to_reuse "$pfx" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -ne 0 ]; then report_guard_case "9 prefix alias of own session refused" 0
+      else report_guard_case "9 prefix alias of own session refused" 1 "rc=0 on prefix '$pfx' (resolves to own session '$own')"; fi
+    fi
+  else
+    echo "note: case 9 skipped (not inside tmux)"
+  fi
+
+  # 10. grouped session: `tmux new-session -t <own>` creates a session with
+  #     a DIFFERENT name that shares the caller's pane (Wave wraps blocks
+  #     this way) — session_safe_to_reuse must catch the shared pane, not
+  #     just a name match. Skip if the grouped session can't be created.
+  #
+  #     Gotcha discovered empirically on this machine (tmux 3.7b): unqualified
+  #     `tmux display-message -p '#S'` (what own_tmux_session() calls) does
+  #     NOT stay pinned to the session's original name once a grouped session
+  #     shares its pane — it drifts to the MOST RECENTLY CREATED session
+  #     within that share group. So right after `new-session -t "$own"
+  #     -s "$GUARD_GROUP"`, own_tmux_session() already returns "$GUARD_GROUP"
+  #     itself, and the pre-existing exact-name check would match BY
+  #     ACCIDENT — passing whether or not session_is_own's new pane-identity
+  #     check exists. A throwaway decoy grouped session created right after
+  #     shifts that drift away from GUARD_GROUP (confirmed: current becomes
+  #     the decoy), so the exact-name AND canonical-name checks both
+  #     genuinely fail here and only the pane-membership check
+  #     (mux_session_panes contains $TMUX_PANE) can still catch it.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    tmux new-session -d -s "$GUARD_GROUP" -t "=$own" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 10 skipped (could not create a grouped session on '$own')"
+    else
+      set +e
+      tmux new-session -d -s "$GUARD_DECOY" -t "=$own" 2>/dev/null
+      set -e
+      set +e; session_safe_to_reuse "$GUARD_GROUP" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -ne 0 ]; then report_guard_case "10 grouped session sharing own pane refused" 0
+      else report_guard_case "10 grouped session sharing own pane refused" 1 "rc=0 on '$GUARD_GROUP' (own_tmux_session now resolves to '$(own_tmux_session 2>/dev/null || true)')"; fi
+      # Kill both grouped sessions right away (not just at the end via the
+      # EXIT trap): leaving GUARD_GROUP alive would keep dragging
+      # own_tmux_session's drift (see block comment above) into the cases
+      # that follow, which need a clean read of the caller's real session.
+      tmux kill-session -t "=$GUARD_DECOY" 2>/dev/null || true
+      tmux kill-session -t "=$GUARD_GROUP" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 10 skipped (not inside tmux)"
+  fi
+
+  # 11. `=NAME` alias: tmux honours `=` as an exact-match anchor for
+  #     target-SESSION commands (has-session) but NOT for target-PANE ones
+  #     (display-message, capture-pane) — those silently return empty with
+  #     rc=0 instead of erroring. session_is_own strips the leading "="
+  #     (`${raw#=}`) before any lookup precisely so this case passes: were
+  #     that strip ever lost, mux_session_name/mux_session_panes would go
+  #     blind on "=<own>", the guard would fall through every check and
+  #     report 0 (reusable), and mux_kill — which DOES honour "=" — would
+  #     then tear down the caller's own session. Assert rc==1 exactly (the
+  #     refusal path), not just !=0: a missing/renamed function's rc=127
+  #     must not pass for the wrong reason.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e; session_safe_to_reuse "=$own" 2>/dev/null; rc=$?; set -e
+    if [ "$rc" -eq 1 ]; then report_guard_case "11 =own alias refused" 0
+    else report_guard_case "11 =own alias refused" 1 "rc=$rc (expected 1) on '=$own' (mux_session_name/mux_session_panes are blind to a '=' target-pane)"; fi
+  else
+    echo "note: case 11 skipped (not inside tmux)"
+  fi
+
+  # 12. pane-membership primitive: mux_pane_id only ever reports a target's
+  #     ACTIVE pane — a caller sitting in a NON-active pane of a multi-pane
+  #     session would be invisible to a check built on mux_pane_id alone.
+  #     mux_session_panes must enumerate ALL panes so session_is_own can
+  #     test membership instead of identity. This covers only the
+  #     primitive (mux_session_panes sees both panes where mux_pane_id
+  #     sees one) — NOT the end-to-end "caller sits in a non-active pane
+  #     of the target" scenario, which would require splitting the LIVE
+  #     window the user is watching. Do not do that here.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_PANES" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 12 skipped (could not create '$GUARD_PANES')"
+    else
+      # split-window is a target-PANE/window command, not target-session —
+      # unlike list-panes just below, "=" is NOT honoured here (measured:
+      # "can't find pane" on this tmux, swallowed by `|| true` the first
+      # time this test was written, which silently left the session at
+      # ONE pane and made the case fail for the wrong reason).
+      tmux split-window -d -t "$GUARD_PANES" 2>/dev/null || true
+      set +e
+      panes=$(mux_session_panes "$GUARD_PANES" 2>/dev/null)
+      active=$(mux_pane_id "$GUARD_PANES" 2>/dev/null)
+      set -e
+      pane_count=$(printf '%s\n' "$panes" | grep -c . || true)
+      active_count=$(printf '%s\n' "$active" | grep -c . || true)
+      if [ "$pane_count" -eq 2 ] && [ "$active_count" -eq 1 ]; then
+        report_guard_case "12 mux_session_panes sees both panes, mux_pane_id only the active one" 0
+      else
+        report_guard_case "12 mux_session_panes sees both panes, mux_pane_id only the active one" 1 "panes='$panes' (count=$pane_count) active='$active' (count=$active_count)"
+      fi
+      tmux kill-session -t "=$GUARD_PANES" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 12 skipped (not inside tmux)"
+  fi
+
+  # 13-18. mux_has/mux_kill anchor targets with "=" (exact match) — Task 6.
+  # tmux's default target resolution tries exact name, THEN session-name
+  # prefix, THEN fnmatch, in that order; unanchored, a bare prefix or glob
+  # silently resolves to a DIFFERENT, unrelated session. That is what let a
+  # dead remembered session "come back to life" via a same-prefixed homonym
+  # (session.sh:42) and what would let mux_kill tear down the wrong sibling
+  # session on a prefix collision. What each check asserts varies by case:
+  # 13/16 (mux_has must REJECT) and 17 (mux_kill must SPARE) assert BOTH the
+  # rc AND the session's real presence via mux_list_sessions — rc alone
+  # would let rc=127 (function missing/renamed) pass for the wrong reason.
+  # 14/15 (mux_has must ACCEPT) assert rc == 0 only — a missing function's
+  # rc=127 already fails that check on its own, so state isn't needed there.
+  # 18 (mux_kill must still ACTUALLY kill) asserts BOTH rc == 0 AND the
+  # session's real absence — the positive control that proves 17's "sibling
+  # spared" result isn't just mux_kill failing on everything (see
+  # task-6b-report.md for the RED proof that 18 catches that).
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_T6_SESS" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: cases 13-18 skipped (could not create '$GUARD_T6_SESS')"
+    else
+      # 13 (RED case A). "$GUARD_T6_PREFIX" is a STRICT prefix of
+      # "$GUARD_T6_SESS" (not the name itself) — must NOT resolve.
+      set +e; mux_has "$GUARD_T6_PREFIX" 2>/dev/null; rc=$?; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$rc" -ne 0 ] && [ "$present" = yes ]; then
+        report_guard_case "13 mux_has: strict prefix does not resolve" 0
+      else
+        report_guard_case "13 mux_has: strict prefix does not resolve" 1 "rc=$rc (expected !=0), session present=$present (expected yes)"
+      fi
+
+      # 14. Exact name still resolves — non-regression.
+      set +e; mux_has "$GUARD_T6_SESS" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -eq 0 ]; then
+        report_guard_case "14 mux_has: exact name resolves" 0
+      else
+        report_guard_case "14 mux_has: exact name resolves" 1 "rc=$rc"
+      fi
+
+      # 15. Caller-supplied "=name" must still resolve — mux_has must strip
+      # any leading "=" before re-anchoring (double "==" matches nothing),
+      # same guard session_is_own already applies (lib/session.sh). This
+      # contract is proven under tmux only: zellij's mux_has/mux_kill
+      # branches don't strip a leading "=" the way the tmux branch does, so
+      # under zellij `mux_has "=X"` would be false for a live session X. The
+      # divergence stays silent because this whole case (and cmd_selftest_guard
+      # entirely) never runs under zellij — see the `[ "$MUX" != tmux ]`
+      # early return at the top of this function.
+      set +e; mux_has "=$GUARD_T6_SESS" 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -eq 0 ]; then
+        report_guard_case "15 mux_has: caller-anchored name still resolves" 0
+      else
+        report_guard_case "15 mux_has: caller-anchored name still resolves" 1 "rc=$rc"
+      fi
+
+      # 16 (RED case, fnmatch). A glob pattern must NOT resolve either —
+      # session still alive at this point, so a false pass here could only
+      # come from fnmatch fallback, not from the session being absent.
+      set +e; mux_has "${GUARD_T6_PREFIX}*" 2>/dev/null; rc=$?; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$rc" -ne 0 ] && [ "$present" = yes ]; then
+        report_guard_case "16 mux_has: fnmatch pattern does not resolve" 0
+      else
+        report_guard_case "16 mux_has: fnmatch pattern does not resolve" 1 "rc=$rc (expected !=0), session present=$present (expected yes)"
+      fi
+
+      # 17 (RED case D). mux_kill on the strict prefix must NOT kill this
+      # sibling session — check BOTH that mux_kill itself reports failure
+      # (rc != 0: a rejected/no-op target, not a silent success) AND that
+      # the session is STILL LISTED afterwards. rc alone was not enough: a
+      # missing/renamed mux_kill (rc=127, message swallowed by 2>&1) would
+      # leave the session present and pass for the wrong reason.
+      set +e; mux_kill "$GUARD_T6_PREFIX" >/dev/null 2>&1; rc=$?; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$rc" -ne 0 ] && [ "$present" = yes ]; then
+        report_guard_case "17 mux_kill: strict prefix spares sibling session" 0
+      else
+        report_guard_case "17 mux_kill: strict prefix spares sibling session" 1 "rc=$rc (expected !=0), session '$GUARD_T6_SESS' present=$present (expected yes)"
+      fi
+
+      # 18 (positive control for 13-17, esp. 17). mux_kill on the EXACT name
+      # must still kill: proves mux_kill isn't just "always fails" — which
+      # would make case 17 pass for the wrong reason. Asserts BOTH rc == 0
+      # AND the session's real absence from mux_list_sessions afterwards.
+      set +e; mux_kill "$GUARD_T6_SESS" >/dev/null 2>&1; rc=$?; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_T6_SESS" && present=yes
+      if [ "$rc" -eq 0 ] && [ "$present" = no ]; then
+        report_guard_case "18 mux_kill: exact name still kills" 0
+      else
+        report_guard_case "18 mux_kill: exact name still kills" 1 "rc=$rc (expected 0), session '$GUARD_T6_SESS' present=$present (expected no)"
+      fi
+
+      # Safety-net cleanup regardless of outcome above (kept out of
+      # selftest_guard_cleanup's anchored kill so a failure in 17/18 can't
+      # leave an orphan behind either) — harmless no-op if 18 already killed it.
+      tmux kill-session -t "=$GUARD_T6_SESS" 2>/dev/null || true
+    fi
+  else
+    echo "note: cases 13-18 skipped (not inside tmux)"
+  fi
+
+  # 19 (I2, Task 7). `stop` hands its raw argument straight to
+  # teardown_session with no mux_has check of its own — before the fix,
+  # its six unanchored `tmux set-option -u -t "$sess"` calls resolved a bare
+  # PREFIX just like `set-option` always does (see docs/gotchas.md), so a
+  # prefix that only happens to match a live NEIGHBOUR session silently
+  # wiped that neighbour's remote-mode options while the anchored
+  # `mux_kill` right after correctly refused to kill anything. Reproduces
+  # the end-to-end measurement in task-7-brief.md I2: arm a session with
+  # all three option kinds teardown_session clears, call teardown_session
+  # with a STRICT prefix of its name (never the name itself), then assert
+  # the neighbour is both still ALIVE and all three options are UNCHANGED.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_NB_SESS" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 19 skipped (could not create '$GUARD_NB_SESS')"
+    else
+      remote_mode_set "$GUARD_NB_SESS" 1
+      remote_host_set "$GUARD_NB_SESS" "selftest-guard-nb-host"
+      remote_helper_path_set "$GUARD_NB_SESS" sep "/selftest/guard/nb/sep-path"
+      set +e; teardown_session "$GUARD_NB_PREFIX" >/dev/null 2>&1; set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_NB_SESS" && present=yes
+      mode=$( (remote_mode_get "$GUARD_NB_SESS") && echo 1 || echo "" )
+      host=$(remote_host_get "$GUARD_NB_SESS")
+      sep=$(remote_helper_path_get "$GUARD_NB_SESS" sep)
+      if [ "$present" = yes ] && [ "$mode" = 1 ] && [ "$host" = "selftest-guard-nb-host" ] && [ "$sep" = "/selftest/guard/nb/sep-path" ]; then
+        report_guard_case "19 teardown_session: prefix arg spares a neighbour session's options" 0
+      else
+        report_guard_case "19 teardown_session: prefix arg spares a neighbour session's options" 1 "present=$present mode='$mode' host='$host' sep='$sep' (expected yes/1/selftest-guard-nb-host/…/sep-path)"
+      fi
+      tmux kill-session -t "=$GUARD_NB_SESS" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 19 skipped (not inside tmux)"
+  fi
+
+  # 20 (Task 8, C1, RED-first). $TMUX set but $TMUX_PANE unset: own identity
+  # is indeterminable (M-a — anchoring on $TMUX_PANE doesn't help, the
+  # session drifts the same either way), so the guard must refuse outright
+  # rather than fall back to an arbitrary session comparison. Before the
+  # fix: own_tmux_session still returned 0 (display-message picks *some*
+  # session), and session_safe_to_reuse on a harmless bare-shell session
+  # that is NOT the caller's own also returned 0 (reusable) — a false
+  # negative caused by comparing against that arbitrary pick. GUARD_INDET is
+  # a fresh bare-shell session, unrelated to the caller, used only as a
+  # harmless target here.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_INDET" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 20 skipped (could not create '$GUARD_INDET')"
+    else
+      set +e; ( unset TMUX_PANE; own_tmux_session >/dev/null 2>&1 ); rc=$?; set -e
+      if [ "$rc" -eq 2 ]; then
+        report_guard_case "20a own_tmux_session with \$TMUX_PANE unset -> rc==2" 0
+      else
+        report_guard_case "20a own_tmux_session with \$TMUX_PANE unset -> rc==2" 1 "rc=$rc (expected 2)"
+      fi
+      set +e; ( unset TMUX_PANE; session_safe_to_reuse "$GUARD_INDET" ) 2>/dev/null; rc=$?; set -e
+      if [ "$rc" -ne 0 ]; then
+        report_guard_case "20b session_safe_to_reuse refuses a harmless session when \$TMUX_PANE is unset" 0
+      else
+        report_guard_case "20b session_safe_to_reuse refuses a harmless session when \$TMUX_PANE is unset" 1 "rc=0 on harmless '$GUARD_INDET'"
+      fi
+      tmux kill-session -t "=$GUARD_INDET" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 20 skipped (not inside tmux)"
+  fi
+
+  # 21 (Task 8, C2, RED-first). session_safe_to_reuse must strip a leading
+  # "=" anchor like session_is_own does: check 2 feeds its argument to
+  # mux_pane_command (display-message, blind to "=" — empty, rc=0), so an
+  # anchored "=name" left unstripped was classed unverifiable-but-safe and
+  # skipped the foreground check entirely (measured: rc=0 on a session
+  # running `top` — see task-8-report.md). Reuses GUARD_BUSY (created in
+  # case 4, foreground `top`, still alive until selftest_guard_cleanup).
+  set +e; session_safe_to_reuse "=$GUARD_BUSY" 2>/dev/null; rc=$?; set -e
+  if [ "$rc" -eq 1 ]; then
+    report_guard_case "21 anchored =name still hits the foreground check" 0
+  else
+    report_guard_case "21 anchored =name still hits the foreground check" 1 "rc=$rc (expected 1) on '=$GUARD_BUSY' (foreground top)"
+  fi
+
+  # 22 (Task 1, lot 2, stop). `stop <own session>` must refuse instead of
+  # killing the caller out from under itself — mirrors case 8 (start
+  # --reuse) but guards the stop) block instead of start's REUSE bypass.
+  # Confined under GUARD_KEY like case 8: WSH_COCKPIT_AGENT only matters to
+  # `stop` for the state-file cleanup at the tail of teardown_session, but
+  # keeping the same confinement pattern as case 8 avoids re-diverging.
+  # WARNING FOR ANYONE RUNNING THIS BY HAND: before the guard exists, this
+  # case actually KILLS the tmux session it runs inside — never run
+  # selftest-guard from your real controlling terminal (see the module-wide
+  # note this function prints, and docs/gotchas.md).
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" stop "$own" >/dev/null 2>&1
+    rc=$?
+    set -e
+    present=no
+    mux_list_sessions | grep -Fqx -- "$own" && present=yes
+    if [ "$rc" -eq 8 ] && [ "$present" = yes ]; then
+      report_guard_case "22 stop refuses own session (exit 8), session still alive" 0
+    else
+      report_guard_case "22 stop refuses own session (exit 8), session still alive" 1 "rc=$rc (expected 8), present=$present (expected yes)"
+    fi
+  else
+    echo "note: case 22 skipped (not inside tmux)"
+  fi
+
+  # 23 (Task 1, lot 2, gc — RED case). `gc --idle=0` run FROM INSIDE a
+  # detached cockpit-* session must not kill that session out from under
+  # itself. Unlike case 22, this can't be exercised by calling wsh-live.sh
+  # as a plain subprocess of THIS shell: own_tmux_session reads $TMUX/
+  # $TMUX_PANE from the calling process's own environment, which would
+  # still point at whatever session is running selftest-guard itself, not
+  # at GUARD_GCOWN. `send-keys` runs the command as a child of GUARD_GCOWN's
+  # own pane instead, so its $TMUX_PANE is genuinely GUARD_GCOWN's — the
+  # only way to reproduce "gc sweeping its own session" honestly. Target is
+  # NOT anchored with "=": send-keys is a target-PANE command and rejects a
+  # leading "=" outright (measured — "can't find pane: =cockpit-...").
+  #
+  # Presence alone is not enough: if the sent command breaks silently (bad
+  # cd, a typo on --only-session=, wsh-live.sh not found -> rc=127), the
+  # session would also survive, and this case would report ok for the wrong
+  # reason. The rc has to be observed too — the only way to get it out of
+  # GUARD_GCOWN's pane is to have the sent command write it to a file
+  # itself (GUARD_GCOWN_RCFILE), polled the same way as presence below.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_GCOWN" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 23 skipped (could not create '$GUARD_GCOWN')"
+    else
+      rm -f "$GUARD_GCOWN_RCFILE"
+      tmux send-keys -t "$GUARD_GCOWN" \
+        "cd '$(dirname "$SCRIPT_DIR")' && WSH_COCKPIT_AGENT='$GUARD_KEY' scripts/wsh-live.sh gc --idle=0 --only-session='$GUARD_GCOWN'; echo RC=\$? > '$GUARD_GCOWN_RCFILE'" Enter
+      tries=0; present=yes; rcline=""
+      while [ "$tries" -lt 30 ]; do
+        mux_list_sessions | grep -Fqx -- "$GUARD_GCOWN" || { present=no; break; }
+        if [ -s "$GUARD_GCOWN_RCFILE" ]; then
+          rcline=$(cat "$GUARD_GCOWN_RCFILE")
+          break
+        fi
+        tries=$((tries + 1)); sleep 0.5
+      done
+      gcrc="${rcline#RC=}"
+      if [ "$present" = yes ] && [ "$gcrc" = "0" ]; then
+        report_guard_case "23 gc --idle=0 spares the session it runs inside" 0
+      else
+        report_guard_case "23 gc --idle=0 spares the session it runs inside" 1 "present=$present (expected yes), rc='$gcrc' (expected 0, '$rcline')"
+      fi
+      tmux kill-session -t "=$GUARD_GCOWN" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 23 skipped (not inside tmux)"
+  fi
+
+  # 24 (Task 1, lot 2, gc — positive control). A session that is genuinely
+  # NOT the caller's own must still be swept normally: the own-session skip
+  # added for case 23 must not neutralise gc for everyone else. Calls
+  # cmd_gc directly in-process, same as cmd_selftest_gc's own cases 4-5 —
+  # no send-keys needed here, this session is never the caller's own so
+  # there is no self-kill hazard to isolate against.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_GCOTHER" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 24 skipped (could not create '$GUARD_GCOTHER')"
+    else
+      set +e
+      cmd_gc --idle=0 --only-session="$GUARD_GCOTHER" >/dev/null 2>&1
+      rc=$?
+      set -e
+      present=no
+      mux_list_sessions | grep -Fqx -- "$GUARD_GCOTHER" && present=yes
+      if [ "$rc" -eq 0 ] && [ "$present" = no ]; then
+        report_guard_case "24 gc still kills a genuinely non-own idle session" 0
+      else
+        report_guard_case "24 gc still kills a genuinely non-own idle session" 1 "rc=$rc (expected 0), session present=$present (expected no)"
+      fi
+      tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 24 skipped (not inside tmux)"
+  fi
+
+  # 25 (Task 2, lot 2, send). `send` on the caller's own session must refuse
+  # (exit 8) instead of typing the command straight into its own pane —
+  # against an interactive foreground (a live CLI REPL) that text is
+  # SUBMITTED as a new prompt instead of executing, exactly the incident
+  # `gotchas.md` already documents for spawn's silent reuse, here reachable
+  # through send's positional [session] argument instead of a remembered
+  # one. Guard placement follows plan §3: WRITE paths (send/keys/step-run/
+  # banner) refuse outright like `stop` (case 22); READ paths (read/output/
+  # wait-done) stay unguarded on purpose. Cases 26-28 point back here for
+  # the rationale instead of repeating it. Confined under GUARD_KEY like
+  # cases 8/22, so a red run can't pollute the real agent's state.
+  # WARNING FOR ANYONE RUNNING THIS BY HAND: before the guard exists, this
+  # case actually TYPES 'echo lot2-guard-marker' into the tmux session
+  # running this very selftest — an inert marker either way, but real:
+  # never run selftest-guard from a terminal you'd notice text appearing
+  # in (see the module-wide note this function prints, and docs/gotchas.md).
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-guard-marker' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "25 send refuses own session (exit 8)" 0
+    else
+      report_guard_case "25 send refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 25 skipped (not inside tmux)"
+  fi
+
+  # 26 (Task 2, lot 2, keys). Same guard, `keys)` block — see case 25.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" keys 'C-c' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "26 keys refuses own session (exit 8)" 0
+    else
+      report_guard_case "26 keys refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 26 skipped (not inside tmux)"
+  fi
+
+  # 27 (Task 2, lot 2, step-run). Same guard, `step-run)` block — see case 25.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" step-run 1 'probe' 'true' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "27 step-run refuses own session (exit 8)" 0
+    else
+      report_guard_case "27 step-run refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 27 skipped (not inside tmux)"
+  fi
+
+  # 28 (Task 2, lot 2, banner). Same guard, `banner)` block — see case 25.
+  # `banner` recognizes its trailing [session] argument only when it is NOT
+  # the sole remaining positional argument (wsh-live.sh: `[ $# -gt 1 ] &&
+  # mux_has "${!#}"`) — the 'probe' text ahead of $own keeps this call two
+  # args deep so the call actually reaches the guard instead of silently
+  # missing it and falling back to the remembered session.
+  if [ -n "${TMUX:-}" ]; then
+    own=$(own_tmux_session)
+    set +e
+    err=$(WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" banner step 'probe' "$own" 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 8 ] && printf '%s' "$err" | grep -q refusing; then
+      report_guard_case "28 banner refuses own session (exit 8)" 0
+    else
+      report_guard_case "28 banner refuses own session (exit 8)" 1 "rc=$rc (expected 8), stderr='$err'"
+    fi
+  else
+    echo "note: case 28 skipped (not inside tmux)"
+  fi
+
+  # 29 (Task 2, lot 2, positive control). A genuinely THIRD-PARTY session
+  # must still accept `send` normally — the guard added for cases 25-28
+  # must not neutralise writes to everyone else. GUARD_W2 is a fresh
+  # disposable session, unrelated to the caller; poll `mux_capture` (not
+  # just the rc) so this proves the command actually RAN in that pane, not
+  # merely that `send` returned 0. The seq-file `send` writes for GUARD_W2
+  # is keyed by session name, not by WSH_COCKPIT_AGENT (see lib/session.sh
+  # seq_file), so it needs its own cleanup — added to selftest_guard_cleanup
+  # above, not covered by the generic last-session-$GUARD_KEY removal.
+  if [ -n "${TMUX:-}" ]; then
+    set +e
+    tmux new-session -d -s "$GUARD_W2" 2>/dev/null
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "note: case 29 skipped (could not create '$GUARD_W2')"
+    else
+      set +e
+      WSH_COCKPIT_AGENT="$GUARD_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-w2-ok' "$GUARD_W2" >/dev/null 2>&1
+      rc=$?
+      set -e
+      tries=0; found=no
+      while [ "$tries" -lt 20 ]; do
+        mux_capture "$GUARD_W2" 50 | grep -q lot2-w2-ok && { found=yes; break; }
+        tries=$((tries + 1)); sleep 0.5
+      done
+      if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+        report_guard_case "29 send still writes to a genuinely non-own session" 0
+      else
+        report_guard_case "29 send still writes to a genuinely non-own session" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-w2-ok' never appeared in '$GUARD_W2')"
+      fi
+      tmux kill-session -t "=$GUARD_W2" 2>/dev/null || true
+      rm -f "$(seq_file "$GUARD_W2")" 2>/dev/null || true
+    fi
+  else
+    echo "note: case 29 skipped (not inside tmux)"
+  fi
+
+  # 30-36 (Task 3, lot 2): form-first discrimination
+  # (docs/plans/2026-08-02-desambiguisation-argument-session.md §2/§3) and the
+  # --session/-s flag (§2 point tranché 1). None of these need the caller to
+  # be inside tmux — they exercise a disposable session, not
+  # own_tmux_session — so unlike cases 2-3/25-29 they always run.
+
+  # 30. A session that IS alive is still recognized as before (non-regression).
+  # rc must be neither 4 (would mean need_session wrongly rejected an alive
+  # session) nor 127 (command-not-found — the surest sign of a typo'd helper
+  # call); the exact rc otherwise depends on whether seq #1 was ever framed
+  # in this fresh session, which this case doesn't control.
+  tmux new-session -d -s "$GUARD_T3_ALIVE" 2>/dev/null || true
+  (WSH_COCKPIT_AGENT="$GUARD_T3_KEY" remember_session "$GUARD_T3_ALIVE") 2>/dev/null || true
+  set +e
+  "$SCRIPT_DIR/wsh-live.sh" output "$GUARD_T3_ALIVE" 1 >/dev/null 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 4 ] && [ "$rc" -ne 127 ]; then
+    report_guard_case "30 output on a live session-shaped token is recognized (rc != 4, != 127)" 0
+  else
+    report_guard_case "30 output on a live session-shaped token is recognized (rc != 4, != 127)" 1 "rc=$rc"
+  fi
+
+  # 31. A token shaped like a session but DEAD must fail loud (exit 4), not
+  # fall through to the remembered GUARD_T3_ALIVE — this is the fix: before
+  # it, the dead token was silently dropped and this call would have
+  # succeeded (or failed some OTHER way) against GUARD_T3_ALIVE instead,
+  # never mentioning GUARD_T3_DEAD at all.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output "$GUARD_T3_DEAD" 1 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 4 ] && printf '%s' "$err" | grep -q "no tmux session"; then
+    report_guard_case "31 output on a dead session-shaped token fails loud (exit 4), not absorbed" 0
+  else
+    report_guard_case "31 output on a dead session-shaped token fails loud (exit 4), not absorbed" 1 "rc=$rc (expected 4), stderr='$err'"
+  fi
+
+  # 32. `banner`'s $# -gt 1 guard still protects a sole remaining argument
+  # from being mistaken for a session, even when it now ALSO looks like one
+  # by form — confined under GUARD_T3_KEY (remembered GUARD_T3_ALIVE) so
+  # banner has a live session to actually write into; the control is on rc,
+  # not on the pane's contents.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" banner header "$GUARD_T3_DEAD" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 4 ]; then
+    report_guard_case "32 banner's sole remaining arg stays text, not mistaken for a session" 0
+  else
+    report_guard_case "32 banner's sole remaining arg stays text, not mistaken for a session" 1 "rc=4 (expected != 4), stderr='$err'"
+  fi
+
+  # 33. Bare numbers are still never mistaken for a session name — under a
+  # key that has NO remembered session (GUARD_T3_KEY2), so this doesn't
+  # accidentally piggyback on GUARD_T3_ALIVE from cases 30-32. The rc itself
+  # is not asserted (it legitimately depends on whether SESS_DEFAULT
+  # "cockpit" happens to be alive on this machine); what must NEVER happen is
+  # '30' or '7' being named as an unknown session in stderr.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY2" "$SCRIPT_DIR/wsh-live.sh" wait-done 30 7 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if ! printf '%s' "$err" | grep -Eq "session '(30|7)'"; then
+    report_guard_case "33 wait-done's bare numbers are never mistaken for a session name" 0
+  else
+    report_guard_case "33 wait-done's bare numbers are never mistaken for a session name" 1 "rc=$rc, stderr='$err'"
+  fi
+
+  # 34. --session/-s on a dead session short-circuits straight to exit 4 —
+  # same outcome as case 31, reached through the flag instead of the
+  # positional loop.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output --session "$GUARD_T3_DEAD" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 4 ] && printf '%s' "$err" | grep -q "no tmux session"; then
+    report_guard_case "34 output --session on a dead session exits 4" 0
+  else
+    report_guard_case "34 output --session on a dead session exits 4" 1 "rc=$rc (expected 4), stderr='$err'"
+  fi
+
+  # 35. --session/-s with no value (end of arguments) is a usage error, not a
+  # silent no-op — exit 2, same family as spawn's -* usage errors above.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output --session 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ]; then
+    report_guard_case "35 output --session with no value exits 2 (usage error)" 0
+  else
+    report_guard_case "35 output --session with no value exits 2 (usage error)" 1 "rc=$rc (expected 2), stderr='$err'"
+  fi
+
+  # 36. Positive control: --session NAME still WRITES into that session —
+  # cases 31/34/35 must not have turned the flag into a pure rejection path.
+  # Poll mux_capture (not just rc) so this proves the command actually RAN.
+  set +e
+  WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-t3-ok' --session "$GUARD_T3_ALIVE" >/dev/null 2>&1
+  rc=$?
+  set -e
+  tries=0; found=no
+  while [ "$tries" -lt 20 ]; do
+    mux_capture "$GUARD_T3_ALIVE" 50 | grep -q lot2-t3-ok && { found=yes; break; }
+    tries=$((tries + 1)); sleep 0.5
+  done
+  if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+    report_guard_case "36 send --session NAME still writes to that session (positive control)" 0
+  else
+    report_guard_case "36 send --session NAME still writes to that session (positive control)" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-t3-ok' never appeared in '$GUARD_T3_ALIVE')"
+  fi
+
+  # 37. Final-review fix: --session/-s accepts a leading "=" (tmux's own
+  # exact-match-anchor syntax) without forwarding it verbatim to mux. Before
+  # the fix, SESS_FLAG stayed "=NAME" unstripped and every mux call
+  # downstream (send-keys -t, capture-pane -t) rejected it as an
+  # unparseable target — poll mux_capture (not just rc) so this proves the
+  # command actually ran, not just that the flag parsed.
+  set +e
+  WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-fw-ok' --session "=$GUARD_T3_ALIVE" >/dev/null 2>&1
+  rc=$?
+  set -e
+  tries=0; found=no
+  while [ "$tries" -lt 20 ]; do
+    mux_capture "$GUARD_T3_ALIVE" 50 | grep -q lot2-fw-ok && { found=yes; break; }
+    tries=$((tries + 1)); sleep 0.5
+  done
+  if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+    report_guard_case "37 --session '=NAME' is stripped and reaches the pane" 0
+  else
+    report_guard_case "37 --session '=NAME' is stripped and reaches the pane" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-fw-ok' never appeared in '$GUARD_T3_ALIVE')"
+  fi
+
+  # 38. Final-review fix: a banner TEXT argument that is itself multi-word
+  # and happens to start with "cockpit-" must not be mistaken for a session
+  # — looks_like_session's cockpit-* glob used to match it regardless of
+  # the embedded space (a real session name, produced only by spawn/start,
+  # never contains whitespace). A leading dummy word ("essai") satisfies
+  # banner's own $# -gt 1 guard so the trailing multi-word token is the one
+  # actually probed by the sniff. Confined to GUARD_T3_KEY, which already
+  # has a live GUARD_T3_ALIVE remembered from case 30 — resolution goes
+  # through the ordinary DEFAULT path (no --session, no positional session
+  # survives), same as real usage.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" banner "done" "essai" "cockpit-fixwave terminé" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 4 ]; then
+    report_guard_case "38 banner's multi-word cockpit-shaped text is not mistaken for a session" 0
+  else
+    report_guard_case "38 banner's multi-word cockpit-shaped text is not mistaken for a session" 1 "rc=4 (expected != 4), stderr='$err'"
+  fi
+
+  # 39 (PR review, CodeRabbit). The equals form --session=NAME must behave
+  # exactly like --session NAME — gc already accepts --idle=/--only-session=
+  # so callers WILL type it; before the fix it fell into PSF_REST, matched
+  # no discrimination branch, and the command silently ran against the
+  # REMEMBERED session instead of the named one. Poll mux_capture so this
+  # proves the command ran in the right pane, not just that parsing passed.
+  set +e
+  WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" send 'echo lot2-eq-ok' "--session=$GUARD_T3_ALIVE" >/dev/null 2>&1
+  rc=$?
+  set -e
+  tries=0; found=no
+  while [ "$tries" -lt 20 ]; do
+    mux_capture "$GUARD_T3_ALIVE" 50 | grep -q lot2-eq-ok && { found=yes; break; }
+    tries=$((tries + 1)); sleep 0.5
+  done
+  if [ "$rc" -eq 0 ] && [ "$found" = yes ]; then
+    report_guard_case "39 --session=NAME (equals form) reaches the named session" 0
+  else
+    report_guard_case "39 --session=NAME (equals form) reaches the named session" 1 "rc=$rc (expected 0), found=$found (expected yes, marker 'lot2-eq-ok' never appeared in '$GUARD_T3_ALIVE')"
+  fi
+
+  # 40 (PR review, CodeRabbit). --session PLUS a session-shaped positional is
+  # a contradiction — before the fix the positional was silently dropped and
+  # the flag won without a word, the exact "guess instead of fail" behavior
+  # this lot exists to close. flag_conflict_check must exit 2 with both names
+  # on stderr.
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" output --session "$GUARD_T3_ALIVE" "cockpit-conflict-$$" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'name the session once'; then
+    report_guard_case "40 --session + session-shaped positional fails loud (exit 2)" 0
+  else
+    report_guard_case "40 --session + session-shaped positional fails loud (exit 2)" 1 "rc=$rc (expected 2), stderr='$err'"
+  fi
+
+  # 41 (PR review, Copilot). read's LINES must be numeric on EVERY branch —
+  # before the fix `read --session NAME foo` fed "foo" straight to
+  # capture-pane -S as an invalid scrollback offset (confusing tmux error
+  # instead of a usage error).
+  set +e
+  err=$(WSH_COCKPIT_AGENT="$GUARD_T3_KEY" "$SCRIPT_DIR/wsh-live.sh" read --session "$GUARD_T3_ALIVE" foo 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'must be a positive integer'; then
+    report_guard_case "41 read rejects a non-numeric lines argument (exit 2)" 0
+  else
+    report_guard_case "41 read rejects a non-numeric lines argument (exit 2)" 1 "rc=$rc (expected 2), stderr='$err'"
+  fi
+
+  selftest_guard_cleanup
+  trap - EXIT
+  if [ "$failures" -eq 0 ]; then echo "selftest-guard: all cases passed"; return 0
+  else echo "selftest-guard: $failures failure(s)" >&2; return 1; fi
 }
