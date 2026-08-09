@@ -87,12 +87,13 @@ the Mac (`brew install tmux`).
 ```bash
 scripts/wsh-live.sh spawn [prefix] [--force] [--situate] [--pre <host>]  # open cockpit: reuse alive session by default
 scripts/wsh-live.sh start [session] [--reuse]  # create session (auto-unique if no name)
-scripts/wsh-live.sh open  [session]            # AUTO-OPEN a Wave block attached to it
+scripts/wsh-live.sh open  [session] [--tab <name>]  # AUTO-OPEN a Wave block attached to it, optionally anchored on a named tab
 scripts/wsh-live.sh send  '<command>' [session]  # type a command + Enter
 scripts/wsh-live.sh keys  '<tmux-keys>' [session] # raw keys: C-c, Up, q, Enter...
 scripts/wsh-live.sh read  [session] [lines]    # free-form pane snapshot (default 30 lines) — unframed panes only
 scripts/wsh-live.sh output [session] [seq] [--full]  # print exactly send #seq's framed segment — no lines to guess
-scripts/wsh-live.sh stop  [session]            # kill the session
+scripts/wsh-live.sh stop  [session]            # kill the session (or release it, if it carries a keep marker)
+scripts/wsh-live.sh release <session>          # hand a session back: ADOPTED -> retrograded/re-adoptable; created/legacy -> claim dropped (re-scannable). No last-session default, argument mandatory
 scripts/wsh-live.sh current                    # print last spawned session for this agent
 scripts/wsh-live.sh doctor                     # read-only diagnostic of the whole chain, rc 0/1
 scripts/wsh-live.sh gc [--dry-run] [--idle=SECONDS] [--only-session=NAME]  # sweep orphaned idle sessions
@@ -163,6 +164,42 @@ last-session state under `~/.cache/wsh-cockpit/`.
 `send` types a command + Enter, framed by default with header/footer banners
 (see `docs/framing-and-transfer.md`). `keys` sends raw control sequences
 (`C-c`, `Up`, `q`) for interactive programs — never framed.
+
+### Cockpit pré-ouvert par l'utilisateur — wrapper `claude-cockpit` et adoption
+
+L'utilisateur peut pré-ouvrir un ou plusieurs cockpits **avant même de te lancer**,
+via le wrapper `claude-cockpit` (`scripts/claude-cockpit.sh`, symlinké en
+`claude-cockpit` sur le `$PATH`) : `claude-cockpit theo-plan --keep --and deploy --
+<args claude>` crée un cockpit par groupe `--and`, pose `WSH_COCKPIT_ADOPT=<sessions>`
+(liste ordonnée) dans ton environnement, puis te lance. Ces sessions ne viennent pas
+d'un `spawn` que tu as toi-même émis — tu n'en es propriétaire qu'après une
+**adoption réussie**.
+
+- **Sonde systématique.** `spawn` (sans `--force`) tente d'abord ta propre session
+  enregistrée (registre), puis chaque session de `WSH_COCKPIT_ADOPT` — jamais en
+  silence : une sonde `hostname; pwd; whoami` tourne avant toute finalisation, son
+  résultat s'affiche, et un échec de sonde annule l'adoption (le claim est restauré,
+  jamais conservé sans preuve).
+- **Adoption ciblée.** Si l'utilisateur a nommé ses cockpits (préfixes des groupes
+  `--and`), reprends ces préfixes dans tes `spawn` — un préfixe explicite qui ne
+  correspond à **aucune** session adoptable **crée un cockpit neuf** (jamais
+  d'adoption forcée sur un préfixe non matché) ; seul un `spawn` **sans préfixe**
+  adopte en nominal (première session disponible de la liste).
+- **Propriété — `--keep` est sticky.** Une session pré-ouverte avec `--keep` reste
+  propriété de la session elle-même, pas de ton claim. Tu en as l'usage plein
+  (`send`/`read`/`banner`…) mais **jamais le droit de la détruire** : en fin de
+  tâche, `release` — jamais `stop` — pour qu'elle survive à la prochaine adoption
+  (le wrapper la relâchera de toute façon à ta sortie si tu as oublié). Une session
+  adoptée **sans** `--keep` peut être `stop`ée normalement en fin de tâche.
+- **`gc` et une keep abandonnée.** Une session `keep` détachée (aucun client Wave)
+  **et** idle depuis plus de 24 h retombe dans le balayage `gc` normal — `--keep`
+  protège des sweeps courts, pas d'un abandon prolongé.
+
+**Consignes sous-agents — clé distincte, nettoyage en fin de tâche.** Tout
+sous-agent qui `spawn`e son propre cockpit **doit** exporter un `WSH_COCKPIT_AGENT`
+qui lui est propre (jamais l'espace réservé `user-preopen-*`/`released` — `spawn`
+le refuse d'ailleurs explicitement). Règle simple en fin de tâche : **`stop` ce que
+tu as créé, `release` ce que tu as adopté** — jamais l'inverse.
 
 **To read a `send` result, prefer `wait-done --print` (or `output` after a
 plain `wait-done`) over `read N`.** The framing markers already delimit each
@@ -235,10 +272,15 @@ directement. Détails, fallback chain, méthodes : voir
 
 Every visible block/pane is clutter if left behind. **Wait at least 60s** before
 treating an apparently-idle block/session as an orphan — it may still be mid-run.
-Only delete blocks/sessions **you** created. `live` mode: `stop` (and `gc`) close
-the Wave block automatically along with the tmux session — nothing manual
-needed. Automated sweep for forgotten `live` sessions: `scripts/wsh-live.sh gc`.
-Full detail: see `docs/session-lifecycle.md`.
+Only delete blocks/sessions **you created or adopted without `--keep`**. A
+session adopted **with** `--keep` set stays owned but not destroyable — always
+`release` it (never `stop`), so it survives for the next adoption instead of
+tearing down the user's own cockpit; `stop` on a keep session already
+substitutes `release` automatically, but don't rely on that for a session you
+only adopted. `live` mode: `stop` (and `gc`) close the Wave block automatically
+along with the tmux session — nothing manual needed. Automated sweep for
+forgotten `live` sessions: `scripts/wsh-live.sh gc`. Full detail: see
+`docs/session-lifecycle.md`.
 
 ## Gotchas — top of mind
 

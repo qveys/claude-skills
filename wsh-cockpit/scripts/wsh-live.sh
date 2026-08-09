@@ -11,8 +11,10 @@
 # (`wsh ssh -n host`, `ssh host`, `docker exec -it ...`) and keep using send/read.
 #
 # Subcommands:
-#   spawn [prefix] [--force] [--situate] [--pre <host>]
+#   spawn [prefix] [--force] [--situate] [--pre <host>] [--tab <name>]
 #                              open/reuse cockpit: reuse last alive session by default;
+#                              --tab is relayed as-is to `open` (see below) whenever
+#                              spawn ends up calling it;
 #                              --force always creates a fresh session + auto-open Wave;
 #                              --situate also runs the hostname/pwd/whoami probe
 #                              (send + wait-done + read) internally before returning,
@@ -24,13 +26,25 @@
 #                              the helpers on <host> before the pane even ssh-hops there
 #                              (shorthand for `remote-init --pre <host>` right after spawn)
 #   start [session] [--reuse]  create the session + print the attach command
-#   open  [session]            AUTO-OPEN a visible Wave block attached to the session
-#   send  '<command>' [sess]   type a command into the pane and press Enter
-#   keys  '<tmux-keys>' [sess] send raw tmux keys (C-c, Up, Enter, q ...) verbatim
-#   read  [session] [lines]    print the current pane (default 30 lines back) — free-form
+#   open  [session] [--tab <name>]
+#                              AUTO-OPEN a visible Wave block attached to the session;
+#                              --tab resolves the Wave tab to anchor on BY NAME (spec
+#                              v12 §4, step-1.8) instead of the usual live-tab guess —
+#                              bounded to the current WAVETERM_WORKSPACEID, requires
+#                              being inside Wave (no arbitrary fallback if not); a
+#                              name not found in this workspace warns and falls back
+#                              to the normal live-tab resolution; duplicates elect the
+#                              first match (pinned tabs, then tab order) and warn
+#                              listing every candidate
+#   send  '<command>' [sess] [--session NAME|-s NAME]
+#                              type a command into the pane and press Enter
+#   keys  '<tmux-keys>' [sess] [--session NAME|-s NAME]
+#                              send raw tmux keys (C-c, Up, Enter, q ...) verbatim
+#   read  [session] [lines] [--session NAME|-s NAME]
+#                              print the current pane (default 30 lines back) — free-form
 #                              scrollback inspection (TUI/REPL, unframed pane); when the
 #                              pane IS framed, prefer `output` below (nothing to guess)
-#   output [session] [seq] [--full]
+#   output [session] [seq] [--full] [--session NAME|-s NAME]
 #                              print EXACTLY the framed segment for send #<seq> — header
 #                              through footer inclusive, delimited by the ┌─[#N]/└─[#N]
 #                              exit <code> markers already in the pane, so there is no
@@ -43,7 +57,16 @@
 #                              — when the segment isn't in the captured scrollback, or the
 #                              pane has no markers at all (WSH_LIVE_SEP=0, `keys`, a TUI):
 #                              use `read N` there instead.
-#   stop  [session]            kill the session
+#   stop  [session]            kill the session (or release it, without touching tmux/the
+#                              Wave block, when it carries a sticky keep-<slug> marker —
+#                              spec v12 §3, step-1.6)
+#   release <session>          make a session available again WITHOUT destroying it: an
+#                              adopted session (still in $WSH_COCKPIT_ADOPT) retrogrades to a
+#                              "released" pré-claim, re-adoptable via étape 2 only; a created/
+#                              legacy session's claim is removed outright, re-scannable via
+#                              étape 3. I4-enforced (owner-only). Mandatory argument, no
+#                              last-session default. Never touches tmux, the Wave block,
+#                              keep-<slug>, seq-<slug> or oneshot-ssh-<slug> (spec v12 §3).
 #   current                    print the last session created by `spawn` in this shell tree
 #   doctor                     read-only diagnostic of the whole cockpit chain
 #                              (rc 0/1, never writes anything — safe to run anytime)
@@ -58,9 +81,9 @@
 #                              browser view of the cockpit pane via ttyd, loopback-only
 #                              (brew install ttyd); read-only by default (WSH_WEB_WRITE=1
 #                              for a writable view) — see SKILL.md for tailnet exposure
-#   banner {header|phase|step|done} ... [session]
+#   banner {header|phase|step|done} ... [session] [--session NAME|-s NAME]
 #                              airy step announcement (no send framing — see wsh-step.sh)
-#   step-run <id> '<label>' '<command>' [session] [timeout_sec]
+#   step-run <id> '<label>' '<command>' [session] [timeout_sec] [--session NAME|-s NAME]
 #                              ONE call = banner step + framed send + wait-done + read:
 #                              the visual step announcement and the command it covers,
 #                              without the caller having to chain 3 separate round-trips
@@ -91,7 +114,7 @@
 #                              `tailscale ssh` → bare `scp` (last resort, likely a fresh
 #                              auth prompt). Shells out to wsh-push.sh; never counts
 #                              toward the one-shot-SSH nudge (that only tracks `send`).
-#   wait-done [session] [timeout_sec] [seq] [--print]
+#   wait-done [session] [timeout_sec] [seq] [--print] [--session NAME|-s NAME]
 #                              block until last `send` footer shows exit (before next send);
 #                              --print also emits the bounded `output` segment on success —
 #                              one call instead of wait-done + output separately (this is
@@ -119,6 +142,78 @@
 #                              Mac doesn't accept passwordless ssh to itself); push/pull's
 #                              own "no remote host recorded" error path on a real session;
 #                              rc 0/1
+#   selftest-guard             own_tmux_session/session_safe_to_reuse cases: own session
+#                              refused, non-shell foreground refused, bare shell ok, empty
+#                              pane_current_command safe, find_reusable_session never hands
+#                              back an unsafe remembered session, start --reuse exit 8;
+#                              tmux-only; rc 0/1
+#   selftest-claim             claim state-machine primitives (lib/claim.sh): nominal
+#                              cycle, A/B race on a pre-claim, anti-rearm content check,
+#                              recycled-pid .won residue, rollback vs. a rival definitive
+#                              claim, orphan replacement under race, reserved-key refusal,
+#                              two-line format readback; pure filesystem, no tmux session
+#                              needed; rc 0/1
+#   selftest-adopt             registry-at-creation (step-1.3, spec v12 §2 étape 1):
+#                              spawn/start pose a creator claim + registered prefix;
+#                              A/B/A alternation never misroutes; two distinct prefixes
+#                              resolve to two distinct sessions; N>1 of mine with no
+#                              prefix and no last-session recorded is an explicit rc=2
+#                              (never a silent (N+1)-th cockpit); a start-created session
+#                              ("(named)" sentinel) is unreachable via a prefix match;
+#                              start refuses a slug-colliding name; reserved-key refusal
+#                              + --preopen lift; stop leaves no orphaned claim/prefix
+#                              marker; real spawn/start subprocess calls used only where
+#                              they exit before ever reaching spawn's open side effect;
+#                              adoption via étape 2 (step-1.4) with a real probe run;
+#                              étape 3 legacy scan/claim, seq/prefix continuity across it
+#                              (step-1.5); release retrogrades an adopted claim to
+#                              "released" (re-adoptable via étape 2, probed) and removes a
+#                              created claim outright (re-scannable via étape 3); release
+#                              usage error and I4 (non-owner) refusal; seq-<slug>
+#                              untouched by release; sticky keep-<slug> — adopted-then-
+#                              released-then-scanned session — always routes `stop` to
+#                              release, never teardown, session/block left alive
+#                              (step-1.6); tmux-only; rc 0/1
+#   selftest-tab               sql_quote()/resolve_tab_by_name() (step-1.8, spec v12
+#                              §4) against a throwaway FIXTURE sqlite DB, never the
+#                              real Wave DB: simple resolution; homonym in another
+#                              workspace never matches (and that other workspace's
+#                              pinnedtabids key is entirely absent, proving the
+#                              defensive union stays valid without it); duplicates
+#                              elect the pinned one first then array-position order
+#                              even with reversed row-insertion order, warning list
+#                              has all candidates; tab_count_candidates() (step-1.11.3)
+#                              counts candidates correctly at N=1/2/3 — N=2 is the
+#                              case the old inline `wc -l` on a no-trailing-newline
+#                              string undercounted, leaving the warning silent;
+#                              hostile names (quote, %, real
+#                              newline, `x'; DROP TABLE db_tab;--`) resolve cleanly
+#                              with zero alteration; WAVETERM_WORKSPACEID absent ->
+#                              rc=2 (no arbitrary fallback); not found -> rc=3; `wsh`
+#                              missing -> rc=1 (no hardcoded AppSupport fallback);
+#                              pure function test, no tmux session needed; rc 0/1
+#   selftest-wrapper           claude-cockpit.sh end-to-end (step-1.9, spec v12 §1):
+#                              "--and"-delimited group parsing; --keep extracted (not
+#                              forwarded to spawn) while --tab and every other flag
+#                              are relayed verbatim; refuses BEFORE any spawn call
+#                              when a value literally contains "--" (superset of
+#                              "--and") or when two groups resolve to the same
+#                              normalized prefix; each group's spawn call runs
+#                              scoped WSH_COCKPIT_AGENT=user-preopen-<n>, never
+#                              exported to the wrapper itself or to claude; claude
+#                              sees the exact WSH_COCKPIT_ADOPT=sess1,sess2,...
+#                              list and WSH_COCKPIT_AGENT=claude-<epoch>-<pid>, never
+#                              WSH_COCKPIT_PREFIX nor a user-preopen-<n> key; a
+#                              group's genuine spawn failure aborts before claude is
+#                              ever launched, earlier-opened cockpits in that same
+#                              run left open (no rollback); after claude returns
+#                              normally, the exit sweep releases keep-marked
+#                              sessions and stops/destroys the rest, with no
+#                              orphaned claim/prefix marker left behind. Runs
+#                              entirely against a throwaway fake wsh-live.sh (real
+#                              tmux session + real claim, no Wave `open`) and a fake
+#                              `claude` stub on PATH — never pops a real Wave block,
+#                              never launches the real claude; tmux-only; rc 0/1
 #
 # Env: WSH_MUX=tmux (default)    mux backend; WSH_MUX=zellij is EXPERIMENTAL —
 #                                core loop only (start/send/read/wait-done/stop/
@@ -189,6 +284,8 @@ PUSH_SCRIPT="$SCRIPT_DIR/wsh-push.sh"
 . "$SCRIPT_DIR/lib/web.sh"
 # shellcheck source=./lib/gc.sh
 . "$SCRIPT_DIR/lib/gc.sh"
+# shellcheck source=./lib/claim.sh
+. "$SCRIPT_DIR/lib/claim.sh"
 # shellcheck source=./lib/selftests.sh
 . "$SCRIPT_DIR/lib/selftests.sh"
 
@@ -419,25 +516,81 @@ spawn)
   SITUATE=0
   PREFIX=""
   PRE_HOST=""
+  PREOPEN=0
+  TAB_NAME=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --force|--fresh) FORCE=1; shift ;;
       --situate) SITUATE=1; shift ;;
       --pre) PRE_HOST="${2:?usage: spawn --pre <host> (connection string, e.g. qveys@srv1453980)}"; shift 2 ;;
-      -*) echo "unknown flag: $1 (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami, --pre <host> to pre-stage remote helpers before the hop)" >&2; exit 2 ;;
+      # Relayed as-is to `open` (spec v12 §4, step-1.8) whenever spawn ends
+      # up calling it below — see open's own --tab for the resolution rules.
+      --tab) TAB_NAME="${2:?usage: spawn --tab <name> (Wave tab name to anchor the block on)}"; shift 2 ;;
+      # Internal only (spec v12 §1): lifts the reserved-key refusal below for
+      # the wrapper's own bootstrap spawn (WSH_COCKPIT_AGENT=user-preopen-<n>,
+      # set by the caller's environment — this flag never itself sets or
+      # exports that key). Not documented for interactive use.
+      --preopen) PREOPEN=1; shift ;;
+      -*) echo "unknown flag: $1 (use --force to create a duplicate cockpit, --situate to auto-probe host/pwd/whoami, --pre <host> to pre-stage remote helpers before the hop, --tab <name> to anchor on a named Wave tab)" >&2; exit 2 ;;
       *) PREFIX="$1"; shift ;;
     esac
   done
 
-  if [ "$FORCE" -eq 0 ] && SESS=$(find_reusable_session "$PREFIX"); then
+  MYKEY=$(agent_claim_key)
+  if claim_key_reserved "$MYKEY" && [ "$PREOPEN" -ne 1 ]; then
+    echo "refusing to spawn under reserved agent key '$MYKEY' (reserved for wsh-cockpit's own bootstrap) — set WSH_COCKPIT_AGENT/WSH_COCKPIT_PREFIX to something else" >&2
+    exit 2
+  fi
+
+  ADOPTED_NOW=0
+  if [ "$FORCE" -eq 0 ]; then
+    NORM=$(normalize_prefix "$PREFIX")
+    RC=0
+    SESS=$(find_registry_session "$PREFIX" "$NORM") || RC=$?
+    if [ "$RC" -eq 2 ]; then
+      echo "ambiguous: more than one of your sessions (registry) matches and none is the last-used one — pass a prefix to disambiguate, or --force for a fresh cockpit" >&2
+      exit 2
+    fi
+    if [ "$RC" -ne 0 ] && try_adopt_session "$PREFIX" "$NORM"; then
+      SESS="$ADOPT_RESULT"
+      RC=0
+      ADOPTED_NOW=1
+    fi
+    if [ "$RC" -ne 0 ]; then
+      RC=0
+      SESS=$(find_reusable_session "$PREFIX") || RC=$?
+      if [ "$RC" -eq 2 ]; then
+        echo "ambiguous: more than one of your sessions (registry) matches and none is the last-used one — pass a prefix to disambiguate, or --force for a fresh cockpit" >&2
+        exit 2
+      fi
+      # find_reusable_session hands back an unclaimed session only via its
+      # legacy fallback (a registry hit is always already claimed by ME) —
+      # step-1.5, spec v12 §2: entering the registry now (claim + probe) so
+      # this parc antérieur session stops being silently shareable.
+      if [ "$RC" -eq 0 ] && ! claim_is_claimed "$(session_slug "$SESS")"; then
+        if try_legacy_claim "$SESS" "$NORM"; then
+          SESS="$LEGACY_RESULT"
+          ADOPTED_NOW=1
+        else
+          RC=1
+        fi
+      fi
+    fi
+  else
+    RC=1
+  fi
+  if [ "$RC" -eq 0 ]; then
     remember_session "$SESS"
     audit_log_start "$SESS"
-    echo "reusing existing $MUX session '$SESS' (still alive — not spawning a duplicate)"
+    if [ "$ADOPTED_NOW" -ne 1 ]; then
+      echo "reusing existing $MUX session '$SESS' (still alive — not spawning a duplicate)"
+    fi
     if mux_clients "$SESS" | grep -q .; then
       echo "clients already attached — cockpit should still be visible in Wave"
     else
       echo "no client attached — re-opening Wave block"
-      "$0" open "$SESS"
+      if [ -n "$TAB_NAME" ]; then "$0" open "$SESS" --tab "$TAB_NAME"
+      else "$0" open "$SESS"; fi
     fi
     echo "SESSION=$SESS"
     tty_only "Use this session for all subsequent send/read calls in this workflow." \
@@ -454,8 +607,10 @@ spawn)
   SESS=$(unique_session_name "$PREFIX")
   create_session "$SESS"
   remember_session "$SESS"
+  claim_new_session "$SESS" "$(normalize_prefix "$PREFIX")"
   echo "created fresh $MUX session '$SESS'"
-  "$0" open "$SESS"
+  if [ -n "$TAB_NAME" ]; then "$0" open "$SESS" --tab "$TAB_NAME"
+  else "$0" open "$SESS"; fi
   echo "SESSION=$SESS"
   tty_only "Use this session for all subsequent send/read calls in this workflow."
   # Same best-effort rule as the reuse path above — a spawn that created its
@@ -494,25 +649,60 @@ start)
   # also launched as a detached background job, never blocking `start`.
   ( cmd_gc >/dev/null 2>&1 & ) || true
   REUSE=0
+  PREOPEN=0
   ARGS=()
   for arg in "$@"; do
     case "$arg" in
       --reuse) REUSE=1 ;;
+      # Internal only — see spawn's --preopen for the rationale (spec v12 §1).
+      --preopen) PREOPEN=1 ;;
       *) ARGS+=("$arg") ;;
     esac
   done
+
+  MYKEY=$(agent_claim_key)
+  if claim_key_reserved "$MYKEY" && [ "$PREOPEN" -ne 1 ]; then
+    echo "refusing to start under reserved agent key '$MYKEY' (reserved for wsh-cockpit's own bootstrap) — set WSH_COCKPIT_AGENT/WSH_COCKPIT_PREFIX to something else" >&2
+    exit 2
+  fi
+
   if [ ${#ARGS[@]} -eq 0 ]; then
     SESS=$(unique_session_name "")
     create_session "$SESS"
     remember_session "$SESS"
+    claim_new_session "$SESS" "(named)"
     echo "created fresh $MUX session '$SESS' (no name given — auto-unique)"
   else
     SESS="${ARGS[0]}"
     if mux_has "$SESS"; then
       if [ "$REUSE" -eq 1 ]; then
+        # Deliberate: --reuse applies ONLY the identity block (own session,
+        # by any alias), NOT session_safe_to_reuse's bare-shell foreground
+        # heuristic — --reuse is an explicit "continue THIS session", so a
+        # non-shell foreground the caller presumably knows about is theirs
+        # to own. spawn's silent reuse keeps both checks.
+        rc=0; session_is_own "$SESS" || rc=$?
+        if [ "$rc" -eq 2 ]; then
+          session_indeterminate_refusal "$SESS"
+          exit 8
+        fi
+        if [ "$rc" -eq 0 ]; then
+          session_own_refusal "$SESS"
+          exit 8
+        fi
         echo "session '$SESS' already exists — reusing it (--reuse)"
         remember_session "$SESS"
       else
+        # Same probe before suggesting `--reuse`: pointing the caller at a
+        # command line the guard will then refuse (exit 8 again, on their own
+        # session) is worse than refusing outright here. rc=2 (identity
+        # indeterminable) keeps the generic message — a --reuse retry will
+        # explain the indeterminacy itself.
+        rc=0; session_is_own "$SESS" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+          session_own_refusal "$SESS"
+          exit 8
+        fi
         cat >&2 <<MSG
 session '$SESS' already exists — refusing to reuse it (another agent or an earlier
 cockpit may still be attached).
@@ -525,8 +715,24 @@ MSG
         exit 8
       fi
     else
+      # Slug collision guard (spec v12 §2): adopt-claim-<slug>/prefix-<slug>
+      # are keyed by slug, not by the raw session name — two live sessions
+      # sharing a slug would corrupt each other's markers. `spawn` can't hit
+      # this (unique_session_name's HHMMSS suffix keeps slugs distinct in
+      # practice); a caller-chosen `start NAME` can.
+      NEWSLUG=$(session_slug "$SESS")
+      COLLIDE=""
+      while IFS= read -r OTHER; do
+        [ -n "$OTHER" ] && [ "$OTHER" != "$SESS" ] || continue
+        if [ "$(session_slug "$OTHER")" = "$NEWSLUG" ]; then COLLIDE="$OTHER"; break; fi
+      done < <(mux_list_sessions)
+      if [ -n "$COLLIDE" ]; then
+        echo "refusing to create '$SESS' — its slug collides with live session '$COLLIDE' (claim/prefix markers are keyed by slug); choose a less ambiguous name" >&2
+        exit 2
+      fi
       create_session "$SESS"
       remember_session "$SESS"
+      claim_new_session "$SESS" "(named)"
       echo "created $MUX session '$SESS'"
     fi
   fi
@@ -577,20 +783,39 @@ banner)
   # sends a short call. NOT the default send framing. WSH_STEP_INLINE=1 forces the
   # self-contained one-liner (for an ssh-hopped pane without the helper file).
   have_mux
-  TYPE="${1:?usage: wsh-live.sh banner <header|phase|step|done> [args...] [session]}"
+  # --session/-s short-circuits the trailing-argument sniff below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  TYPE="${1:?usage: wsh-live.sh banner <header|phase|step|done> [args...] [session] (or --session/-s NAME)}"
   shift || true
   case "$TYPE" in header|phase|step|done) ;; *)
     echo "banner: unknown type '$TYPE' (want header|phase|step|done)" >&2; exit 11 ;;
   esac
   SESS=""
-  # Optional session is only recognized when it is the sole remaining argument.
-  if [ $# -gt 1 ] && mux_has "${!#}"; then
+  # Optional session is recognized only when it is NOT the sole remaining
+  # argument — otherwise `banner header "cockpit-x"` would lose its text.
+  # Form first (looks_like_session), existence second (mux_has): a token
+  # shaped like a session that no longer exists must reach need_session below
+  # and fail loud (exit 4), not fall back to text (plan §2/§3, lot 2 t3).
+  # $SESS_FLAG set: skip the sniff entirely, the flag already decided SESS —
+  # but a session-shaped last argument NEXT TO the flag is a contradiction,
+  # not text: fail loud (flag_conflict_check, exit 2) instead of guessing.
+  if [ $# -gt 0 ]; then flag_conflict_check "${!#}"; fi
+  if [ -z "$SESS_FLAG" ] && [ $# -gt 1 ] && { looks_like_session "${!#}" || mux_has "${!#}"; }; then
     SESS="${!#}"
+    SESS="${SESS#=}"   # target-pane calls downstream (mux_send_line) reject "="
     set -- "${@:1:$#-1}"
   fi
   STEP_SCRIPT="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)/wsh-step.sh"
   [ -f "$STEP_SCRIPT" ] || { echo "missing $STEP_SCRIPT" >&2; exit 10; }
-  SESS=$(resolve_session "$SESS"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "$SESS"); fi
+  need_session "$SESS"
+  # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
+  # `banner` isn't in plan §3's table, but it writes into the pane through
+  # this same mux_send_line (it sources the banner helper INSIDE the
+  # pane's shell, same as send/step-run) — treated as an omission, not a
+  # deliberate exclusion.
+  deny_own_session "$SESS" || exit 8
   # Explicit WSH_STEP_INLINE always wins (one-off override); otherwise fall
   # back to the session's sticky remote-mode flag (see remote-init).
   REMOTE_STEP_PATH=""
@@ -627,21 +852,28 @@ banner)
 wait-done)
   # Block until the framed footer for a `send` appears in the pane — never race the next send.
   have_mux
+  # --session/-s short-circuits the loop below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
   local_sess=""
   timeout_sec=""
   target_seq=""
   PRINT=0
   for arg in "$@"; do
     case "$arg" in --print) PRINT=1 ;; esac
-    if [ -z "$local_sess" ] && mux_has "$arg"; then
-      local_sess="$arg"
+    # Form first, existence second — see banner) above for the rationale.
+    # Session-shaped token next to --session: contradiction, fail loud.
+    flag_conflict_check "$arg"
+    if [ -z "$SESS_FLAG" ] && [ -z "$local_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
+      local_sess="${arg#=}"
     elif [ -z "$timeout_sec" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       timeout_sec="$arg"
     elif [ -z "$target_seq" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       target_seq="$arg"
     fi
   done
-  SESS=$(resolve_session "${local_sess:-}"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${local_sess:-}"); fi
+  need_session "$SESS"
   TIMEOUT="${timeout_sec:-${WSH_WAIT_TIMEOUT:-300}}"
   if [ -z "$target_seq" ]; then
     target_seq=$(cat "$(seq_file "$SESS")" 2>/dev/null || true)
@@ -672,14 +904,47 @@ open)
   # Auto-open a VISIBLE Wave block attached to the shared cockpit, so the user
   # doesn't have to type `tmux attach` themselves. Robust to a stale Wave env.
   have_mux
-  SESS=$(resolve_session "${1:-}"); need_session "$SESS"
+  TAB_NAME=""
+  ARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tab) TAB_NAME="${2:?usage: open [session] --tab <name>}"; shift 2 ;;
+      *) ARGS+=("$1"); shift ;;
+    esac
+  done
+  SESS=$(resolve_session "${ARGS[0]:-}"); need_session "$SESS"
   if [ "$MUX" = tmux ]; then MUX_BIN=$(command -v tmux); else MUX_BIN=$(zellij_bin); fi
   ATTACH=$(mux_attach_cmd "$SESS")
   command -v wsh >/dev/null 2>&1 || {
     echo "wsh not found — can't auto-open a Wave block. Attach by hand:" >&2
     echo "  ${ATTACH}" >&2; exit 5; }
 
-  if ! TAB=$(resolve_live_tab_cached "$SESS"); then
+  TAB=""
+  if [ -n "$TAB_NAME" ]; then
+    TAB_RC=0
+    resolve_tab_by_name "$TAB_NAME" || TAB_RC=$?
+    case "$TAB_RC" in
+      0)
+        TAB="$TAB_BY_NAME_RESULT"
+        if [ "$(tab_count_candidates "$TAB_BY_NAME_ALL")" -gt 1 ]; then
+          echo "⚠️  multiple tabs named '$TAB_NAME' in this workspace — using the first (pinned, then tab order): $(printf '%s' "$TAB_BY_NAME_ALL" | tr '\n' ' ')" >&2
+        fi
+        ;;
+      2)
+        echo "--tab '$TAB_NAME' requires running inside Wave (WAVETERM_WORKSPACEID not set) — refusing to guess a tab" >&2
+        exit 6
+        ;;
+      1)
+        echo "--tab '$TAB_NAME': Wave's live state DB is unreachable (wsh/wavepath/sqlite3) — refusing to guess a tab" >&2
+        exit 6
+        ;;
+      3)
+        echo "no tab named '$TAB_NAME' in this workspace — falling back to the current/live tab" >&2
+        ;;
+    esac
+  fi
+
+  if [ -z "$TAB" ] && ! TAB=$(resolve_live_tab_cached "$SESS"); then
     cat >&2 <<MSG
 could not find a live Wave tab to anchor the block on (stale/empty Wave state).
 Ask the user to attach manually in any terminal or Wave block:
@@ -859,6 +1124,21 @@ selftest-output)
 selftest-transfer)
   cmd_selftest_transfer
   ;;
+selftest-guard)
+  cmd_selftest_guard
+  ;;
+selftest-claim)
+  cmd_selftest_claim
+  ;;
+selftest-adopt)
+  cmd_selftest_adopt
+  ;;
+selftest-tab)
+  cmd_selftest_tab
+  ;;
+selftest-wrapper)
+  cmd_selftest_wrapper
+  ;;
 push)
   have_mux
   # [session] is genuinely optional: with only <local> <remote-path> the
@@ -880,8 +1160,35 @@ pull)
   ;;
 send)
   have_mux
-  CMD="${1:?usage: wsh-live.sh send '<command>' [session]}"
-  SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  # --session/-s short-circuits the positional [session] slot below (plan §2
+  # point tranché 1, lot 2 t3) — see lib/session.sh:parse_session_flag.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  CMD="${1:?usage: wsh-live.sh send '<command>' [session] (or --session/-s NAME)}"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${2:-}"); fi
+  need_session "$SESS"
+  # Own-session guard (Task 2, lot 2): send/keys/step-run/banner all reach
+  # mux_send_line/send-keys on a raw, caller-supplied session name — same
+  # hazard class as stop/gc (Task 1, lot 2), but here the effect is WRITE,
+  # not destruction (plan §3: guard follows effect class). Against your own
+  # pane, "send" doesn't run a command, it TYPES into whatever's running
+  # there — against an interactive foreground (a live CLI REPL, most
+  # dangerously another Claude Code session) the text gets SUBMITTED as a
+  # new prompt instead of executing (measured, see docs/gotchas.md); worse,
+  # since the caller's own shell is still the foreground reader of that
+  # pane, the typed text just queues silently until the caller's own
+  # process eventually returns control — `step-run`'s wait-done then times
+  # out (rc=124) rather than ever seeing the real result. Unlike `stop`,
+  # there is no "kept, continue" here: each of these 4 sites targets
+  # exactly the one session it was given, so refusal is outright (exit 8,
+  # same family as `stop`/`start --reuse`). READ paths (read/output/
+  # wait-done) stay unguarded on purpose (plan §3: lecture = libre).
+  # `banner` writes via this same mux_send_line (it sources the banner
+  # helper INSIDE the pane's shell) even though plan §3's table doesn't
+  # list it — treated as an omission, not a deliberate exclusion, so it
+  # gets the guard too (see banner) below). keys/step-run/banner repeat
+  # only the one-line call, not this rationale.
+  deny_own_session "$SESS" || exit 8
   # One-shot-SSH-in-a-row nudge (stderr only, never blocking) — see lib/session.sh.
   oneshot_ssh_track "$SESS" "$CMD"
   # WSH_LIVE_SEP (default 1): frame the command with header/footer banners so the
@@ -928,8 +1235,14 @@ send)
   ;;
 keys)
   have_mux
-  K="${1:?usage: wsh-live.sh keys '<tmux-keys>' [session]}"
-  SESS=$(resolve_session "${2:-}"); need_session "$SESS"
+  # --session/-s short-circuits the positional [session] slot — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  K="${1:?usage: wsh-live.sh keys '<tmux-keys>' [session] (or --session/-s NAME)}"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${2:-}"); fi
+  need_session "$SESS"
+  # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
+  deny_own_session "$SESS" || exit 8
   [ "$MUX" = tmux ] || {
     echo "keys: tmux-only (raw tmux key names have no zellij equivalent; use send)" >&2; exit 13; }
   # No -l here: tmux key names are meant to be interpreted (C-c, Up, PageUp...).
@@ -939,13 +1252,23 @@ keys)
   ;;
 read)
   have_mux
-  if [ -n "${1:-}" ] && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+  # --session/-s short-circuits the positional [session] slot — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  if [ -n "$SESS_FLAG" ]; then
+    SESS=$(resolve_session "$SESS_FLAG")
+    LINES="${1:-30}"
+  elif [ -n "${1:-}" ] && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
     SESS=$(resolve_session "")
     LINES="$1"
   else
     SESS=$(resolve_session "${1:-}")
     LINES="${2:-30}"
   fi
+  # Single validation point for every branch above: a non-numeric LINES
+  # (read --session NAME foo / read NAME foo) would reach capture-pane as an
+  # invalid -S argument and fail confusingly — usage error instead.
+  [[ "$LINES" =~ ^[0-9]+$ ]] || {
+    echo "read: lines must be a positive integer, got '$LINES'" >&2; exit 2; }
   need_session "$SESS"
   # capture-pane pads the bottom of the screen with blank lines; trim the
   # trailing blanks so output ends at the last real line (the live prompt).
@@ -956,18 +1279,25 @@ read)
 output)
   # Marker-bounded read: no lines-to-guess, see cmd_output above.
   have_mux
+  # --session/-s short-circuits the loop below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
   FULL=0
   local_sess=""
   target_seq=""
   for arg in "$@"; do
     case "$arg" in --full) FULL=1 ;; esac
-    if [ -z "$local_sess" ] && mux_has "$arg"; then
-      local_sess="$arg"
+    # Form first, existence second — see banner) above for the rationale.
+    # Session-shaped token next to --session: contradiction, fail loud.
+    flag_conflict_check "$arg"
+    if [ -z "$SESS_FLAG" ] && [ -z "$local_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
+      local_sess="${arg#=}"
     elif [ -z "$target_seq" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       target_seq="$arg"
     fi
   done
-  SESS=$(resolve_session "${local_sess:-}"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${local_sess:-}"); fi
+  need_session "$SESS"
   if [ "${WSH_LIVE_SEP:-1}" = "0" ]; then
     echo "output: WSH_LIVE_SEP=0 — this pane has no ┌─[#N]/└─[#N] markers to extract; use 'read N' for a raw scrollback snapshot" >&2
     exit 13
@@ -984,7 +1314,9 @@ step-run)
   # tool calls (banner, send, wait-done). <id>/<label> match `banner step`'s
   # own two fields (e.g. "1.1" / "openclaw doctor").
   have_mux
-  ID="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]}"
+  # --session/-s short-circuits the loop below — see send) above.
+  parse_session_flag "$@"; set -- ${PSF_REST[@]+"${PSF_REST[@]}"}
+  ID="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec] (or --session/-s NAME)}"
   shift || true
   LABEL="${1:?usage: wsh-live.sh step-run <id> '<label>' '<command>' [session] [timeout_sec]}"
   shift || true
@@ -993,13 +1325,23 @@ step-run)
   run_sess=""
   run_timeout=""
   for arg in "$@"; do
-    if [ -z "$run_sess" ] && mux_has "$arg"; then
-      run_sess="$arg"
+    # Form first, existence second — see banner) above for the rationale.
+    # Session-shaped token next to --session: contradiction, fail loud.
+    flag_conflict_check "$arg"
+    if [ -z "$SESS_FLAG" ] && [ -z "$run_sess" ] && { looks_like_session "$arg" || mux_has "$arg"; }; then
+      run_sess="${arg#=}"
     elif [ -z "$run_timeout" ] && [[ "$arg" =~ ^[0-9]+$ ]]; then
       run_timeout="$arg"
     fi
   done
-  SESS=$(resolve_session "${run_sess:-}"); need_session "$SESS"
+  if [ -n "$SESS_FLAG" ]; then SESS=$(resolve_session "$SESS_FLAG")
+  else SESS=$(resolve_session "${run_sess:-}"); fi
+  need_session "$SESS"
+  # Own-session guard (Task 2, lot 2) — see send) above for the rationale.
+  # Caught HERE, before step_run() ever fires its internal banner/send/
+  # wait-done subcalls: those would otherwise queue into the caller's own
+  # pane and wait-done would time out (rc=124) rather than ever refuse.
+  deny_own_session "$SESS" || exit 8
   TIMEOUT="${run_timeout:-${WSH_WAIT_TIMEOUT:-300}}"
   step_run "$ID" "$LABEL" "$CMD" "$SESS" "$TIMEOUT"
   ;;
@@ -1018,15 +1360,61 @@ stop)
     SESS=""; [ -f "$SF" ] && SESS=$(tr -d '[:space:]' <"$SF")
     [ -n "$SESS" ] || SESS="$SESS_DEFAULT"
   fi
+  # Own-session guard (Task 1, lot 2): stop is the other place a raw
+  # caller-supplied session name reaches a destructive call, alongside
+  # start --reuse above — and unlike that reuse path this one is
+  # unconditional, no --force escape hatch. Lives HERE, not inside
+  # resolve_session/teardown_session: resolve_session must stay
+  # mux-agnostic (also used by send/read/current, which never destroy
+  # anything), and teardown_session is shared with `gc`, which gets its
+  # OWN guard below in lib/gc.sh — deliberately different in kind: a sweep
+  # skips its own session and continues on the rest, `stop` refuses
+  # outright since it only ever targets the one session it was given
+  # (plan §3 bis: guard placement follows effect class, not call site).
+  rc=0; session_is_own "$SESS" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    session_indeterminate_refusal "$SESS"
+    exit 8
+  fi
+  if [ "$rc" -eq 0 ]; then
+    session_own_refusal "$SESS"
+    exit 8
+  fi
+  # Sticky keep (spec v12 §3, step-1.6): a session marked keep-<slug> must
+  # never be destroyed by `stop` — no matter which key currently owns its
+  # claim — only released, so a future adoption/scan can pick it back up.
+  # Checked BEFORE the destroy path below; un-keeping a session is fiche
+  # 1.9's job (posing the marker), not this dispatch's.
   # Actual kill + state cleanup (seq file, sep/step helper options, web view,
   # last-session pointer) lives in teardown_session (lib/session.sh) — shared
   # with `gc`, which needs the exact same per-session cleanup on a sweep.
-  if teardown_session "$SESS"; then
+  if keep_is_set "$SESS"; then
+    if release_session "$SESS"; then
+      echo "released session '$SESS' (keep)"
+    else
+      echo "cannot release '$SESS': not the owning agent" >&2
+      exit 8
+    fi
+  elif teardown_session "$SESS"; then
     echo "killed session '$SESS'"
   else
     echo "no session '$SESS' to kill"
   fi
   ;;
+release)
+  have_mux
+  # Mandatory argument, deliberately NO last-session default (spec v12 §3):
+  # a shared-key sub-agent that forgets the argument must not silently
+  # release whatever session it last touched.
+  SESS="${1:?usage: $0 release <session>}"
+  need_session "$SESS"
+  if release_session "$SESS"; then
+    echo "released session '$SESS'"
+  else
+    echo "cannot release '$SESS': not the owning agent" >&2
+    exit 8
+  fi
+  ;;
 *)
-  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer} [args]" >&2; exit 2 ;;
+  echo "usage: $0 {spawn|start|open|send|keys|read|output|push|pull|stop|release|current|doctor|gc|status|web|banner|step-run|remote-init|local-init|wait-done|selftest-sep|selftest-live|selftest-gc|selftest-cache|selftest-oneshot-ssh|selftest-output|selftest-transfer|selftest-guard|selftest-claim|selftest-adopt|selftest-tab|selftest-wrapper} [args]" >&2; exit 2 ;;
 esac

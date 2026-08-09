@@ -20,7 +20,11 @@ pane_file()  { printf '%s/pane-%s\n' "$STATE_DIR" "$(printf '%s' "$1" | tr -cs '
 zellij_pane() { cat "$(pane_file "$1")" 2>/dev/null || true; }
 
 mux_has() {
-  if [ "$MUX" = tmux ]; then tmux has-session -t "$1" 2>/dev/null
+  # "=" anchors on exact session name (tmux tries exact -> prefix -> fnmatch
+  # otherwise — measured; see docs/gotchas.md). Strip any leading "=" the
+  # caller may already have supplied before re-anchoring: "==name" matches
+  # nothing (same guard session_is_own already applies in lib/session.sh).
+  if [ "$MUX" = tmux ]; then local s="${1#=}"; tmux has-session -t "=$s" 2>/dev/null
   else mux_list_sessions | grep -Fqx -- "$1"; fi
 }
 mux_list_sessions() {
@@ -71,11 +75,18 @@ mux_capture() {  # $1 sess  $2 lines of scrollback to look back
   fi
 }
 mux_clients() {  # attached client lines (empty output = nobody watching)
-  if [ "$MUX" = tmux ]; then tmux list-clients -t "$1" 2>/dev/null
+  # "list-clients" takes a target-SESSION and honors "=" (measured; see
+  # docs/gotchas.md) — same anchoring as mux_has/mux_kill, same rationale.
+  # Free to add: all 4 callers (wsh-live.sh:441,477,727,730) only ever pass
+  # names already validated by need_session/last_session.
+  if [ "$MUX" = tmux ]; then local s="${1#=}"; tmux list-clients -t "=$s" 2>/dev/null
   else "$(zellij_bin)" --session "$1" action list-clients 2>/dev/null | tail -n +2; fi
 }
 mux_kill() {
-  if [ "$MUX" = tmux ]; then tmux kill-session -t "$1" 2>/dev/null
+  # Anchored exact match — same rationale as mux_has above: an unanchored
+  # kill-session honors tmux's prefix/fnmatch fallback too, so a prefix
+  # collision would tear down the wrong (unrelated) session.
+  if [ "$MUX" = tmux ]; then local s="${1#=}"; tmux kill-session -t "=$s" 2>/dev/null
   else
     local zb rc; zb=$(zellij_bin)
     "$zb" kill-session "$1" >/dev/null 2>&1; rc=$?
@@ -96,6 +107,43 @@ mux_pane_command() {  # foreground process name in the pane's active pane, best-
   # necessarily the active one), which could misjudge a session as reusable.
   if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
   else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
+}
+mux_session_name() {  # canonical name the target actually resolves to, best-effort
+  # tmux resolves `-t` by exact name, then prefix, then fnmatch — so a bare
+  # prefix of a session name can still name that session. Round-tripping
+  # through `#{session_name}` closes that alias: it reports the ACTUAL
+  # session behind whatever the caller passed, not the string they passed.
+  if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{session_name}' 2>/dev/null
+  else printf '%s' "$1"; fi  # zellij: no alias resolution to worry about — pass through
+}
+mux_pane_last_line() {  # last non-blank captured line of the pane's active pane, best-effort
+  # -J joins tmux-wrapped physical rows back into one logical line: measured
+  # (docs/gotchas.md), a padded right-prompt (RPROMPT) segment can occupy a
+  # row wider than #{pane_width} without ever setting the wrap flag, and even
+  # when it does wrap, -J re-joins it — either way the caller always sees the
+  # true tail of the logical prompt line, never a truncated physical row.
+  if [ "$MUX" = tmux ]; then
+    tmux capture-pane -pJt "$1" -S -20 2>/dev/null | awk 'NF{last=$0} END{print last}'
+  else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
+}
+mux_pane_id() {  # id of the target session's ACTIVE pane, best-effort
+  if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null
+  else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
+}
+mux_session_panes() {  # ALL pane ids of the target session, one per line
+  # mux_pane_id only ever sees the ACTIVE pane — a caller sitting in a
+  # non-active pane of a multi-pane (or grouped) session would be invisible
+  # to a check built on that alone. The "=" anchor below is kept but is
+  # INERT here: measured, `list-panes -s -t "=probe-o"` still resolves by
+  # prefix and returns probe-one's panes (an unknown target errors as
+  # "can't find window", not "can't find session"). A looser resolution only
+  # widens the refusal in session_is_own, never narrows it, so this is
+  # harmless — but the pane-membership fix does not rely on the anchor.
+  # Lesson: target-session vs target-pane is NOT a reliable predictor of
+  # whether "=" is honoured (has-session honours it, list-panes doesn't,
+  # split-window rejects it outright) — measure per command, don't assume.
+  if [ "$MUX" = tmux ]; then tmux list-panes -s -t "=$1" -F '#{pane_id}' 2>/dev/null
+  else printf ''; fi  # zellij: no per-pane enumeration — background sessions are single-pane
 }
 
 # Audit trail: pipe the pane's rendered output to a per-session log file.

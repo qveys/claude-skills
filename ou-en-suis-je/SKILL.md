@@ -1,19 +1,15 @@
 ---
 name: ou-en-suis-je
 description: >-
-  Utilise ce skill dès que Quentin veut faire le point sur son travail récent
-  avec Claude Code : savoir ce qui est terminé, ce qui reste ouvert,
-  interrompu, bloqué ou en attente d'une action de sa part (push, review,
-  réponse), toutes sessions et tous projets confondus — y compris l'état des
-  chaînes tournant dans les cockpits tmux/Wave autonomes. Déclenche-le quand
-  il a perdu le fil (« où en suis-je ? », « je ne sais plus où j'en étais »),
-  quand il demande un bilan, un récap ou un point sur ses
-  sessions/conversations de la période, ou quand il veut vérifier que rien ne
-  traîne ni n'est resté bloqué avant de passer à autre chose (fin de journée,
-  week-end). Ne pas utiliser pour : les statistiques de coûts/tokens (plugin
-  session-report), l'avancement d'un seul chantier ou projet précis, un run
-  CI, le simple listing des sessions tmux actives, ou le diagnostic de
-  performance d'une session en cours.
+  Utilise ce skill quand Quentin veut faire le point sur son travail récent,
+  toutes sessions/projets confondus : terminé, ouvert, interrompu, bloqué ou en
+  attente d'une action de sa part — y compris l'état des chaînes tournant dans
+  les cockpits tmux/Wave autonomes. Déclencheurs : « où en suis-je ? », « je ne
+  sais plus où j'en étais », bilan/récap/point sur la période, ou vérifier que
+  rien ne traîne avant de décrocher (fin de journée, week-end). Pas pour : les
+  stats coûts/tokens (plugin session-report), l'avancement d'un seul
+  chantier/projet précis, un run CI, le simple listing tmux, ou le diagnostic
+  de perf d'une session en cours.
 ---
 
 # /ou-en-suis-je — récap de l'état de toutes les sessions
@@ -54,8 +50,11 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
 
 3. **Verdicts.** Lire `references/verdicts.md` et appliquer les règles sur chaque **ligne de
    données restante** (celles qui ne commencent pas par `# AGG|`), dans l'ordre (VIDE → AUTO →
-   À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE). Les lignes d'agrégat ne se jugent pas une
-   par une — elles alimentent uniquement les compteurs / emplacements fixés au **Rendu** (étape 6) :
+   À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE). Exception d'extraction : une ligne avec
+   `TYPE_DERNIERE_ENTREE=PARSE_ERROR` (transcript illisible) ne reçoit AUCUN verdict — la
+   signaler à part dans la section ⚠️ et l'exclure des compteurs, jusqu'à relecture manuelle
+   (`tail -n 120 <fichier> | jq`). Les lignes d'agrégat ne se jugent pas une par une — elles
+   alimentent uniquement les compteurs / emplacements fixés au **Rendu** (étape 6) :
    - `# AGG|AUTO_SECREVIEW|…` → compteurs « Y reviews CI » de la réponse courte + détail
      total/conclues/a_examiner/findings_listes ; findings survivants (lignes individuelles) → ⚠️ ;
    - `# AGG|VIDE|…` → compteur « sessions vides » dans la réponse courte (pas de ligne de tableau) ;
@@ -102,7 +101,7 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
 
    ## 🖥️ Cockpits autonomes             ← tableau Cockpit | État (tourne / terminé / bloqué sur X)
    ## ⚠️ À ne pas perdre                 ← findings sécurité survivants (lignes individuelles
-   AUTO_SECREVIEW hors agrégat), dettes signalées
+   AUTO_SECREVIEW hors agrégat), `PARSE_ERROR`, dettes signalées
    (ces deux sections couvrent ce qui n'est PAS une session — travail vivant hors transcripts,
    dettes transversales ; les garder courtes et les OMETTRE entièrement si elles sont vides.
    Pas de section dédiée AUTO/VIDE/PREWARM : ces agrégats ne vivent que dans les compteurs
@@ -128,13 +127,14 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
    - `CLOS` (fait, caduc, abandonné, traité hors Claude) → filtré dès `collect.sh`, ne
      réapparaîtra plus jamais dans un récap.
    - `ATTEND` / `REPRENDRE` → la session reste listée, avec la note de Quentin en contexte.
-   Avant de juger (étape 3), lire `~/.claude/ou-en-suis-je/dispositions.tsv` s'il existe :
+   Avant de juger (étape 3), lire `${OEJ_DIR:-~/.claude/ou-en-suis-je}/dispositions.tsv`
+   s'il existe (même convention de chemin que `collect.sh` et `dispose.sh`) :
    les dispositions priment sur les règles de verdict (les notes ATTEND/REPRENDRE remplacent
    le « reste à faire » déduit). C'est cette boucle qui empêche le récap de se tromper deux
    fois sur la même session.
 
 8. **Clôture.** Proposer (sans le faire d'office) de mettre à jour la fiche mémoire
-   `tableau-de-bord-chantiers` avec les 🔴/🟡. Si Quentin veut aussi l'angle coûts/tokens,
+   `tableau-de-bord-chantiers` avec les ⏸️/❌/🟡. Si Quentin veut aussi l'angle coûts/tokens,
    proposer le plugin `session-report` (rapport HTML d'usage) — ne pas le lancer d'office.
 
 ## Pièges connus
