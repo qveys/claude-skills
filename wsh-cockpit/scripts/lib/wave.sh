@@ -29,6 +29,99 @@ wave_db_ro() {
   printf 'file:%s?mode=ro\n' "$db"
 }
 
+# Escape $1 as a single-quoted SQL literal, safe to splice into a query
+# string passed as ONE argv argument to `sqlite3` (spec v12 §4, finding
+# 3721135358: sqlite3's dot-commands are parsed line-by-line and can't carry
+# a value containing a newline, so `.parameter set` is unusable here — the
+# query is built with the literal already embedded instead). SQLite's
+# single-quoted literal grammar has no other metacharacter (no backslash
+# escaping) and newlines are legal inside a literal, so doubling `'` and
+# wrapping in `'...'` is a complete neutralization by construction; `%` stays
+# inert under `=` (this isn't a LIKE pattern).
+# GOTCHA (measured step-1.1, rapport-step-1.1.md §6): writing the doubling
+# directly as "${s//\'/\'\'}" inserts LITERAL BACKSLASHES in this bash
+# instead of doubling the quote — route the quote character through a
+# variable first, never write that pattern inline again.
+sql_quote() {
+  local s="$1" q="'"
+  s="${s//$q/$q$q}"
+  printf "'%s'" "$s"
+}
+
+# Resolve the live Wave state DB via `wsh wavepath data` ONLY — deliberately
+# WITHOUT wave_db_ro's hardcoded ~/Library/Application Support/waveterm
+# fallback (spec v12 §4, point c: that fallback can be a divergent/older DB,
+# measured 9 days stale in rapport-step-1.1.md §5 — fine for the best-effort
+# resolve_live_tab, wrong for a --tab request the caller explicitly made).
+# --tab must fail cleanly here rather than silently resolve against it.
+wave_db_ro_strict() {
+  local data_dir db
+  command -v wsh >/dev/null 2>&1 || return 1
+  data_dir=$(wsh wavepath data 2>/dev/null) || return 1
+  [ -n "$data_dir" ] || return 1
+  db="$data_dir/db/waveterm.db"
+  [ -f "$db" ] && command -v sqlite3 >/dev/null 2>&1 || return 1
+  printf 'file:%s?mode=ro\n' "$db"
+}
+
+# Resolve a Wave tab id by NAME ($1), bounded to the CURRENT workspace only
+# (spec v12 §4 — the CTE below is the spec's query, reprise telle quelle,
+# with :ws/:nom spliced in pre-quoted via sql_quote rather than sqlite3
+# dot-command binding). $2 is an optional ro URI override, used only by
+# selftest-tab to point at a throwaway fixture DB instead of the live one.
+#
+# Return codes (never printed — see the two globals below):
+#   0  resolved (TAB_BY_NAME_RESULT/_ALL set)
+#   1  the live Wave DB itself is unreachable (wsh/wavepath/sqlite3 missing)
+#   2  WAVETERM_WORKSPACEID unset — hors Wave, no workspace to bound the
+#      search to (spec v12 §4: échec propre, pas de fallback arbitraire)
+#   3  no tab named $1 in this workspace (caller warns + falls back)
+#
+# On rc=0:
+#   TAB_BY_NAME_RESULT  the elected tab oid — first row (pinned ASC, then
+#                       array-position ASC — deterministic even across ties)
+#   TAB_BY_NAME_ALL     every matching oid, one per line, same order; more
+#                       than one line means duplicates — caller warns
+resolve_tab_by_name() {
+  local name="$1" ro="${2:-}" ws q rows
+  TAB_BY_NAME_RESULT=""
+  TAB_BY_NAME_ALL=""
+  ws="${WAVETERM_WORKSPACEID:-}"
+  [ -n "$ws" ] || return 2
+  if [ -z "$ro" ]; then
+    ro=$(wave_db_ro_strict) || return 1
+  fi
+  q="WITH workspace_tabs AS (
+  SELECT json_each.value AS tabid, 0 AS pinned, json_each.key AS ord
+  FROM db_workspace, json_each(db_workspace.data, '\$.pinnedtabids')
+  WHERE db_workspace.oid = $(sql_quote "$ws")
+  UNION ALL
+  SELECT json_each.value, 1, json_each.key
+  FROM db_workspace, json_each(db_workspace.data, '\$.tabids')
+  WHERE db_workspace.oid = $(sql_quote "$ws")
+)
+SELECT db_tab.oid
+FROM db_tab JOIN workspace_tabs ON workspace_tabs.tabid = db_tab.oid
+WHERE json_extract(db_tab.data, '\$.name') = $(sql_quote "$name")
+ORDER BY workspace_tabs.pinned ASC, workspace_tabs.ord ASC;"
+  rows=$(sqlite3 "$ro" "$q" 2>/dev/null) || return 1
+  [ -n "$rows" ] || return 3
+  TAB_BY_NAME_ALL="$rows"
+  TAB_BY_NAME_RESULT=$(printf '%s\n' "$rows" | head -1)
+  return 0
+}
+
+# Count the candidates in a resolve_tab_by_name-style newline-separated
+# string ($1 — e.g. TAB_BY_NAME_ALL: N oids, one per line, NO trailing
+# newline since it comes out of a `$(…)` substitution). Factored out (audit
+# step-1.11.3, É3) because `printf '%s' "$1" | wc -l` — counting line
+# TERMINATORS on a string missing its final one — undercounts by one: N
+# candidates -> N-1, so a caller's `-gt 1` warning threshold stayed silent at
+# exactly N=2. `printf '%s\n' "$1"` restores the missing terminator first.
+tab_count_candidates() {
+  printf '%s\n' "$1" | wc -l | tr -d ' '
+}
+
 resolve_live_tab() {
   local ro tab ws sessname tab8
   ro=$(wave_db_ro) || return 1
@@ -142,19 +235,28 @@ block_id_store() {
   printf '%s\n' "$id" >"$(block_id_file "$sess")" 2>/dev/null || true
 }
 
-# Best-effort close of the block remembered for $sess, called from
-# teardown_session. Never fails the caller: no state file, no `wsh`, or a
-# block that already auto-closed ("not found") are all silently fine — only
-# the specific id `open` recorded is ever targeted, never a pane scan.
-block_id_close() {
-  local sess="$1" bf id
-  bf=$(block_id_file "$sess")
+# Best-effort close of a block-<slug> marker given its PATH directly — the
+# primitive block_id_close(sess) below wraps. Split out (step-1.7) so gc's
+# marker-hygiene pass can close a DEAD session's block the same way even
+# though it only ever has the marker file (a slug), never the session's
+# original un-slugified name that block_id_file(sess) would need to
+# re-derive the same path.
+block_id_close_path() {  # $1 marker path (block-<slug>)
+  local bf="$1" id
   [ -f "$bf" ] || return 0
   id=$(tr -d '[:space:]' <"$bf" 2>/dev/null || true)
   rm -f "$bf" 2>/dev/null || true
   [ -n "$id" ] || return 0
   command -v wsh >/dev/null 2>&1 || return 0
   wsh deleteblock -b "$id" >/dev/null 2>&1 || true
+}
+
+# Best-effort close of the block remembered for $sess, called from
+# teardown_session. Never fails the caller: no state file, no `wsh`, or a
+# block that already auto-closed ("not found") are all silently fine — only
+# the specific id `open` recorded is ever targeted, never a pane scan.
+block_id_close() {
+  block_id_close_path "$(block_id_file "$1")"
 }
 
 # Print "NAME|COUNT" for a tab oid: its display name (e.g. "T2") and the TOTAL

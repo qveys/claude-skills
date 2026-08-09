@@ -43,9 +43,9 @@ pour que stderr arrive avant le footer.
 
 | Commande | Rôle |
 |---|---|
-| `spawn [prefix] [--force]` | Le point d'entrée recommandé : réutilise un cockpit vivant et sûr, sinon en crée un (nom auto `cockpit-<prefix>-<ts>`), et ouvre le bloc Wave. `--force` en ouvre un deuxième. |
+| `spawn [prefix] [--force] [--tab NOM]` | Le point d'entrée recommandé : réutilise un cockpit vivant et sûr (le sien, puis un cockpit pré-ouvert offert en adoption, puis une session libre plus ancienne), sinon en crée un (nom auto `cockpit-<prefix>-<ts>`), et ouvre le bloc Wave. `--force` en ouvre un deuxième. |
 | `start [nom] [--reuse]` | Crée une session nommée (sans bloc Wave). Refuse un nom déjà pris ; `--reuse` le reprend explicitement. |
-| `open [session]` | Ouvre un bloc Wave attaché à la session (gère les env Wave périmés). |
+| `open [session] [--tab NOM]` | Ouvre un bloc Wave attaché à la session (gère les env Wave périmés) ; `--tab` l'ancre sur un onglet Wave nommé plutôt que l'onglet courant. |
 | `send '<cmd>' [session]` | Tape la commande dans le pane, avec cadrage. |
 | `keys '<touches>' [session]` | Envoie des touches tmux brutes (`C-c`, `Up`, …). |
 | `read [session] [lignes]` | Instantané brut des dernières lignes du pane. |
@@ -55,8 +55,9 @@ pour que stderr arrive avant le footer.
 | `banner <type> <texte…> [session]` | Bannières visuelles dans le pane ; `<type>` : `header`, `phase`, `step` ou `done`. |
 | `push <local> <chemin-distant> [session]` / `pull` | Transfert de fichiers avec l'hôte enregistré de la session (moteur : `wsh-push.sh` — jamais de base64 dans le pane). |
 | `remote-init <session> <hôte>` / `local-init` | Après un hop SSH dans le cockpit : bascule le cadrage en mode distant (et retour). |
-| `stop [session]` | Tue la session, ferme le bloc Wave, nettoie l'état. |
-| `gc [--dry-run] [--idle=S] [--only-session=N]` | Balaye les cockpits orphelins (détachés et inactifs depuis 24 h par défaut). |
+| `stop [session]` | Tue la session, ferme le bloc Wave, nettoie l'état — ou la relâche (`release`) au lieu de la tuer si elle est marquée `keep`. |
+| `release <session>` | Relâche une session : adoptée → rétrogradée/ré-adoptable ; créée/legacy → claim retiré (re-scannable). Jamais de session par défaut — argument obligatoire. |
+| `gc [--dry-run] [--idle=S] [--only-session=N]` | Balaye les cockpits orphelins (détachés et inactifs depuis 24 h par défaut ; 24 h minimum aussi pour une session `keep`, quel que soit `--idle`). |
 | `status` / `current` / `doctor` | État des sessions / la session courante / diagnostic de l'environnement. |
 | `web <action>` | Miroir navigateur du cockpit via ttyd (lecture seule par défaut) ; `<action>` : `start`, `stop` ou `status`. |
 | `selftest-*` | Suites d'auto-test (voir plus bas). |
@@ -65,6 +66,33 @@ pour que stderr arrive avant le footer.
 acceptent un `[session]` positionnel acceptent aussi ce flag, non ambigu par
 construction — à préférer dans les scripts, indispensable pour les noms libres
 qui ne commencent pas par `cockpit-`.
+
+## Pré-ouvrir des cockpits pour l'agent — `claude-cockpit`
+
+Le wrapper `scripts/claude-cockpit.sh` (symlinké en `claude-cockpit` sur le
+`$PATH` une fois installé) vous permet d'ouvrir vous-même un ou plusieurs
+cockpits **avant** de lancer l'agent, puis de les lui confier :
+
+```bash
+claude-cockpit theo-plan --keep --and deploy -- <args claude...>
+```
+
+Chaque groupe séparé par `--and` ouvre un cockpit distinct (les flags de
+`spawn` restent utilisables à l'intérieur d'un groupe) ; l'agent démarre
+ensuite avec ces sessions offertes en adoption. `--keep` marque une session
+comme protégée : l'agent peut l'utiliser pleinement mais ne peut jamais la
+détruire, seulement la relâcher — pratique pour garder la main sur un cockpit
+que vous voulez continuer d'utiliser après la tâche. Une session sans
+`--keep` peut être fermée par l'agent en fin de tâche. À la sortie de
+l'agent (succès ou échec), le wrapper nettoie lui-même ce qu'il a ouvert :
+détruit les sessions sans `--keep` restées ouvertes, relâche celles avec
+`--keep`.
+
+Installation (une fois) :
+
+```bash
+ln -sf "$(cd wsh-cockpit/scripts && pwd)/claude-cockpit.sh" ~/.local/bin/claude-cockpit
+```
 
 ## Garde-fous
 
@@ -125,6 +153,10 @@ scripts/wsh-live.sh selftest-sep       # cadrage ┌─/└─
 scripts/wsh-live.sh selftest-output    # extraction bornée d'output
 scripts/wsh-live.sh selftest-cache     # cache de résolution d'onglet Wave
 scripts/wsh-live.sh selftest-transfer  # push/pull (partie opportuniste en loopback ssh)
+scripts/wsh-live.sh selftest-claim     # machine d'états du claim atomique (lib/claim.sh)
+scripts/wsh-live.sh selftest-adopt     # registre, adoption (WSH_COCKPIT_ADOPT), scan legacy, release/keep
+scripts/wsh-live.sh selftest-tab       # résolution `open --tab` (requête DB Wave, sql_quote())
+scripts/wsh-live.sh selftest-wrapper   # claude-cockpit.sh : groupes, --keep, balayage de sortie
 ```
 
 À noter : `selftest-guard` travaille sur le serveur tmux par défaut et groupe

@@ -154,6 +154,45 @@ cmd_doctor() {
     doc_line ok "logs d'audit" "$LOG_DIR absent (rien loggé pour l'instant)"
   fi
 
+  # 9b. Claims whose owning session looks abandoned (idle, unattached) — an
+  # informational nudge only, never acted on here: doctor is read-only and
+  # gc's own hygiene pass (step-1.7) deliberately never touches a claim whose
+  # session is still alive, since "idle a long time" is not proof the owning
+  # agent forgot to `release` (could just be a human away from the
+  # keyboard). Reuses the same tmux-only fields as gc_should_kill
+  # (session_attached/session_activity) purely to flag — same WSH_LIVE_GC_IDLE
+  # threshold as gc's own default sweep, so "would gc consider this old" and
+  # "doctor flags this as a candidate" stay in sync.
+  if [ "$HAVE_TMUX" -eq 1 ] && [ -d "$STATE_DIR" ]; then
+    local cf9 base9 slug9 key9 sessions9 nm9 att9 act9 now9 age9 hit9 stale9=0
+    sessions9=$(tmux list-sessions -F '#{session_name}|#{session_attached}|#{session_activity}' 2>/dev/null \
+      | grep '^cockpit-' || true)
+    now9=$(date '+%s')
+    for cf9 in "$STATE_DIR"/adopt-claim-*; do
+      [ -e "$cf9" ] || continue
+      base9=$(basename "$cf9")
+      case "$base9" in *.won-*) continue ;; esac
+      slug9="${base9#adopt-claim-}"
+      key9=$(claim_read_key "$cf9" 2>/dev/null || true)
+      case "$key9" in ''|released|user-preopen-*) continue ;; esac
+      hit9=""
+      while IFS='|' read -r nm9 att9 act9; do
+        [ -n "$nm9" ] || continue
+        [ "$(session_slug "$nm9")" = "$slug9" ] || continue
+        hit9="$nm9|$att9|$act9"
+        break
+      done <<<"$sessions9"
+      [ -n "$hit9" ] || continue
+      IFS='|' read -r nm9 att9 act9 <<<"$hit9"
+      age9=$((now9 - act9))
+      if [ "$att9" = "0" ] && [ "$age9" -ge "${WSH_LIVE_GC_IDLE:-86400}" ]; then
+        stale9=$((stale9 + 1))
+        doc_line warn "claim '$key9' possiblement oubliée" "$nm9 : idle $((age9 / 3600))h, aucun client attaché — release manquante ?"
+      fi
+    done
+    [ "$stale9" -gt 0 ] || doc_line ok "claims actifs" "aucun candidat à une release oubliée"
+  fi
+
   # 10. Optional extras — never fail on absence, just note it.
   if command -v ttyd >/dev/null 2>&1; then
     doc_line ok "ttyd" "présent ($(command -v ttyd)) — utilisé par la sous-commande 'web'"
