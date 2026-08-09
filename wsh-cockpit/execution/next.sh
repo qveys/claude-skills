@@ -14,7 +14,10 @@ chantier=$(sed -n '1s/^# *STATE *[—-]* *\(chantier \)\{0,1\}//p' "$DIR/STATE.m
 [ -n "$chantier" ] || chantier=$(basename "$PWD")
 
 while :; do
-  next=$(grep -m1 '^NEXT:' "$DIR/STATE.md" | awk '{print $2}')
+  if ! next=$(awk '/^NEXT:/ { print $2; exit }' "$DIR/STATE.md"); then
+    echo "■ STATE.md illisible — arrêt du relais." >&2
+    exit 1
+  fi
   case "${next:-}" in
     "" | PAUSE | FIN)
       echo "■ Relais arrêté (NEXT: ${next:-absent})."
@@ -29,7 +32,13 @@ while :; do
   fi
 
   model=$(grep -m1 'Modèle :' "$fiche" | sed -E 's/.*Modèle : ?\**([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')
-  case "$model" in sonnet | opus | haiku | fable) ;; *) model=sonnet ;; esac
+  case "$model" in
+    sonnet | opus | fable) ;;
+    *)
+      echo "■ Modèle invalide ou absent dans $(basename "$fiche") — arrêt du relais." >&2
+      exit 1
+      ;;
+  esac
 
   echo ""
   echo "▶ $next · modèle : $model · fiche : $(basename "$fiche")"
