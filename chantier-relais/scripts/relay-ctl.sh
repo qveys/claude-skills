@@ -48,8 +48,12 @@ project_slug() {
 # dans le mauvais pane. Sans candidate, on le dit et on s'arrête.
 session() {
   if [ -n "$SESS" ]; then echo "$SESS"; return; fi
+  slug=$(project_slug)
+  # Slug vide (nom de dossier sans [a-z0-9]) : la regex matcherait les sessions
+  # « relay--* » d'un autre projet sans slug — aucune sélection auto dans ce cas.
+  [ -n "$slug" ] || return 1
   "$TMUX_BIN" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
-    | awk -v s="$(project_slug)" '$2 ~ "^(relay|cockpit)-" s "(-|$)"' \
+    | awk -v s="$slug" '$2 ~ "^(relay|cockpit)-" s "(-|$)"' \
     | sort -n | tail -1 | cut -d' ' -f2-
 }
 
@@ -64,7 +68,7 @@ resolve_sid() {
 
 need_sid() {
   S=$(session)
-  SID=$(resolve_sid "$S") || die "aucune session relais pour « $(project_slug) » — 'go' pour la lancer, ou --session <nom>"
+  SID=$(resolve_sid "$S") || die "aucune session relais pour « $(project_slug) » — 'go' pour la lancer, ou --session <nom> / RELAY_SESSION"
 }
 
 pane_pid() { "$TMUX_BIN" display-message -p -t "$1" '#{pane_pid}' 2>/dev/null; }
@@ -79,6 +83,9 @@ wait_idle() {
 
 # Un claude tourne-t-il quelque part sous le pane ? (il peut être enfant direct
 # du shell, ou petit-enfant via next.sh — pane_current_command ne suffit pas)
+# Comparaison sur le basename, exacte (pas de sous-chaîne) : c'est la garde de
+# say/exit, un faux positif (ex. un wrapper "claude-notify") écrirait à l'aveugle
+# dans un shell nu.
 claude_under() {
   ps_out=$(ps -axo pid=,ppid=,comm=)
   set_pids=" $1 "; grew=1
@@ -89,7 +96,7 @@ claude_under() {
       case "$set_pids" in *" $pid "*) continue ;; esac
       set_pids="$set_pids$pid "
       grew=1
-      case "$comm" in *claude*) return 0 ;; esac
+      case "${comm##*/}" in claude) return 0 ;; esac
     done <<EOF
 $ps_out
 EOF
@@ -106,7 +113,7 @@ case "$CMD" in
     echo "état     : $(next_line)"
     grep -m1 '^màj' "$STATE" 2>/dev/null | sed 's/^/état     : /'
     SID=$(resolve_sid "$S") || {
-      echo "session  : aucune pour « $(project_slug) » (lancer : relay-ctl.sh go --dir $DIR)"; exit 0
+      echo "session  : aucune pour « $(project_slug) » (lancer : relay-ctl.sh go --dir $DIR, ou préciser --session <nom> / RELAY_SESSION)"; exit 0
     }
     PP=$(pane_pid "$SID")
     if claude_under "$PP"; then ACT="session Claude ACTIVE"
@@ -124,7 +131,8 @@ case "$CMD" in
     ;;
   set)
     [ -r "$STATE" ] || die "pas de $STATE"
-    case "$TEXT" in step-*|PAUSE|FIN) : ;; *) die "valeur invalide « $TEXT » (attendu : step-X.Y, PAUSE ou FIN)" ;; esac
+    printf '%s' "$TEXT" | grep -Eq '^step-[0-9]+(\.[0-9]+)+$|^(PAUSE|FIN)$' \
+      || die "valeur invalide « $TEXT » (attendu : step-X.Y, PAUSE ou FIN)"
     tmp="$STATE.tmp.$$"
     sed "s/^NEXT:.*/NEXT: $TEXT/" "$STATE" > "$tmp" && mv "$tmp" "$STATE" && echo "✓ $(next_line)"
     ;;
@@ -135,11 +143,13 @@ case "$CMD" in
       pane_busy "$(pane_pid "$SID")" && die "le pane de $S est occupé — 'watch' pour voir, 'stop' pour interrompre d'abord"
     else
       # --session nomme la session à créer ; sinon relay-<slug du projet>-<hhmmss>.
+      [ -n "$SESS" ] || [ -n "$(project_slug)" ] || die "slug de projet vide pour « $DIR » — nommer la session : --session <nom>"
       S="${SESS:-relay-$(project_slug)-$(date +%H%M%S)}"
       "$TMUX_BIN" new-session -d -s "$S" -c "$DIR" || die "création de session tmux impossible"
       SID=$(resolve_sid "$S") || die "session $S créée mais introuvable dans list-sessions"
       echo "session créée : $S"
       wait_idle "$SID"  # personne d'autre ne peut l'occuper : c'est son shell qui démarre
+      pane_busy "$(pane_pid "$SID")" && die "le pane de $S reste occupé après son démarrage"
     fi
     "$TMUX_BIN" send-keys -t "$SID" -l "(cd -- $(printf %q "$DIR") && ./execution/next.sh) 2>&1"
     "$TMUX_BIN" send-keys -t "$SID" Enter
