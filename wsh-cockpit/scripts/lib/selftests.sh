@@ -2907,6 +2907,79 @@ cmd_selftest_adopt() {
       "rc28=$rc28 alive28=$alive28 key28_after='$key28_after' out28='$out28'"
   fi
 
+  # 29. Prédicate pure sur la dernière ligne capturée (mitigation
+  #     best-effort spec §2, mesurée sur le vrai prompt de la machine — voir
+  #     docs/gotchas.md) : prompt nu (avec ou sans décoration RPROMPT) →
+  #     adoptable ; prompt + texte tapé → refusé ; ligne inclassable (thème
+  #     de prompt non reconnu, scrollback quelconque) → adoptable (jamais de
+  #     blocage sur une forme qu'on ne sait pas classer).
+  ok29=0
+  for line29 in '❯' '❯                                                                       ─╯' ''; do
+    adopt_last_line_busy "$line29" && ok29=1
+  done
+  bad29=0
+  for line29 in '❯ echo hello' '❯ echo hello                                                          ─╯'; do
+    adopt_last_line_busy "$line29" || bad29=1
+  done
+  unclassified29=0
+  for line29 in '$ ' 'some random scrollback line' '% '; do
+    adopt_last_line_busy "$line29" && unclassified29=1
+  done
+  if [ "$ok29" -eq 0 ] && [ "$bad29" -eq 0 ] && [ "$unclassified29" -eq 0 ]; then
+    report_adopt_case "29 dernière ligne : prompt nu adoptable, prompt+texte refusé, forme inconnue adoptable" 0
+  else
+    report_adopt_case "29 dernière ligne : prompt nu adoptable, prompt+texte refusé, forme inconnue adoptable" 1 \
+      "ok29=$ok29 bad29=$bad29 unclassified29=$unclassified29"
+  fi
+
+  # 30. Cas réel : texte tapé dans le pane SANS Entrée (le process reste un
+  #     shell nu, invisible à adopt_state_allowed) offert à l'adoption →
+  #     refusée par la garde dernière-ligne, claim restauré à l'identique
+  #     (calque du cas 11 busy-pane, sur le vrai prompt de la machine plutôt
+  #     qu'un process `top`).
+  sess30="cockpit-selftest-adopt-typing30-$$"
+  tmux new-session -d -s "$sess30"
+  created+=("$sess30")
+  tries30=0; idle30=1; line30=""
+  while [ "$tries30" -lt 30 ]; do
+    line30=$(mux_pane_last_line "$sess30")
+    if [ -n "$line30" ] && ! adopt_last_line_busy "$line30"; then idle30=0; break; fi
+    tries30=$((tries30 + 1)); sleep 0.3
+  done
+  slug30=$(session_slug "$sess30")
+  claim_create "$slug30" "user-preopen-30" "$$" >/dev/null 2>&1
+  prefix_write "$sess30" "(named)"
+  tmux send-keys -t "$sess30" -l 'echo selftest-adopt-typing30-not-run'
+  sleep 0.4
+  # Direct assertion on the new gate itself (fast, deterministic — same
+  # pragmatic reasoning as testing session_safe_to_reuse directly against
+  # GUARD_BUSY in selftest-guard): the pane's foreground IS a bare shell
+  # (adopt_state_allowed alone would say "adoptable"), so only the new
+  # last-line check can be refusing it here.
+  ready30=0; adopt_pane_ready "$sess30" && ready30=1
+  export WSH_COCKPIT_AGENT="typingagent30-$$"
+  export WSH_COCKPIT_ADOPT="$sess30"
+  # Elapsed-time guard: adopt_pane_ready must refuse BEFORE try_adopt_session
+  # ever reaches adopt_run_probe — if it didn't, the probe's `send` would
+  # merge its own text onto the tail of the still-unsubmitted typed line
+  # above (mux_send_line's Enter would submit the GARBLED result), and
+  # wait-done's 60s timeout would still make this case superficially "pass"
+  # for the wrong reason (measured while writing this case, see
+  # docs/gotchas.md). A well under a minute completion proves the gate fired
+  # first, never touching the probe.
+  SECONDS=0
+  set +e; try_adopt_session "" ""; rc30=$?; set -e
+  elapsed30=$SECONDS
+  k30=$(claim_read_key "$(claim_path "$slug30")" 2>/dev/null || true)
+  won30_gone=1; [ -f "$(claim_won_path "$slug30" "$$")" ] || won30_gone=0
+  if [ "$idle30" -eq 0 ] && [ "$ready30" -eq 0 ] && [ "$rc30" -ne 0 ] && [ -z "$ADOPT_RESULT" ] \
+     && [ "$k30" = "user-preopen-30" ] && [ "$won30_gone" -eq 0 ] && [ "$elapsed30" -lt 15 ]; then
+    report_adopt_case "30 texte tapé sans Entrée (garde dernière ligne) : adoption refusée, claim restauré" 0
+  else
+    report_adopt_case "30 texte tapé sans Entrée (garde dernière ligne) : adoption refusée, claim restauré" 1 \
+      "idle30=$idle30 ready30=$ready30 rc30=$rc30 ADOPT_RESULT='$ADOPT_RESULT' k30='$k30' won30_gone=$won30_gone elapsed30=${elapsed30}s line30='$line30'"
+  fi
+
   rm -f "$(state_file)" 2>/dev/null || true
   if [ "$had_agent9" -eq 1 ]; then export WSH_COCKPIT_AGENT="$saved_agent9"
   else unset WSH_COCKPIT_AGENT; fi

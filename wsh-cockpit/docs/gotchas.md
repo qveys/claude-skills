@@ -213,6 +213,34 @@ suit est le détail et le "pourquoi" derrière chacune.
   probe-only: once the probe succeeds and you know where you actually are,
   a normal `remote-init "$SESS" <host>` (or `local-init`) still applies if
   you want the short-form framing for the rest of the workflow.
+- **A command typed but not yet submitted is invisible to the adoption
+  guard's process check — the last captured pane line is the only signal
+  that catches it, and it only recognizes the machine's actual prompt
+  shapes.** `mux_pane_command` (`lib/mux.sh`) reports the pane's FOREGROUND
+  process; while a human or a prior agent is mid-keystroke on a command
+  (no Enter pressed yet), that process is still the bare shell, so
+  `adopt_state_allowed` alone would call the pane adoptable and the
+  probe's own `send` would land its text on top of the unsubmitted
+  input, merging into a garbled command. Measured on this machine's real
+  prompt (disposable tmux session, zsh + powerlevel10k-style theme with a
+  right-side RPROMPT segment): the rendered last line pads out to the pane
+  width and appends `─`+a corner glyph (`╮`/`╯`) flush right REGARDLESS of
+  whether text was typed — a naive "anything after the prompt glyph"
+  check would refuse every adoption. `adopt_last_line_busy`
+  (`lib/session.sh`) strips that decoration if present, then recognizes
+  exactly two shapes: bare `❯` (idle, adoptable) vs `❯ <text>` (busy,
+  refused). Anything else — a different prompt theme (classic `$`/`%`/`#`,
+  non-p10k themes), an empty capture, unrelated scrollback — is
+  UNCLASSIFIED and is treated as adoptable: a false positive here would
+  make a healthy cockpit unadoptable, which is worse than the accepted
+  best-effort gap. `mux_pane_last_line` captures with `-J` (joins
+  tmux-wrapped physical rows back into one logical line) specifically
+  because the padded RPROMPT row can exceed `#{pane_width}` without tmux
+  ever setting the wrap flag — `-J` re-joins it either way, so the
+  predicate always sees the true tail of the logical line. Net effect:
+  this mitigation only protects sessions using a prompt shape it
+  recognizes; a custom or unrecognized prompt with text typed but not
+  submitted can still slip through unrefused.
 - **The live Wave state DB and its on-disk fallback path can disagree by
   days.** Two different resolvers exist in `lib/wave.sh`: `wave_db_ro()`
   (used by tab-cache resolution, `open`'s auto-open path) falls back to the

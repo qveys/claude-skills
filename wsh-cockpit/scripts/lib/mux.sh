@@ -116,6 +116,16 @@ mux_session_name() {  # canonical name the target actually resolves to, best-eff
   if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{session_name}' 2>/dev/null
   else printf '%s' "$1"; fi  # zellij: no alias resolution to worry about — pass through
 }
+mux_pane_last_line() {  # last non-blank captured line of the pane's active pane, best-effort
+  # -J joins tmux-wrapped physical rows back into one logical line: measured
+  # (docs/gotchas.md), a padded right-prompt (RPROMPT) segment can occupy a
+  # row wider than #{pane_width} without ever setting the wrap flag, and even
+  # when it does wrap, -J re-joins it — either way the caller always sees the
+  # true tail of the logical prompt line, never a truncated physical row.
+  if [ "$MUX" = tmux ]; then
+    tmux capture-pane -pJt "$1" -S -20 2>/dev/null | awk 'NF{last=$0} END{print last}'
+  else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable
+}
 mux_pane_id() {  # id of the target session's ACTIVE pane, best-effort
   if [ "$MUX" = tmux ]; then tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null
   else printf ''; fi  # zellij: no cheap equivalent — caller treats unknown as unverifiable

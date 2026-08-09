@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-09 · **Étape courante : step-1.11.1 terminée, au tour de step-1.11.2**
+màj : 2026-08-09 · **Étape courante : step-1.11.2 terminée, au tour de step-1.11.3**
 
-NEXT: step-1.11.2
+NEXT: step-1.11.3
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -45,7 +45,7 @@ NEXT: step-1.11.2
 | 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ✅ 2026-08-09 |
 | 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ✅ 2026-08-09 |
 | 1.11.1 | Balayage de sortie du wrapper restreint aux sessions du run (É1) | Sonnet | ✅ 2026-08-09 |
-| 1.11.2 | Garde busy-pane : mitigation « texte après le prompt » (É2) | Sonnet | ☐ |
+| 1.11.2 | Garde busy-pane : mitigation « texte après le prompt » (É2) | Sonnet | ✅ 2026-08-09 |
 | 1.11.3 | `open --tab` : warning doublons off-by-one + test (É3) | Sonnet | ☐ |
 | 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ☐ |
 
@@ -566,3 +566,52 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   Leçon actée : ne plus utiliser `gc --idle=0` pour un nettoyage de résidu de
   test, cibler le marqueur exact ou `--only-session`. 1.11.2 (garde busy-pane,
   mitigation « texte après le prompt ») prend le relais.
+- 2026-08-09 (step-1.11.2, Sonnet) : **garde busy-pane complétée par la
+  mitigation best-effort « texte après le prompt » (spec §2).** Mesure d'abord
+  (session tmux jetable, prompt réel de la machine — zsh powerlevel10k-style
+  avec segment droit RPROMPT) : la dernière ligne rendue pad TOUJOURS jusqu'à
+  la largeur du pane et termine par `─`+glyphe d'angle (`╮`/`╯`) flush droite,
+  qu'il y ait du texte tapé ou non — une heuristique naïve « du texte après le
+  prompt » aurait refusé TOUTE adoption, confirmant l'alerte de la fiche.
+  Nouvelle primitive `mux_pane_last_line()` (`lib/mux.sh`) : capture `-J`
+  (rejoint les lignes physiques wrappées par tmux en une ligne logique — mesuré
+  : le segment RPROMPT padé peut dépasser `#{pane_width}` sans jamais poser le
+  flag de wrap ; `-J` la rejoint dans les deux cas) sur les 20 dernières lignes,
+  dernière ligne non vide via `awk`. Nouvelle prédicate pure
+  `adopt_last_line_busy()` (`lib/session.sh`) : strip la décoration RPROMPT si
+  présente, puis reconnaît exactement deux formes — `❯` seul (repos,
+  adoptable) vs `❯ <texte>` (frappe en cours, refusé) ; toute autre forme
+  (thème de prompt différent, capture vide, scrollback quelconque) est
+  INCLASSABLE et traitée comme adoptable (philosophie best-effort du dépôt :
+  un faux positif rendrait un cockpit sain inadoptable, pire que la limite
+  assumée). `adopt_pane_ready()` chaîne désormais `adopt_state_allowed` (process)
+  ET `! adopt_last_line_busy` (dernière ligne) — un seul point de câblage,
+  rollback existant (`try_adopt_session` → `claim_rollback`) réutilisé sans
+  duplication. **RED-first démontré** : cas 29 (prédicate pure, 3 groupes —
+  prompt nu adoptable, prompt+texte refusé, forme inconnue adoptable) et cas 30
+  (cas réel : session avec texte tapé SANS Entrée offerte à l'adoption →
+  refusée, claim restauré à l'identique, calque du cas 11 busy-pane historique
+  mais sur le vrai prompt de la machine). **Piège trouvé pendant le RED
+  lui-même** : la première version du cas 30, prédicate neutralisée, laissait
+  `try_adopt_session` retomber jusqu'à la vraie sonde (`adopt_run_probe`), dont
+  le `send` fusionnait son propre texte sur la ligne encore non soumise —
+  timeout `wait-done` de 60s qui faisait échouer l'adoption pour la MAUVAISE
+  raison (assertions finales « accidentellement » vertes sans prouver le
+  mécanisme). Corrigé par une assertion directe et rapide
+  (`adopt_pane_ready "$sess30"`, court-circuitant la sonde) plus une garde de
+  temps écoulé (`SECONDS`, exigeant `<15s`) prouvant que la garde tire AVANT
+  d'atteindre la sonde ; RED re-vérifié authentique (`ready30=1 rc30=1 … elapsed30=62s`
+  avant le fix applicatif). Limite documentée dans `docs/gotchas.md` (nouvelle
+  puce entre « adoption probe never trusts remote-mode » et « Wave state DB
+  disagree by days ») : formes de prompt non reconnues (classiques `$`/`%`/`#`,
+  thèmes non-p10k) restent un angle mort assumé. **Non-régression** :
+  `selftest-adopt` 30/30 verts en isolation (2 FAIL constatés en cours de route
+  sur des cas SANS RAPPORT — 9/23/26 puis 9 seul selon le run — confirmés comme
+  le flake pré-existant déjà documenté 1.5-1.9, jamais reproductible à la
+  demande, jamais le même cas deux fois ; instrumentation de debug temporaire
+  posée puis retirée pour le confirmer) ; `selftest-guard` 42/42 lignes `ok`
+  (41 cas, cf. note step-1.1) et `selftest-claim` 8/8 verts, les deux re-exécutés
+  en session tmux jetable après coup. Aucune session tmux ni marqueur résiduel
+  après coup, hormis une session de debug manuelle (`selftest-dbg25-manual`)
+  oubliée en cours de route et nettoyée explicitement en fin de session.
+  1.11.3 (`open --tab` warning doublons off-by-one) prend le relais.

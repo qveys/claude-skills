@@ -463,8 +463,39 @@ adopt_state_allowed() {  # $1 pane_current_command string -> rc 0 if adoptable
     *) return 1 ;;
   esac
 }
-adopt_pane_ready() {  # $1 sess -> rc 0 pane's foreground process is adoptable
-  adopt_state_allowed "$(mux_pane_command "$1")"
+# Best-effort mitigation for "texte après le prompt" (spec v12 §2):
+# pane_current_command only sees the pane's foreground PROCESS — a command
+# being TYPED but not yet run (no Enter pressed) is invisible to it, since
+# the foreground process is still the bare shell. Measured on the machine's
+# real prompt (session tmux jetable, see docs/gotchas.md): a zsh
+# powerlevel-style prompt with a right-side segment (RPROMPT) pads the WHOLE
+# line out to the pane width and appends "─"+a corner glyph ("╮"/"╯") flush
+# right, unrelated to whether text was typed — a naive "any content at the
+# end of the last line" heuristic would refuse EVERY adoption. Recognized
+# shapes only (best-effort, conservative):
+#   idle: "❯" alone, with or without the padded RPROMPT decoration
+#   busy: "❯ <typed text>", with or without the same decoration
+# A last line that doesn't match either shape (a different prompt theme, an
+# empty capture, unrelated scrollback content) is UNRECOGNIZED and must NOT
+# refuse adoption: a false positive here would make a healthy cockpit
+# unadoptable, worse than the documented best-effort limit (docs/gotchas.md).
+adopt_last_line_busy() {  # $1 last non-blank captured pane line -> rc 0 if busy (refuse), rc 1 if idle/unrecognized (allow)
+  local line="$1" body
+  if [[ "$line" =~ ^(.*)[[:space:]]─+[╮╯]$ ]]; then
+    body="${BASH_REMATCH[1]}"
+  else
+    body="$line"
+  fi
+  body="${body%"${body##*[![:space:]]}"}"  # trim trailing whitespace left by the strip above
+  case "$body" in
+    '❯') return 1 ;;
+    '❯ '*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+adopt_pane_ready() {  # $1 sess -> rc 0 pane's foreground process AND last line are adoptable
+  adopt_state_allowed "$(mux_pane_command "$1")" || return 1
+  ! adopt_last_line_busy "$(mux_pane_last_line "$1")"
 }
 
 # Systematic, non-optional probe (spec v12 §2): a released/hand-opened keep
