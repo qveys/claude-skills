@@ -5,3 +5,13 @@ __pycache__/
 .venv/
 .superpowers/
 *-workspace/
+
+# Config d'IDE (JetBrains)
+.idea/
+
+# Skills tierces clonées ici : chacune est un dépôt git autonome avec son
+# propre remote, donc du ressort de son upstream, pas de ce dépôt-ci.
+# github.com/ksimback/looper
+looper/
+# github.com/bjgreenberg/senior-engineering-partner
+senior-engineering-partner/
