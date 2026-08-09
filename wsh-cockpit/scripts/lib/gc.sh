@@ -89,7 +89,9 @@ gc_hygiene_pass() {
   local dry_run="${1:-0}" scope="${2:-}" live_raw rc=0
   live_raw=$(mux_list_sessions) || rc=$?
   if [ "$rc" -ne 0 ]; then
-    [ -t 1 ] && echo "gc: hygiene skipped — session listing failed (uncertain state, nothing touched)"
+    if [ -t 1 ]; then
+      echo "gc: hygiene skipped — session listing failed (uncertain state, nothing touched)"
+    fi
     return 0
   fi
 
@@ -329,7 +331,10 @@ cmd_gc() {
   local nm att act killed=0 kept=0 wouldkill=0 eff_idle is_keep
   while IFS='|' read -r nm att act; do
     [ -n "$nm" ] || continue
-    is_keep=0; keep_is_set "$nm" && is_keep=1
+    is_keep=0
+    if keep_is_set "$nm"; then
+      is_keep=1
+    fi
     eff_idle=$(gc_effective_idle "$IDLE" "$is_keep")
     if gc_should_kill "$now" "$act" "$att" "$eff_idle"; then
       rc=0; session_is_own "$nm" || rc=$?

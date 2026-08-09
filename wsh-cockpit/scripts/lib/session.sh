@@ -115,10 +115,13 @@ claim_new_session() {  # $1 sess $2 prefix-value
 # fallback chain — spec v12 §2, "aucun préfixe demandé"). Prints the resolved
 # session and returns 0; returns 1 when the registry has no match at all
 # (caller falls through to the legacy last-session/newest-for-prefix path,
-# the étape-2/3 stand-in until step-1.4/1.5 land real adoption/scan); returns
-# 2 when the match is genuinely AMBIGUOUS (2+ live candidates and none of
-# them is the remembered last-session) — the caller must surface an explicit
-# error, never silently spin up an (N+1)-th cockpit.
+# the étape-2/3 stand-in until step-1.4/1.5 land real adoption/scan) OR when
+# the sole match / remembered match fails session_safe_to_reuse (its
+# foreground process isn't a bare shell — same fallthrough as a plain miss,
+# never returned as a silent success); returns 2 when the match is
+# genuinely AMBIGUOUS (2+ live candidates and none of them is the
+# remembered last-session) — the caller must surface an explicit error,
+# never silently spin up an (N+1)-th cockpit.
 find_registry_session() {  # $1 requested prefix (raw, "" = none given) $2 normalized prefix
   local requested="${1:-}" norm="$2" mykey slug ckey s pf remembered
   mykey=$(agent_claim_key)
@@ -137,6 +140,15 @@ find_registry_session() {  # $1 requested prefix (raw, "" = none given) $2 norma
 
   [ ${#cands[@]} -gt 0 ] || return 1
   if [ ${#cands[@]} -eq 1 ]; then
+    # A registry hit still has to clear the same bare-shell-only check as
+    # every other reuse path (session_safe_to_reuse) — the registry being
+    # the resolution authority (spec v12 §2, étape 1) says WHICH session is
+    # mine, not that it's still safe to type into silently. Refusing here
+    # counts as a registry MISS (rc 1), same as find_reusable_session
+    # already treats its own remembered/newest fallbacks failing this
+    # check, so the caller falls through to adoption/scan instead of
+    # bypassing the guard on the one path that used to skip it.
+    session_safe_to_reuse "${cands[0]}" || return 1
     printf '%s\n' "${cands[0]}"
     return 0
   fi
@@ -146,6 +158,7 @@ find_registry_session() {  # $1 requested prefix (raw, "" = none given) $2 norma
     local c
     for c in "${cands[@]}"; do
       if [ "$c" = "$remembered" ]; then
+        session_safe_to_reuse "$c" || return 1
         printf '%s\n' "$c"
         return 0
       fi
@@ -624,7 +637,7 @@ release_session() {  # $1 session -> rc 0 released, 1 not owner/absent
   if adopt_list_contains "$sess"; then
     claim_release "$slug" "$key" || return 1
   else
-    claim_read_key "$(claim_path "$slug")" 2>/dev/null | grep -qx "$key" || return 1
+    claim_read_key "$(claim_path "$slug")" 2>/dev/null | grep -Fqx -- "$key" || return 1
     rm -f "$(claim_path "$slug")"
   fi
   last=$(last_session 2>/dev/null || true)

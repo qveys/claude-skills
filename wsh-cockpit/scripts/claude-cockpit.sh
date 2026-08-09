@@ -232,16 +232,14 @@ for s in ${ALL_SESSIONS[@]+"${ALL_SESSIONS[@]}"}; do
   ADOPT_LIST="${ADOPT_LIST:+$ADOPT_LIST,}$s"
 done
 
-CLAUDE_RC=0
-env -u WSH_COCKPIT_PREFIX WSH_COCKPIT_AGENT="$AGENT_KEY" WSH_COCKPIT_ADOPT="$ADOPT_LIST" \
-  claude ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} || CLAUDE_RC=$?
-
 # True if $1 is one of THIS run's own spawned sessions (ALL_SESSIONS) —
 # guards the user-preopen-* sweep branch below against a same-named pre-claim
 # key from a DIFFERENT, concurrent run (step-1.11.1, audit finding E1): those
 # keys are indexed by group number, not by run, so two parallel runs' first
 # groups both produce "user-preopen-1". bash 3.2 has no associative arrays,
-# hence the linear scan.
+# hence the linear scan. Defined here, BEFORE claude is launched, because the
+# trap installed below must be armed before the one command that could be
+# interrupted.
 session_in_this_run() {
   local target="$1" s
   for s in ${ALL_SESSIONS[@]+"${ALL_SESSIONS[@]}"}; do
@@ -258,36 +256,56 @@ session_in_this_run() {
 # touching (that's gc's hygiene pass, a different concern). A session's
 # owner key here is read fresh, not assumed: it is either still its original
 # user-preopen-<n> pre-claim (never adopted during claude's run) or has since
-# become AGENT_KEY (claude adopted it) — release_session's own
-# WSH_COCKPIT_ADOPT-membership branch (retrograde-to-"released" vs.
-# full-removal-to-ABSENT) only makes sense for the latter, so ADOPT_LIST is
-# only passed on that branch. The user-preopen-* branch is further narrowed
-# to sessions THIS run actually spawned: that pre-claim key alone doesn't
-# prove ownership across runs.
-while IFS= read -r s; do
-  [ -n "$s" ] || continue
-  slug=$(session_slug "$s")
-  owner=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
-  case "$owner" in
-    "$AGENT_KEY") ;;
-    user-preopen-*) session_in_this_run "$s" || continue ;;
-    *) continue ;;
-  esac
-  if keep_is_set "$s"; then
-    if [ "$owner" = "$AGENT_KEY" ]; then
-      if ! WSH_COCKPIT_AGENT="$owner" WSH_COCKPIT_ADOPT="$ADOPT_LIST" "$WSH_LIVE" release "$s"; then
+# become AGENT_KEY (claude adopted it). Either way the session is part of
+# THIS run's adopt pool: ADOPT_LIST is built from every session this run
+# spawned (ALL_SESSIONS), not just the ones claude actually adopted — so
+# WSH_COCKPIT_ADOPT="$ADOPT_LIST" is passed on BOTH release calls below.
+# release_session's own WSH_COCKPIT_ADOPT-membership branch then retrogrades
+# the claim to "released" (re-adoptable via étape 2 only) rather than
+# removing it outright to ABSENT, which would fall back to the less-safe
+# étape 3 legacy scan. The user-preopen-* branch is further narrowed to
+# sessions THIS run actually spawned: that pre-claim key alone doesn't prove
+# ownership across runs.
+#
+# Wrapped in a function and armed as a trap (EXIT/INT/TERM), not run as
+# straight-line code after `claude`, because a foreground Ctrl-C delivers
+# SIGINT to this whole process group: bash itself receives it, and
+# straight-line code placed after the `claude` call would never run — every
+# pre-opened cockpit would leak until the next `gc` pass. EXIT_SWEEP_DONE is
+# a plain flag (bash 3.2: no associative arrays) guarding idempotency; the
+# INT/TERM handlers don't run the sweep themselves, they just `exit` with the
+# conventional signal exit code, which re-triggers the EXIT trap below.
+EXIT_SWEEP_DONE=0
+run_exit_sweep() {
+  [ "$EXIT_SWEEP_DONE" -eq 0 ] || return 0
+  EXIT_SWEEP_DONE=1
+  local s slug owner
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    slug=$(session_slug "$s")
+    owner=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
+    case "$owner" in
+      "$AGENT_KEY") ;;
+      user-preopen-*) session_in_this_run "$s" || continue ;;
+      *) continue ;;
+    esac
+    if keep_is_set "$s"; then
+      if ! env -u WSH_COCKPIT_PREFIX WSH_COCKPIT_AGENT="$owner" WSH_COCKPIT_ADOPT="$ADOPT_LIST" "$WSH_LIVE" release "$s"; then
         echo "claude-cockpit: warning: could not release '$s'" >&2
       fi
     else
-      if ! WSH_COCKPIT_AGENT="$owner" "$WSH_LIVE" release "$s"; then
-        echo "claude-cockpit: warning: could not release '$s'" >&2
+      if ! env -u WSH_COCKPIT_PREFIX "$WSH_LIVE" stop "$s"; then
+        echo "claude-cockpit: warning: could not stop '$s'" >&2
       fi
     fi
-  else
-    if ! "$WSH_LIVE" stop "$s"; then
-      echo "claude-cockpit: warning: could not stop '$s'" >&2
-    fi
-  fi
-done < <(mux_list_sessions | grep '^cockpit-' || true)
+  done < <(mux_list_sessions | grep '^cockpit-' || true)
+}
+trap run_exit_sweep EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+CLAUDE_RC=0
+env -u WSH_COCKPIT_PREFIX WSH_COCKPIT_AGENT="$AGENT_KEY" WSH_COCKPIT_ADOPT="$ADOPT_LIST" \
+  claude ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} || CLAUDE_RC=$?
 
 exit "$CLAUDE_RC"

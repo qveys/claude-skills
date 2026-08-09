@@ -1083,7 +1083,12 @@ cmd_selftest_guard() {
   GUARD_T3_DEAD="cockpit-selftest-guard-mort-$$"
   GUARD_T3_KEY="selftest-guard-t3-$$"
   GUARD_T3_KEY2="selftest-guard-t3b-$$"
-  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep err rcline gcrc
+  # Case 42 (CodeRabbit review): a registry hit (find_registry_session,
+  # spawn's étape 1) claimed under a dedicated fresh key, never reused by
+  # any other case here.
+  GUARD_REGBUSY="cockpit-selftest-guard-regbusy-$$"
+  GUARD_REGKEY="selftest-guard-reg-$$"
+  local rc failures=0 own cmd tries found pfx resolved panes pane_count active active_count present mode host sep err rcline gcrc reg42 rc42
 
   report_guard_case() {  # $1 label  $2 rc (0=ok)  $3 detail (shown on failure)
     if [ "$2" -eq 0 ]; then
@@ -1111,11 +1116,13 @@ cmd_selftest_guard() {
     tmux kill-session -t "=$GUARD_GCOTHER" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_W2" 2>/dev/null || true
     tmux kill-session -t "=$GUARD_T3_ALIVE" 2>/dev/null || true
+    tmux kill-session -t "=$GUARD_REGBUSY" 2>/dev/null || true
     rm -f "$GUARD_GCOWN_RCFILE" 2>/dev/null || true
     rm -f "$(seq_file "$GUARD_W2")" 2>/dev/null || true
     rm -f "$(seq_file "$GUARD_T3_ALIVE")" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_KEY" 2>/dev/null || true
     rm -f "$STATE_DIR/last-session-$GUARD_T3_KEY" 2>/dev/null || true
+    rm -f "$(claim_path "$(session_slug "$GUARD_REGBUSY")")" 2>/dev/null || true
   }
   trap selftest_guard_cleanup EXIT
 
@@ -1947,6 +1954,33 @@ cmd_selftest_guard() {
     report_guard_case "41 read rejects a non-numeric lines argument (exit 2)" 0
   else
     report_guard_case "41 read rejects a non-numeric lines argument (exit 2)" 1 "rc=$rc (expected 2), stderr='$err'"
+  fi
+
+  # 42 (CodeRabbit review). A registry hit — find_registry_session, spawn's
+  # étape 1 (spec v12 §2, "le registre des claims est l'autorité de
+  # résolution") — must be refused, not silently handed back, when its
+  # foreground process isn't a bare shell. find_reusable_session's own
+  # remembered/newest fallbacks already run session_safe_to_reuse (cases 7,
+  # 20b, ...); before this fix the registry hit was the one resolution step
+  # that bypassed it entirely, so `send` could type straight into a
+  # foreign foreground process (ssh, vim, less...) instead of a shell.
+  tmux new-session -d -s "$GUARD_REGBUSY" 'exec top'
+  tries=0; cmd=""
+  while [ "$tries" -lt 20 ]; do
+    cmd=$(mux_pane_command "$GUARD_REGBUSY")
+    [ "$cmd" = top ] && break
+    tries=$((tries + 1)); sleep 0.2
+  done
+  claim_create "$(session_slug "$GUARD_REGBUSY")" "$GUARD_REGKEY" >/dev/null 2>&1
+  set +e
+  reg42=$( WSH_COCKPIT_AGENT="$GUARD_REGKEY"; export WSH_COCKPIT_AGENT
+           find_registry_session "" "$(normalize_prefix "")" 2>/dev/null )
+  rc42=$?
+  set -e
+  if [ "$rc42" -ne 0 ] && [ -z "$reg42" ]; then
+    report_guard_case "42 registry hit with busy foreground process refused, not silently reused" 0
+  else
+    report_guard_case "42 registry hit with busy foreground process refused, not silently reused" 1 "rc=$rc42 reg='$reg42' (cmd='$cmd')"
   fi
 
   selftest_guard_cleanup
@@ -3418,8 +3452,8 @@ STUB
     "$([ ! -e "$(claim_path "$(session_slug "$sess1")")" ] && [ ! -e "$(prefix_file "$sess1")" ] && echo 0 || echo 1)" \
     "claim=$(claim_path "$(session_slug "$sess1")") prefix=$(prefix_file "$sess1")"
   if [ "$h2" -eq 0 ]; then
-    report_wrapper_case "A15 session2's claim freed (not left owned) after release" \
-      "$(! claim_is_claimed "$(session_slug "$sess2")" && echo 0 || echo 1)" \
+    report_wrapper_case "A15 session2's claim retrograded to a 'released' pré-claim (part of this run's ADOPT_LIST, so not removed outright to ABSENT)" \
+      "$([ "$(claim_read_key "$(claim_path "$(session_slug "$sess2")")" 2>/dev/null || true)" = "released" ] && echo 0 || echo 1)" \
       "key=$(claim_read_key "$(claim_path "$(session_slug "$sess2")")" 2>/dev/null || true)"
     report_wrapper_case "A16 session2's sticky keep marker survives the release" \
       "$(keep_is_set "$sess2" && echo 0 || echo 1)" "keep_file=$(keep_file "$sess2")"
