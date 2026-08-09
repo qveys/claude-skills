@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-09 · **Étape courante : step-1.11.3 terminée, au tour de step-1.12**
+màj : 2026-08-09 · **Étape courante : step-1.12 terminée (PR ouverte, revue traitée) — PAUSE, merge = action pilote**
 
-NEXT: step-1.12
+NEXT: PAUSE
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -47,7 +47,7 @@ NEXT: step-1.12
 | 1.11.1 | Balayage de sortie du wrapper restreint aux sessions du run (É1) | Sonnet | ✅ 2026-08-09 |
 | 1.11.2 | Garde busy-pane : mitigation « texte après le prompt » (É2) | Sonnet | ✅ 2026-08-09 |
 | 1.11.3 | `open --tab` : warning doublons off-by-one + test (É3) | Sonnet | ✅ 2026-08-09 |
-| 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ☐ |
+| 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ✅ 2026-08-09 |
 
 ## Ordre recommandé
 
@@ -648,3 +648,43 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   ancré `=nom` échouait silencieusement en « can't find pane » alors que la
   session existait bel et bien). Aucune session tmux ni marqueur résiduel
   après coup. 1.12 (PR de fin de lot vers `main`) prend le relais.
+- 2026-08-09 (step-1.12, Sonnet) : **PR #22 `feat/claude-cockpit-wrapper` → `main`
+  ouverte, revue traitée, mergeable — PAUSE, le merge reste une action pilote.**
+  Sélftests rejoués en session tmux jetable avant ouverture (12 suites vertes).
+  PR ouverte ; un conflit sur 3 fichiers (`chantier-relais/scripts/relay-ctl.sh`,
+  `SKILL.md`, `references/remote-control.md`, hors périmètre du lot wrapper —
+  divergence avec des évolutions parallèles du skill chantier-relais) résolu en
+  gardant `main` (déjà à jour sur ces 3 fichiers) via un merge commit ; les copies
+  locales avaient un temps semblé diverger, vérification `git show
+  origin/<branche>:<fichier>` a confirmé l'identité byte à byte, aucune régression.
+  Revue automatique (CodeRabbit + Copilot) : **15 fils** triés un par un. 13
+  correctifs réels scopés, corrigés et poussés en 3 commits signés
+  (`26df152` docs, `8a6544b` `next.sh` échec fort sur métadonnées invalides,
+  `de28251` scripts+tests — dont la garde `session_safe_to_reuse` manquante sur
+  le hit direct du registre dans `find_registry_session()`, corrigée en
+  RED-first avec un nouveau cas 42 dans `selftest-guard`, désormais 42/42 ; le
+  balayage de sortie de `claude-cockpit.sh` armé en trap EXIT/INT/TERM
+  idempotent au lieu de code linéaire après `claude`, insensible jusque-là à un
+  Ctrl-C pendant la session agent). 2 findings traités par **réponse motivée
+  sans modification de code**, fils résolus tels quels : staleness du texte de
+  la fiche `step-1.12` elle-même (une fiche est un plan figé au moment du
+  découpage, pas réécrite rétroactivement — le déroulé réel vit dans ce
+  journal) et l'écart de nom de fichier memo `adopt-dead-warned-*` déjà
+  consigné comme acceptation motivée A1 plus haut dans ce document — aucun des
+  15 fils ne relevait d'une refonte nécessitant une pause d'arbitrage. Les 15
+  réponses postées et les 15 fils résolus via l'API GitHub (REST pour les
+  réponses `in_reply_to`, GraphQL `resolveReviewThread` pour la résolution) —
+  0 fil ouvert restant, `mergeStateStatus: CLEAN`, `mergeable: MERGEABLE`
+  re-vérifiés après coup. **Flakiness pré-existante repérée en sous-produit** :
+  `selftest-adopt` a montré des échecs intermittents (cas 23/25/26/28 selon les
+  runs) après les correctifs de ce lot ; A/B testé via `git stash push -u` /
+  `pop` pour comparer contre la baseline `c62a639` d'avant ces correctifs —
+  même style d'échecs intermittents, cas différents à chaque run, sur la
+  baseline aussi. Confirme qu'il s'agit du flake déjà documenté (1.5-1.9,
+  1.11.2), pas d'une régression introduite ici — laissé hors périmètre, à
+  investiguer séparément. Travail réalisé dans un worktree isolé
+  (`/tmp/wsh-cockpit-review-fix`) pour ne pas perturber le répertoire de
+  travail principal (travaux non liés en cours ailleurs) ; worktree et branche
+  locale supprimés une fois le push confirmé sur
+  `origin/feat/claude-cockpit-wrapper`. **PR #22 prête à merger, action
+  réservée au pilote** — après merge, faire passer `NEXT: FIN`.
