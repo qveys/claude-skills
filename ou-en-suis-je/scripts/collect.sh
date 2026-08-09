@@ -50,6 +50,14 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "jq est requis (brew install jq / apt install jq)" >&2; exit 3; }
 
+# Variante de stat : sur GNU, `stat -f` = --file-system (peut réussir avec une sortie
+# incorrecte), donc un repli `stat -f … || stat -c …` est dangereux. On détecte une fois.
+if stat --version >/dev/null 2>&1; then
+  STAT_FLAVOR=gnu
+else
+  STAT_FLAVOR=bsd
+fi
+
 PROJ_DIR="$HOME/.claude/projects"
 if [ ! -d "$PROJ_DIR" ]; then
   echo "(pas de dossier $PROJ_DIR : aucune session Claude Code sur cette machine)"
@@ -89,9 +97,18 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
   fi
 
   ts=$(tail -n 30 "$f" | jq -r 'select(.timestamp) | .timestamp' 2>/dev/null | tail -n 1 | cut -c1-16 || true)
-  [ -n "$ts" ] || ts=$(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$f" 2>/dev/null \
-                    || stat -c '%y' "$f" 2>/dev/null | cut -c1-16 | tr ' ' 'T')
-  size_kb=$(( $(stat -f '%z' "$f" 2>/dev/null || stat -c '%s' "$f") / 1024 ))
+  if [ -z "$ts" ]; then
+    if [ "$STAT_FLAVOR" = bsd ]; then
+      ts=$(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$f")
+    else
+      ts=$(stat -c '%y' "$f" | cut -c1-16 | tr ' ' 'T')
+    fi
+  fi
+  if [ "$STAT_FLAVOR" = bsd ]; then
+    size_kb=$(( $(stat -f '%z' "$f") / 1024 ))
+  else
+    size_kb=$(( $(stat -c '%s' "$f") / 1024 ))
+  fi
   ltype=$(tail -n 1 "$f" | jq -r '.type // "?"' 2>/dev/null || echo 'PARSE_ERROR')
   intr=$(tail -n 8 "$f" | grep -c 'Request interrupted' || true)
 
@@ -111,16 +128,29 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
     esac
   fi
 
-  fin=$(tail -n 120 "$f" \
-    | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' 2>/dev/null \
-    | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/|/¦/g' || true)
-  fin=$(printf '%s' "$fin" | tail -c 260)
+  # Capture le statut du pipeline jq (pipefail) : en cas d'échec, on jette toute sortie
+  # partielle (sinon un FIN tronqué / périmé peut être jugé) et on marque PARSE_ERROR.
+  fin=""
+  if fin_raw=$(tail -n 120 "$f" \
+      | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' 2>/dev/null); then
+    fin=$(printf '%s' "$fin_raw" | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/|/¦/g')
+    fin=$(printf '%s' "$fin" | tail -c 260)
+  else
+    ltype="PARSE_ERROR"
+  fi
   [ -n "$fin" ] || fin="(aucun texte assistant en fin de fichier)"
 
   line=$(printf '%s|%s|%s|%sKo|%s|intr=%s|%s|%s|…%s' \
     "$proj" "$id" "$ts" "$size_kb" "$ltype" "$intr" "$tag" "$subject" "$fin")
 
   if [ "$RAW" = 1 ]; then
+    printf '%s\n' "$line"
+    continue
+  fi
+
+  # PARSE_ERROR : ne pas agréger (VIDE/PREWARM/AUTO) — le sentinelle « ne pas juger »
+  # doit rester visible en ligne individuelle pour l'aval.
+  if [ "$ltype" = "PARSE_ERROR" ]; then
     printf '%s\n' "$line"
     continue
   fi
