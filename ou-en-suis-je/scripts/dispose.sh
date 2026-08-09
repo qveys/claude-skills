@@ -13,9 +13,19 @@
 set -euo pipefail
 
 [ $# -ge 2 ] || { echo "usage : dispose.sh ID8 CLOS|ATTEND|REPRENDRE [\"note\"]" >&2; exit 2; }
+[ $# -le 3 ] || { echo "trop d'arguments : encapsuler la note entre guillemets (reçu $# args)" >&2; exit 2; }
 case "$2" in CLOS|ATTEND|REPRENDRE) ;; *) echo "STATUT invalide : $2 (CLOS|ATTEND|REPRENDRE)" >&2; exit 2 ;; esac
+
+note="${3:-}"
+# Tabulations / newlines casseraient les lignes TSV (risque de forger un CLOS fantôme).
+case "$note" in
+  *$'\t'*|*$'\n'*|*$'\r'*)
+    echo "note invalide : tabulations et retours à la ligne interdits" >&2
+    exit 2
+    ;;
+esac
 
 DIR="$HOME/.claude/ou-en-suis-je"
 mkdir -p "$DIR"
-printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$(date '+%Y-%m-%d')" "${3:-}" >> "$DIR/dispositions.tsv"
-echo "noté : $1 → $2${3:+ ($3)}"
+printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$(date '+%Y-%m-%d')" "$note" >> "$DIR/dispositions.tsv"
+echo "noté : $1 → $2${note:+ ($note)}"
