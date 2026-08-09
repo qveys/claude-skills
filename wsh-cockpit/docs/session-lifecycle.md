@@ -92,6 +92,7 @@ COCKPIT=/Users/qveys/.claude/skills/wsh-cockpit/scripts/wsh-live.sh
 $COCKPIT spawn theo-plan --pre macbook-openclaw
 # → SESSION=cockpit-... puis "pre-push: helpers staged on 'macbook-openclaw':... — remote mode ON"
 $COCKPIT send 'tailscale ssh macbook-openclaw' "$SESS"   # le hop lui-même
+$COCKPIT send 'hostname' "$SESS"   # sonde non-interactive : le hop lui-même n'émet pas de footer avant déconnexion, ne pas wait-done dessus
 $COCKPIT wait-done "$SESS" 60
 $COCKPIT send 'docker ps' "$SESS"   # déjà en forme courte, pas de remote-init à part
 ```

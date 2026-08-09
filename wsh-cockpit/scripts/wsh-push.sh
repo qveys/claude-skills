@@ -91,11 +91,16 @@ ts_ssh() {
 # tailscale channel, or wc failed). Empty means "unverified" — NOT zero — so the
 # caller never reports a bogus mismatch when the transport itself succeeded.
 remote_size() {
-  local c="$1" path="$2"
+  local c="$1" path="$2" pathq
   command -v tailscale >/dev/null 2>&1 || { printf ''; return 0; }
+  # Escape embedded single quotes (same pattern as wsh-live.sh's REMOTE_STEP_Q)
+  # before interpolating into the single-quoted remote command — an
+  # unescaped apostrophe in the path could otherwise break out of the quote
+  # and inject remote shell syntax.
+  pathq=${path//\'/\'\\\'\'}
   # </dev/null: a read-only one-shot must never hold the SSH channel open
   # waiting for stdin EOF it will never get from an inherited pipe.
-  ts_ssh "$c" "wc -c < '$path' 2>/dev/null" </dev/null 2>/dev/null | tr -d '[:space:]'
+  ts_ssh "$c" "wc -c < '$pathq' 2>/dev/null" </dev/null 2>/dev/null | tr -d '[:space:]'
 }
 
 local_size() { wc -c <"$1" 2>/dev/null | tr -d '[:space:]'; }
@@ -142,8 +147,19 @@ try_tailscale_push() {
   command -v tailscale >/dev/null 2>&1 || return 1
   # Stream into a sibling temp on the REMOTE (same dir = same fs → atomic mv), then
   # rename. Clean up the remote temp on any mid-flight failure.
-  local rtmp="${REMOTE}.wsh-tmp.$$"
-  ts_ssh "$CONN" "cat > '$rtmp' && mv -f '$rtmp' '$REMOTE' || { rm -f '$rtmp'; exit 1; }" <"$LOCAL"
+  local rtmp="${REMOTE}.wsh-tmp.$$" rtmpq remoteq lsize rsize
+  # Escape embedded single quotes (same pattern as wsh-live.sh's REMOTE_STEP_Q)
+  # before interpolating into the single-quoted remote command.
+  rtmpq=${rtmp//\'/\'\\\'\'}
+  remoteq=${REMOTE//\'/\'\\\'\'}
+  ts_ssh "$CONN" "cat > '$rtmpq' && mv -f '$rtmpq' '$remoteq' || { rm -f '$rtmpq'; exit 1; }" <"$LOCAL"
+  # `tailscale ssh host "cmd"` does NOT reliably propagate cmd's exit code as
+  # its own (see try_tailscale_pull below) — a failed remote write could
+  # otherwise be reported as a successful push. Verify by size instead of
+  # trusting ts_ssh's rc, same as the pull path already does.
+  lsize=$(local_size "$LOCAL")
+  rsize=$(remote_size "$CONN" "$REMOTE")
+  [ -n "$rsize" ] && [ "$rsize" = "$lsize" ]
 }
 
 try_tailscale_pull() {
@@ -158,11 +174,14 @@ try_tailscale_pull() {
   rsize=$(remote_size "$CONN" "$REMOTE")
   [ -n "$rsize" ] || return 1
   mkdir -p "$(dirname "$LOCAL")" 2>/dev/null || true
-  local ltmp="${LOCAL}.wsh-tmp.$$" got
+  local ltmp="${LOCAL}.wsh-tmp.$$" got remoteq
+  # Escape embedded single quotes (same pattern as wsh-live.sh's REMOTE_STEP_Q)
+  # before interpolating into the single-quoted remote command.
+  remoteq=${REMOTE//\'/\'\\\'\'}
   # Direct redirection (no command substitution) keeps this binary-safe.
   # </dev/null for the same reason as remote_size above — a read (no stdin
   # to send) must never hang waiting for stdin EOF from an inherited pipe.
-  ts_ssh "$CONN" "cat '$REMOTE'" </dev/null >"$ltmp" 2>/dev/null
+  ts_ssh "$CONN" "cat '$remoteq'" </dev/null >"$ltmp" 2>/dev/null
   got=$(wc -c <"$ltmp" 2>/dev/null | tr -d '[:space:]')
   # Compare against the pre-flight size (not the unreliable exit code): only
   # `mv` into place when what actually arrived matches — a failed/partial
@@ -214,7 +233,12 @@ if [ "$PULL" -eq 1 ]; then
   LOCAL_SIZE=$(local_size "$LOCAL")
 fi
 
-R_SIZE=$(remote_size "$CONN" "$REMOTE")
+# || true: this call sits outside any if/&&/|| here, so under set -euo
+# pipefail a failed probe (e.g. tailscale reachable but the post-transfer
+# ts_ssh round-trip itself fails) would otherwise abort the script instead of
+# falling through to the size-unverified branch below — even though the
+# transfer itself may have already succeeded via a different method.
+R_SIZE=$(remote_size "$CONN" "$REMOTE" || true)
 if [ -z "$R_SIZE" ]; then
   # Transport reported success but we have no channel to confirm the size. Report
   # success-unverified rather than a false mismatch (e.g. tailscale absent but

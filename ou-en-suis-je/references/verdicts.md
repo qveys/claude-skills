@@ -1,8 +1,11 @@
 # Règles de verdict — /ou-en-suis-je
 
-Le verdict se décide sur la **sortie de `collect.sh`** (colonnes FIN, TYPE_DERNIERE_ENTREE, intr, TAG),
-jamais sur l'intuition d'un agent. En cas de doute sur une ligne : `tail -n 120 <fichier> | jq …` pour
-relire la vraie fin — ne jamais lire le fichier entier.
+Le verdict se décide d'abord sur la **sortie de `collect.sh`** (colonnes FIN, TYPE_DERNIERE_ENTREE,
+intr, TAG), jamais sur l'intuition d'un agent — c'est la classification initiale. Une disposition de
+`dispositions.tsv` (Règle 0 ci-dessous) s'applique avant toute classification et impose son statut.
+Sans disposition, le seul override explicite est OBSOLÈTE (voir plus bas), qui croise cette
+classification avec l'état de la mémoire (fiches chantier). En cas de doute sur une ligne :
+`tail -n 120 <fichier> | jq …` pour relire la vraie fin — ne jamais lire le fichier entier.
 
 Les lignes commençant par `# AGG|` sont déjà agrégées par `collect.sh` (VIDE, AUTO_SECREVIEW,
 PREWARM) : ne jamais les redécomposer session par session, lire directement leurs compteurs.
