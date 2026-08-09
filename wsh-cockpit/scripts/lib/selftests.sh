@@ -3583,6 +3583,16 @@ cmd_selftest_attach() {
   # Wave laisse un terminal mort — noir, insensible à TOUTE touche, prefix
   # compris, donc indiscernable d'un plantage. La commande du bloc doit survivre
   # au détachement, dire ce qui s'est passé, et permettre de se rattacher.
+  # Le banc est tmux de bout en bout (socket dédié, detach-client, capture-pane)
+  # et mux_block_attach_cmd branche sur $MUX : sous zellij il produirait une
+  # commande zellij que ce banc ne saurait pas exercer — d'où un skip franc
+  # plutôt qu'un échec incompréhensible. Le skip précède have_mux : sous zellij,
+  # exiger un binaire tmux (ou pire, se plaindre de zellij) n'aurait aucun sens.
+  if [ "$MUX" != tmux ]; then
+    echo "selftest-attach: skip (tmux-only — le banc et la régression sont tmux)"
+    return 0
+  fi
+  have_mux
   # NOT local: the EXIT trap runs after this function has already returned.
   ATTACH_TGT="selftest-attach-tgt-$$"
   ATTACH_SOCK="cockpit-selftest-attach-$$"
