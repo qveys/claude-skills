@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-09 · **Étape courante : step-1.10 terminée, au tour de step-1.11**
+màj : 2026-08-09 · **Étape courante : step-1.11 terminée (audit : 3 fiches correctives insérées), au tour de step-1.11.1**
 
-NEXT: step-1.11
+NEXT: step-1.11.1
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -43,7 +43,10 @@ NEXT: step-1.11
 | 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ✅ 2026-08-07 |
 | 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ✅ 2026-08-09 |
 | 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ✅ 2026-08-09 |
-| 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ☐ |
+| 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ✅ 2026-08-09 |
+| 1.11.1 | Balayage de sortie du wrapper restreint aux sessions du run (É1) | Sonnet | ☐ |
+| 1.11.2 | Garde busy-pane : mitigation « texte après le prompt » (É2) | Sonnet | ☐ |
+| 1.11.3 | `open --tab` : warning doublons off-by-one + test (É3) | Sonnet | ☐ |
 | 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ☐ |
 
 ## Ordre recommandé
@@ -498,3 +501,36 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   Selftests non concernés par cette fiche (aucun fichier de `scripts/` touché) : `selftest-guard`
   lancé par acquit en session tmux jetable → 41/41, aucune régression. 1.11 (audit final de
   cohérence spec ↔ code ↔ tests, Fable) prend le relais.
+- 2026-08-09 (step-1.11, Fable) : **audit final rendu** — `execution/rapport-step-1.11-audit.md`
+  (spec v12 relue en entier, chaque exigence normative confrontée au texte exact du code —
+  extraction `sed`/`grep`, pas la mémoire des journaux — et au cas de selftest correspondant ;
+  5 findings v11→v12 vérifiés code+test chacun ; diff `main...HEAD` complet sur `scripts/`
+  hors selftests, les 5 lignes supprimées de session.sh inspectées une à une). **Gardes
+  lots 1-2 intactes** : `session_safe_to_reuse` survit dans les deux branches de
+  `find_reusable_session` (renforcée par l'exclusion `claim_is_claimed`), `deny_own_session`/
+  exit 8, `looks_like_session` et l'ancrage `=` inchangés ; la seule garde plus permissive
+  (`adopt_state_allowed`, adoption seulement) est une exigence spec §2 avec cas RED tracés
+  (1.4). **Selftests : 12 suites exécutées en session tmux jetable** — 11 vertes du premier
+  coup (sep 8, gc 20, cache 6, oneshot-ssh 8, output 6, transfer 3, live 12, guard 42 lignes
+  ok/41 cas, claim 10, tab 13, wrapper 22) ; `selftest-adopt` : 2 FAIL au run combiné (cas
+  9/25, signature du flake gc-en-arrière-plan documenté 1.5-1.8) → re-run isolé immédiat
+  **30/30 ok, RC=0** — pas une régression. **Verdict : conforme à trois écarts près**, fiches
+  correctives insérées avant 1.12 : É1 = le balayage de sortie du wrapper agit sur toute
+  session vivante au claim `user-preopen-*` sans restriction aux sessions de CE run (clés
+  indexées par groupe, pas par run → un run A qui sort détruit les cockpits non adoptés d'un
+  run B parallèle, violant « deux claude parallèles ne se volent pas leurs cockpits ») →
+  step-1.11.1 ; É2 = mitigation best-effort « texte après le prompt » de la garde busy-pane
+  (spec §2) jamais implémentée ni sa limite documentée → step-1.11.2 (⚠️ mesurer d'abord :
+  le prompt réel de la machine a un segment droit, une heuristique naïve refuserait tout) ;
+  É3 = warning doublons `open --tab` : `printf '%s' | wc -l` compte N−1 (piège du journal
+  1.8, corrigé dans le test mais pas dans ce chemin du code) → seuil `-gt 1` muet à N=2
+  exactement, chemin caller non testé → step-1.11.3. **Acceptations motivées** (pas de
+  fiche, détail au rapport §Acceptations) : mémo dead-warned par slug au lieu de
+  `<key>@<slug>` (objectif « warning une fois » atteint, déduplication plus large) ; rafale
+  d'adoptants prouvée à N=2 avec comptage (l'exclusivité de rename(2) ne dépend pas de N) ;
+  pas de stress-test « course + gc simultanés » (couverture compositionnelle : planchers gc
+  prouvés gc 6/12/13 + invariants sous course claim 2-6 ; un stress-test bash serait le
+  genre de flake que le chantier combat) ; continuité `seq` par décomposition (adopt 23+25,
+  déjà motivé en 1.6) ; `gc_effective_idle` au lieu de « `gc_should_kill` modifié » (équivalent
+  prouvé bout en bout gc 18-20, motivé en 1.7) ; « deux préfixes → deux sessions » prouvé par
+  construction par l'alternance adopt 5. 1.11.1 (sweep inter-runs) prend le relais.
