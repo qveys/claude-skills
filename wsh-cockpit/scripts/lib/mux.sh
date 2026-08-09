@@ -107,11 +107,18 @@ mux_block_attach_cmd() {  # $1 session, $2 ABSOLUTE mux binary — what a Wave b
   # process down with it, and Wave leaves a DEAD terminal: a black screen that
   # swallows every keystroke, prefix included, indistinguishable from a crash.
   # A surviving shell can say what happened and offer a re-attach on the spot.
-  local attach
-  if [ "$MUX" = tmux ]; then attach="'$2' attach -t '$1'"
-  else attach="'$2' attach '$1'"; fi
-  printf 'while :; do %s; printf "\\n[cockpit] %s: detached or ended (exit %%s)\\n[cockpit] Enter = re-attach, Ctrl-D = close this block\\n" "$?"; read -r _cockpit_ans || exit 0; done\n' \
-    "$attach" "$1"
+  # Both operands are interpolated into shell source, so they get the one
+  # escaping that makes a single-quoted string safe ('  ->  '\''): a session
+  # named `it's` would otherwise close the quote and hand the rest to sh as
+  # commands. The name is also a printf ARGUMENT, never part of its format —
+  # a `%` in a session name is data, not a conversion.
+  local attach sess_q bin_q
+  sess_q=${1//\'/\'\\\'\'}
+  bin_q=${2//\'/\'\\\'\'}
+  if [ "$MUX" = tmux ]; then attach="'$bin_q' attach -t '$sess_q'"
+  else attach="'$bin_q' attach '$sess_q'"; fi
+  printf 'while :; do %s; printf "\\n[cockpit] %%s: detached or ended (exit %%s)\\n[cockpit] Enter = re-attach, Ctrl-D = close this block\\n" '\''%s'\'' "$?"; read -r _cockpit_ans || exit 0; done\n' \
+    "$attach" "$sess_q"
 }
 mux_pane_command() {  # foreground process name in the pane's active pane, best-effort
   # display-message resolves `-t` to the target's ACTIVE pane directly; the prior
