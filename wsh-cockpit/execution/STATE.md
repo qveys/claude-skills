@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-09 · **Étape courante : step-1.12 terminée (PR ouverte, revue traitée) — PAUSE, merge = action pilote**
+màj : 2026-08-09 · **Chantier terminé : PR #22 mergée dans `main` (squash, commit `8d9d2c8`)**
 
-NEXT: PAUSE
+NEXT: FIN
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -688,3 +688,7 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   locale supprimés une fois le push confirmé sur
   `origin/feat/claude-cockpit-wrapper`. **PR #22 prête à merger, action
   réservée au pilote** — après merge, faire passer `NEXT: FIN`.
+- 2026-08-09 (clôture, action pilote) : **PR #22 mergée dans `main` en squash**
+  (commit `8d9d2c8`, mergée par `qveys` à 08:31 CEST). `main` local
+  fast-forwardé sur `origin/main` en conséquence. Chantier `claude-cockpit-wrapper`
+  clos — `NEXT: FIN`.
