@@ -816,6 +816,20 @@ remote_host_get() {  # $1 sess -> recorded host, or "" if none
 }
 remote_host_set() {  # $1 sess $2 host
   [ "$MUX" = tmux ] || return 0
+  # control_path_for_session keys the ControlMaster socket by session name
+  # alone (below) — if this session is later repointed to a DIFFERENT host,
+  # a still-live master from the old endpoint would let push/pull silently
+  # reuse it. Tear down any existing master here, before the new host is
+  # recorded, so a stale one is never picked up.
+  local prev cpath
+  prev=$(remote_host_get "$1")
+  if [ -n "$prev" ] && [ "$prev" != "$2" ]; then
+    cpath=$(control_path_for_session "$1")
+    if [ -S "$cpath" ] && command -v ssh >/dev/null 2>&1; then
+      ssh -o ControlPath="$cpath" -O exit x >/dev/null 2>&1 || true
+    fi
+    rm -f "$cpath" 2>/dev/null || true
+  fi
   tmux set-option -t "$1" "$(remote_host_option)" "$2" >/dev/null 2>&1 || true
 }
 remote_host_clear() {  # $1 sess
