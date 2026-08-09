@@ -178,23 +178,67 @@ suit est le détail et le "pourquoi" derrière chacune.
   `resolve_session` falls back to `SESS_DEFAULT` rather than passing an
   empty string through) — but it is exactly the failure mode this lot exists
   to close.
-- **A cockpit left mid-`ssh`/`tailscale ssh` no longer looks reusable.** Once
-  hopped, the pane's foreground isn't a bare shell anymore, so
-  `session_safe_to_reuse` refuses it and `spawn` opens a fresh session —
-  new FIDO2 auth and a second Wave block. Not a bug: `pane_current_command`
+- **A cockpit left mid-`ssh`/`tailscale ssh` still doesn't look reusable to
+  ORDINARY `spawn`.** Once hopped, the pane's foreground isn't a bare shell
+  anymore, so `session_safe_to_reuse` refuses it (registry step 1 and the
+  legacy scan step 3 both rely on it) and `spawn` opens a fresh session — new
+  FIDO2 auth and a second Wave block. Still not a bug: `pane_current_command`
   says nothing about what's running at the far end of the tunnel (a remote
   shell is reusable, a remote `claude` isn't), and that information isn't
-  available locally. Until lot 2 treats `ssh`/`tailscale`/`mosh` as adoptable
-  states (mandatory situate probe — already flagged as a NOTE in
-  `lib/session.sh`), work around it by reusing the existing session
-  explicitly (`SESSION=…`) instead of calling `spawn` again.
+  available locally without a probe. The wrapper/adoption lot (fiches 1.2-1.9)
+  DID add a relaxed check — `adopt_state_allowed` accepts a bare shell OR an
+  `ssh`/`tailscale`/`mosh` foreground, gated by the mandatory situate probe
+  (`adopt_run_probe`) — but **only** for step 2 of `spawn`'s resolution, i.e.
+  a session explicitly listed in `WSH_COCKPIT_ADOPT` (see
+  `docs/session-lifecycle.md` → "Opening a cockpit"). It is deliberately NOT
+  applied to my own last-remembered session or to the legacy scan — silently
+  reusing a session *I myself* left mid-hop carries the same "your probe
+  becomes a chat message" risk as the incident described above, and the
+  explicit `WSH_COCKPIT_ADOPT` list is the only place that risk is judged
+  worth taking (the sessions there were pre-opened *for* this purpose).
+  Workaround unchanged for anything outside `WSH_COCKPIT_ADOPT`: reuse the
+  existing session explicitly (`SESSION=…`) instead of calling `spawn` again.
+- **The adoption probe never trusts a session's remembered remote-mode
+  state — it re-frames itself inline every time.** A `keep` session can be
+  released, picked up by a completely different agent, ssh-hopped again to a
+  different host, released again… any number of times before the next
+  adoption — its sticky `@wsh_remote_mode`/helper-path tmux options reflect
+  whatever the PREVIOUS occupant last set, not necessarily reality for the
+  agent adopting it now. `adopt_run_probe` (`lib/session.sh`) forces
+  `WSH_LIVE_SEP_REINIT=1` on its own `send`/`wait-done`/`read` calls
+  regardless of what the session's options claim — self-contained inline
+  framing, never the pushed-helper form — so the probe itself can never be
+  the thing that silently breaks because a stale remote-mode flag pointed it
+  at a helper file that no longer exists on that host. This is deliberately
+  probe-only: once the probe succeeds and you know where you actually are,
+  a normal `remote-init "$SESS" <host>` (or `local-init`) still applies if
+  you want the short-form framing for the rest of the workflow.
+- **The live Wave state DB and its on-disk fallback path can disagree by
+  days.** Two different resolvers exist in `lib/wave.sh`: `wave_db_ro()`
+  (used by tab-cache resolution, `open`'s auto-open path) falls back to the
+  hardcoded `~/Library/Application Support/waveterm` when `wsh wavepath data`
+  fails or is empty; `wave_db_ro_strict()` (used only by `open --tab`'s
+  `resolve_tab_by_name`) refuses outright (rc=1) instead of ever touching
+  that hardcoded path. This isn't cosmetic: measured in step-1.1, the
+  hardcoded fallback pointed at a DB snapshot **9 days stale** relative to
+  the live one `wsh wavepath data` resolves dynamically — a `--tab` lookup
+  silently falling back to it could match (or miss) a tab that was
+  renamed/closed/created days ago. If you're adding a NEW caller that needs
+  the live DB and correctness matters more than best-effort availability,
+  reach for `wave_db_ro_strict()`, not `wave_db_ro()`.
 - **Never `start cockpit` blindly.** Another agent may already own that tmux
   session. Use `spawn` to open/continue your cockpit; it reuses an alive session
   automatically. Only `spawn --force` creates a duplicate window.
 - **Never call `spawn` again mid-workflow to "reconnect".** If the cockpit tab is
   still open, run `send`/`read` (or `current` / `status`) against the existing
-  `SESSION=`. Calling `spawn` without `--force` will reuse it; calling it with
-  `--force` opens a second tab the user did not ask for.
+  `SESSION=`. Calling `spawn` without `--force` **usually** reuses it — but this
+  is no longer an unconditional guarantee since the registry/adoption lot
+  (fiches 1.2-1.9, `docs/session-lifecycle.md` → "Opening a cockpit", steps
+  1-4): a `spawn` with an explicit **prefix that doesn't match** anything in
+  my registry, `WSH_COCKPIT_ADOPT`, or the legacy scan **creates a fresh
+  cockpit instead** — a mismatched prefix mid-workflow is a second tab the
+  user did not ask for, exactly like `--force`, just spelled differently.
+  Calling it with `--force` always opens a second tab regardless of prefix.
 - **Never skip airy step banners on multi-step cockpit work.** If you're running
   more than ~2 related commands, use `banner` before each logical step and
   `banner done` at each phase end. Plain `echo`, markdown headings, or chat-only

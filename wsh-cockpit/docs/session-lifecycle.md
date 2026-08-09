@@ -9,25 +9,50 @@ and you will land in their tmux pane.
 **`spawn` reuses an alive cockpit by default** — it does **not** open a duplicate
 Wave block if your previous session is still running. This is the fix for
 accidentally jumping from `cockpit-theo-plan-224847` to `cockpit-theo-plan-225108`
-while the first tab was still open.
+while the first tab was still open. Since the wrapper/adoption lot (fiches
+1.2-1.9), "reuse" is no longer a single alive-or-not check — `spawn` (without
+`--force`) walks three resolution steps in order, each gated by an atomic
+**claim** (`lib/claim.sh`, invariant I3: any session claimed by anyone, in any
+state past ABSENT, is skipped by the steps below it — never a silent double
+claim):
 
-`spawn` behavior:
-1. **If a cockpit is still alive** (last remembered session for this agent, or the
-   newest `cockpit-<prefix>-*` tmux session) → **reuse it**. Skip auto-open when
-   clients are already attached (the user is still watching that tab).
-2. **If nothing is alive** → create a fresh tmux session
-   (`cockpit-<prefix>-<HHMMSS>`, e.g. `cockpit-grok-222830`) and auto-open Wave.
-3. Prints `SESSION=<name>` — use that name (or rely on `send`/`read` defaults)
+1. **Registry** (`find_registry_session`) — among *my own* sessions (claimed
+   under my `WSH_COCKPIT_AGENT`/`WSH_COCKPIT_PREFIX` key), filtered by prefix
+   if one was passed, else last-used-if-registered, else the sole candidate →
+   **reuse it**. More than one match with none last-used → refuses (exit 2,
+   ambiguous) rather than silently pick one.
+2. **Adoption** (`WSH_COCKPIT_ADOPT` only — see "Cockpit pré-ouvert par
+   l'utilisateur" ci-dessous) — if step 1 missed, try each session listed in
+   `WSH_COCKPIT_ADOPT` (comma-separated, in order): claim it, run the
+   **mandatory** `hostname; pwd; whoami` probe, and only finalize the adoption
+   if the probe succeeds — a failed probe rolls the claim back instead of
+   handing you a session nobody verified.
+3. **Legacy scan** (`try_legacy_claim`, pre-registry sessions) — an unclaimed
+   `cockpit-<prefix>-*` tmux session found free (not in `WSH_COCKPIT_ADOPT`,
+   nobody's registry, nobody else's claim) → claimed on the spot (same probe
+   gate as step 2) and reused.
+4. **Nothing found** → create a fresh tmux session
+   (`cockpit-<prefix>-<HHMMSS>`, e.g. `cockpit-grok-222830`), claim it under my
+   key, and auto-open Wave.
+
+Skip auto-open when clients are already attached (the user is still watching
+that tab) whichever step 1-4 produced the session.
+
+5. Prints `SESSION=<name>` — use that name (or rely on `send`/`read` defaults)
    for every subsequent command in this workflow.
-4. **`spawn --force`** — only when you intentionally need a *second* cockpit
-   window (rare). Never call bare `spawn` again mid-workflow just to "reconnect".
-5. **`spawn --situate`** — also runs the hostname/pwd/whoami probe (see below)
+6. **`spawn --force`** — only when you intentionally need a *second* cockpit
+   window (rare); skips steps 1-3 entirely, never touches an existing claim of
+   mine. Never call bare `spawn` again mid-workflow just to "reconnect".
+7. **`spawn --situate`** — also runs the hostname/pwd/whoami probe (see below)
    internally before returning, in one call instead of four. If the probed
    hostname differs from this Mac's, it now auto-calls `remote-init` for you
    (best-effort push, falls back to inline framing with a warning — see below).
-6. **`spawn --pre <host>`** — pre-stages the sep/step helpers on `<host>`
+8. **`spawn --pre <host>`** — pre-stages the sep/step helpers on `<host>`
    *before* the pane ever ssh-hops there (shorthand for `remote-init --pre
    <host>` right after spawn — see "Voie recommandée" below).
+9. **`spawn --tab <name>`** — relayed to the underlying `open`: anchors the
+   Wave block on the named tab instead of the live/current one (see
+   `docs/advanced.md` → "Auto-open").
 
 ```bash
 # First cockpit for this workflow:
@@ -110,6 +135,51 @@ remote-init "$SESS"` (ou `remote-init "$SESS" <host>` si tu connais le nom/l'IP
 Set `WSH_COCKPIT_PREFIX` or `WSH_COCKPIT_AGENT` so parallel agents keep separate
 last-session state under `~/.cache/wsh-cockpit/`.
 
+## Cockpit pré-ouvert par l'utilisateur — adoption, `--keep`, hygiène
+
+Le wrapper `claude-cockpit` (`scripts/claude-cockpit.sh`, symlinké en
+`claude-cockpit` sur le `$PATH`) permet à l'utilisateur de pré-ouvrir un ou
+plusieurs cockpits avant même de lancer l'agent : `claude-cockpit theo-plan
+--keep --and deploy -- <args claude>` crée un cockpit par groupe `--and`
+(toujours `spawn --force --preopen`, jamais une réutilisation silencieuse),
+pose `WSH_COCKPIT_ADOPT=<sessions>` (liste ordonnée, jointe par des virgules)
+dans l'environnement du process `claude` lancé en avant-plan, avec
+`WSH_COCKPIT_AGENT=claude-<epoch>-<pid>` — jamais `WSH_COCKPIT_PREFIX`,
+explicitement retirée même si héritée, car elle prendrait le pas sur
+`WSH_COCKPIT_AGENT` dans `normalize_prefix`.
+
+- **Claim atomique.** Chaque étape de la résolution `spawn` (registre →
+  adoption → scan legacy, ci-dessus) passe par la machine d'états de
+  `lib/claim.sh` (ABSENT → PRÉ-CLAIM → EN-COURS → POSSÉDÉ) : jamais deux
+  agents ne peuvent finaliser la même session, et une adoption qui échoue
+  (sonde en échec, pane occupé) restaure le claim précédent au lieu de le
+  perdre.
+- **`--keep` est une propriété de la SESSION, pas du claim.** Posé par le
+  wrapper à la création (`touch keep-<slug>`), le marqueur survit à toute
+  adoption/relâche ultérieure — un agent qui adopte une session `keep` en
+  hérite telle quelle. Conséquence directe : `release` (jamais `stop`) sur
+  une session `keep` — `stop` le sait déjà et se rabat automatiquement sur
+  `release` quand le marqueur est présent, gardant le claim rétrogradé en
+  pré-claim `released` (ré-adoptable via l'étape 2, jamais redétruit au
+  passage). Une session adoptée **sans** `keep` (créée directement par le
+  wrapper sans `--keep`, ou reprise via le scan legacy) suit le chemin normal
+  : `release_session` supprime le fichier de claim entièrement (retour
+  ABSENT, re-scannable étape 3).
+- **Balayage de sortie du wrapper.** Après le retour de `claude` (succès ou
+  échec — seul un crash du wrapper lui-même saute le balayage), toute session
+  encore vivante de ce run — adoptée (`claude-<runid>`) ou jamais adoptée
+  (toujours `user-preopen-<n>`) — est relâchée si elle porte le marqueur
+  `keep`, détruite sinon. Un agent qui a lui-même `release`/`stop` proprement
+  en fin de tâche n'a rien de plus à faire ; le wrapper est le filet, pas le
+  chemin nominal.
+- **Hygiène `gc`.** Le plancher d'idle d'une session `keep` est porté à 24h
+  minimum (`GC_KEEP_FLOOR_IDLE`, `lib/gc.sh`) quel que soit un `--idle` plus
+  court passé à `gc` — mais reste soumis au balayage normal passé ce plancher
+  : une `keep` détachée et oubliée finit par disparaître, elle n'est pas
+  immortelle. `gc` nettoie aussi, en passe séparée, les familles de
+  marqueurs orphelins (`keep-`, `prefix-`, `adopt-claim-`, `.won-<pid>`, …)
+  dont la session sous-jacente est morte — jamais une session vivante.
+
 ## Reusing a named session
 
 Requires an explicit flag — otherwise `start` errors:
@@ -173,8 +243,11 @@ wsh blocks list                 # find strays (note which look idle ≥60s)
 wsh deleteblock -b <block-id>   # remove each confirmed orphan
 ```
 
-Only delete blocks **you** created. Leave the user's own panes — their long-lived
-terminal, their `tmux attach`, your own block — alone. When unsure, leave it.
+Only delete blocks/sessions **you created or adopted without `--keep`**. Leave
+the user's own panes — their long-lived terminal, their `tmux attach`, your own
+block — alone. When unsure, leave it. A `live` session adopted **with**
+`--keep` is never deleted, only `release`d (see "Cockpit pré-ouvert par
+l'utilisateur" above).
 
 **`live` mode:** `stop` (and `gc`) close the Wave block automatically along with
 the tmux session — see "Opening a cockpit" above. This heuristic-scan cleanup
@@ -201,5 +274,9 @@ scripts/wsh-live.sh gc --only-session=cockpit-x  # restreint le sweep à une ses
 - `--only-session=NAME` — restreint le sweep à exactement cette session `cockpit-*`.
 - Une session **attachée** (un client tmux dessus) n'est jamais tuée, même au-delà
   du seuil d'idle.
+- Une session marquée **`keep`** (sticky, voir "Cockpit pré-ouvert par
+  l'utilisateur" ci-dessus) a un plancher d'idle porté à 24h minimum même avec
+  un `--idle` plus court — passé ce plancher, elle retombe dans le balayage
+  normal comme n'importe quelle autre session.
 - Couvert par `selftest-gc` (décision pure testée sans tmux réel) — lancer après
   toute retouche de `lib/gc.sh`.

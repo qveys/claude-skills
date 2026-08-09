@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-09 · **Étape courante : step-1.9 terminée, au tour de step-1.10**
+màj : 2026-08-09 · **Étape courante : step-1.10 terminée, au tour de step-1.11**
 
-NEXT: step-1.10
+NEXT: step-1.11
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -42,7 +42,7 @@ NEXT: step-1.10
 | 1.7 | `gc` : keep épargnées, hygiène des marqueurs, `doctor` | Sonnet | ✅ 2026-08-06 |
 | 1.8 | `open --tab <nom>` (requête v12, `sql_quote()`) | Sonnet | ✅ 2026-08-07 |
 | 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ✅ 2026-08-09 |
-| 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ☐ |
+| 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ✅ 2026-08-09 |
 | 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ☐ |
 | 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ☐ |
 
@@ -461,3 +461,40 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   qu'un `rm` à la main ; le `.won-*` restant sous plancher est attendu, s'auto-nettoiera au
   prochain `gc` passé les 10 min, non bloquant. Aucun flake observé sur cette fiche. 1.10 (docs :
   `SKILL.md`, session-lifecycle, gotchas, README) prend le relais.
+- 2026-08-09 (step-1.10, Sonnet) : **doc mise au niveau du code livré 1.2-1.9** — chaque puce
+  du §6 de la fiche traitée par grep + amendement (aucune non-applicable). `SKILL.md` : nouvelle
+  section « Cockpit pré-ouvert par l'utilisateur » (wrapper `claude-cockpit`, sonde systématique
+  gate-avant-finalisation, adoption ciblée par préfixe — un préfixe non matché crée un cockpit
+  neuf plutôt que d'adopter au hasard —, `--keep` sticky = propriété de la session, plancher
+  `gc` 24h) + consignes sous-agents durcies (clé `WSH_COCKPIT_AGENT` distincte obligatoire,
+  espace réservé interdit, « stop ce qu'on a créé, release ce qu'on a adopté ») ; règle « Only
+  delete blocks/sessions you created » amendée en « …you created or adopted without `--keep` »
+  (les deux occurrences du dépôt — `SKILL.md` et `session-lifecycle.md` ligne ~246 — corrigées,
+  aucune ne restait non amendée après grep de vérification) ; liste des sous-commandes complétée
+  (`release`, `open --tab`). `docs/session-lifecycle.md` : les 4 étapes de résolution de `spawn`
+  (registre → adoption `WSH_COCKPIT_ADOPT` → scan legacy → création) réécrites en détail à la
+  place de l'ancien « last remembered OR newest cockpit-<prefix>-* » devenu inexact ; nouvelle
+  section dédiée adoption/`--keep`/hygiène `gc` ; bullet plancher-keep ajouté à la section `gc`
+  existante. `docs/gotchas.md` : le gotcha « spawn without --force will reuse it » nuancé (un
+  préfixe non matché crée désormais un cockpit neuf, comportement identique à `--force` côté
+  conséquence) ; le gotcha « ssh-hop no longer reusable » — dont la formulation pointait vers un
+  « lot 2 » déjà livré depuis, donc devenue fausse par omission plutôt que par erreur — corrigé
+  pour distinguer la reprise ordinaire (toujours refusée, `session_safe_to_reuse` bare-shell
+  strict) de l'adoption explicite via `WSH_COCKPIT_ADOPT` (désormais permissive, sondée) ; deux
+  gotchas nouveaux : sonde d'adoption toujours en cadrage inline auto-porté
+  (`WSH_LIVE_SEP_REINIT=1` forcé, jamais confiance dans l'état remote-mode hérité d'un occupant
+  précédent d'une session `keep` re-hoppée) et divergence mesurée (9 jours, step-1.1) entre
+  `wave_db_ro()` (fallback AppSupport en dur) et `wave_db_ro_strict()` (jamais de fallback,
+  utilisée uniquement par `open --tab`). `README.md` : tableau des sous-commandes complété
+  (`release`, `open --tab`, note plancher `gc`) ; nouvelle section « Pré-ouvrir des cockpits pour
+  l'agent — `claude-cockpit` » (usage humain du wrapper, installation) ; liste `selftest-*`
+  complétée des 4 suites manquantes (`selftest-claim`, `selftest-adopt`, `selftest-tab`,
+  `selftest-wrapper` — absentes du README alors qu'exécutées depuis 1.2-1.9). Relecture croisée
+  dédiée (grep ciblé) : plus aucune occurrence non amendée de « you created » ; les mentions
+  restantes de « reuses an alive session » (SKILL.md, gotchas.md, session-lifecycle.md) sont des
+  affirmations de haut niveau toujours vraies, non contradictoires avec les nuances de détail
+  ajoutées juste en dessous. Réserve appliquée : rien à documenter hors de ce qui est
+  effectivement livré (pas de déviation trouvée entre spec v12 et code réel sur ce périmètre).
+  Selftests non concernés par cette fiche (aucun fichier de `scripts/` touché) : `selftest-guard`
+  lancé par acquit en session tmux jetable → 41/41, aucune régression. 1.11 (audit final de
+  cohérence spec ↔ code ↔ tests, Fable) prend le relais.
