@@ -4,6 +4,18 @@ Date : 2026-07-27
 Statut : validé par Quentin (brainstorming du 2026-07-27)
 Portée : skill `wsh-cockpit` (`wsh-cockpit/scripts/`, `wsh-cockpit/SKILL.md`, `wsh-cockpit/docs/`)
 
+Changelog :
+
+- **v12 (2026-08-05)** — intègre les 5 findings CodeRabbit de la revue de la PR #16
+  (`wsh-cockpit/execution/findings-revue-spec-v11.md`) : primitives concrètes no-clobber
+  pour chaque transition de claim (§2, « Primitives des transitions », finding
+  3721135340) ; `keep` rendu sticky à la ré-adoption (§3, finding 3721135346) ; requête
+  `--tab` bornée au workspace courant (§4, SQL, finding 3721135353) ; flux de
+  neutralisation défini pour le nom d'onglet (§4, finding 3721135358) ; sélection
+  déterministe en cas de doublon d'onglet (§4, finding 3721135363). Cas de selftest
+  correspondants ajoutés au §6.
+- v11 (2026-07-27) — version validée au brainstorming, revue en PR #16.
+
 ## Objectif
 
 Permettre à l'utilisateur de démarrer `claude` en ayant lui-même paramétré et ouvert le
@@ -194,6 +206,27 @@ rename gagnant, le contenu du `.won` est vérifié = pré-claim, sinon rename in
 `adopt-claim-<slug>` exact OU `adopt-claim-<slug>.won-*` ; **I4** seule la clé
 propriétaire écrit `release`.
 
+### Primitives des transitions (v12 — finding 3721135340)
+
+Le shell n'offre pas de rename destination-exclusif : `mv` écrase la destination, et le
+`mv -n` de macOS n'écrase pas mais sort 0 même quand il n'a rien déplacé — gagnant et
+perdant indiscernables. Chaque transition utilise donc la primitive dont la garantie
+correspond exactement à son besoin :
+
+| Transition | Primitive | Garantie exploitée |
+|---|---|---|
+| Création (ABSENT → PRÉ-CLAIM / POSSÉDÉ) | `set -o noclobber` + redirection (O_EXCL) | échec si le chemin existe |
+| Consommation (PRÉ-CLAIM → EN-COURS) | `mv claim .won-<pid>` (rename(2)) | la **source** disparaît atomiquement : un seul `mv` réussit, le perdant a ENOENT. La destination `.won-<pid>` est un espace mono-écrivain (nul autre ne crée de fichier portant MON pid tant que je vis) : un `.won-<pid>` résiduel d'un pid recyclé est purgé/restauré AVANT le `mv` — pré-vérification sans course possible |
+| Claim définitif (EN-COURS → POSSÉDÉ) | écriture O_EXCL puis `rm .won` | jamais d'écrasement d'un claim tiers |
+| Rollback / restauration (`.won` → PRÉ-CLAIM) | `ln .won claim` (link(2), EEXIST si `claim` existe) puis `rm .won` | destination-exclusif **atomique** : un claim définitif apparu entre-temps n'est JAMAIS écrasé — sur EEXIST, suppression du `.won` seul (I1) |
+| Remplacement d'un claim orphelin (session morte, nom recyclé) | consommation préalable `mv claim .stale-<pid>`, puis création O_EXCL, puis `rm .stale-<pid>` | jamais de `mv` écrasant vers la destination partagée ; si l'O_EXCL échoue (un tiers a re-créé entre-temps), restauration `ln`/`rm` du `.stale` comme ci-dessus |
+
+`ln` n'est utilisable qu'au sein d'un même filesystem — acquis ici : tous les marqueurs
+vivent dans `~/.cache/wsh-cockpit/`. Ces primitives sont encapsulées dans des fonctions
+uniques (une par ligne du tableau) — aucun site d'appel ne compose `mv`/`ln` à la main.
+Cas de selftest imposés : cible `.won` résiduelle (pid recyclé), adoption concurrente
+A/B, rollback face à un claim définitif apparu entre-temps.
+
 Règles d'adoption :
 
 - Claim par session via marqueur `~/.cache/wsh-cockpit/adopt-claim-<slug>`. **Format
@@ -206,8 +239,9 @@ Règles d'adoption :
   (mono-écrivain, temp + `mv`) — jamais de test-puis-écriture. **Collision de nom
   recyclé** (les `HHMMSS` se répètent d'un jour à l'autre, l'hygiène est
   asynchrone) : O_EXCL qui échoue à la création sur un claim orphelin dont la
-  session est morte → remplacement par rename ; session homonyme vivante →
-  `unique_session_name` suffixe déjà (`-n`). Triple rôle : registre
+  session est morte → remplacement via la primitive « Remplacement d'un claim
+  orphelin » (« Primitives des transitions » ci-dessus — jamais de `mv` écrasant) ;
+  session homonyme vivante → `unique_session_name` suffixe déjà (`-n`). Triple rôle : registre
   de résolution (étape 1), verrou anti-double-adoption (étapes 2 et 3), preuve de
   propriété (`release_session`, exclusion au scan).
 - **La variable étant héritée par tous les shells de la session claude, les sous-agents
@@ -323,6 +357,19 @@ Règles d'adoption :
   naturel de fin) ET idle > 24 h retombe dans le balayage normal, sinon deadlock :
   une session que « seul l'utilisateur ferme », via un bloc dont la fermeture ne la
   ferme pas, ne mourrait jamais. Documenté dans SKILL.md.
+- **`keep` est sticky (v12 — finding 3721135346)** : `keep-<slug>` est une propriété
+  de la **session** (la volonté de l'utilisateur de garder sa fenêtre), pas du claim.
+  Il survit au `release` et à toute ré-adoption : un adoptant SANS `--keep` d'une
+  session marquée keep n'en prend jamais la pleine propriété — son `stop` voit le
+  marqueur et passe par `release_session` (jamais `teardown_session`), quel que soit
+  le détenteur du claim (`claude-<runid>` compris). Même règle pour une session keep
+  **créée** puis relâchée au pool scannable : le repreneur de l'étape 3 hérite du
+  keep. Le marqueur ne disparaît que par la passe d'hygiène de `gc` (session morte —
+  donc après fermeture manuelle de la fenêtre par l'utilisateur). L'adoption par
+  défaut d'une session keep est donc une propriété **réduite** : usage plein,
+  destruction interdite — documenté dans SKILL.md ; les deux chemins (ré-adoption
+  d'une keep relâchée ; reprise au scan d'une keep créée-relâchée) entrent au
+  selftest.
 
 ### Cycle de vie des marqueurs (`adopt-claim-<slug>`, `keep-<slug>`)
 
@@ -390,19 +437,27 @@ qui a faussé une première vérification. **Le chemin est donc résolu dynamiqu
 (accès `?mode=ro`) :
 
 ```sql
--- Vivacité OBLIGATOIRE : ne retenir que les onglets référencés par un workspace.
--- (la validation actuelle de wave.sh:113 ne teste que l'existence dans db_tab —
---  insuffisant pour une résolution par nom.)
+-- Vivacité OBLIGATOIRE : ne retenir que les onglets référencés par LE workspace
+-- courant (v12 — finding 3721135353 : sans cette borne, un onglet homonyme d'un
+-- autre workspace pouvait matcher, contredisant la règle « fenêtre courante »).
+-- :ws = WAVETERM_WORKSPACEID. La validation actuelle de wave.sh:113 ne teste que
+-- l'existence dans db_tab — insuffisant pour une résolution par nom.
+-- L'ORDER BY rend le « premier match » déterministe (v12 — finding 3721135363) :
+-- onglets épinglés d'abord, puis l'ordre du tableau tabids (json_each.key = index).
 WITH workspace_tabs AS (
-  SELECT json_each.value AS tabid
-  FROM db_workspace, json_each(db_workspace.data, '$.tabids')
-  UNION
-  SELECT json_each.value
+  SELECT json_each.value AS tabid, 0 AS pinned, json_each.key AS ord
   FROM db_workspace, json_each(db_workspace.data, '$.pinnedtabids')
+  WHERE db_workspace.oid = :ws
+  UNION ALL
+  SELECT json_each.value, 1, json_each.key
+  FROM db_workspace, json_each(db_workspace.data, '$.tabids')
+  WHERE db_workspace.oid = :ws
 )
-SELECT oid FROM db_tab
-WHERE json_extract(data, '$.name') = :nom
-  AND oid IN (SELECT tabid FROM workspace_tabs);
+SELECT db_tab.oid
+FROM db_tab JOIN workspace_tabs ON workspace_tabs.tabid = db_tab.oid
+WHERE json_extract(db_tab.data, '$.name') = :nom
+ORDER BY workspace_tabs.pinned ASC, workspace_tabs.ord ASC;
+-- Pas de LIMIT : la 1re ligne est l'élue, les suivantes alimentent le warning doublons.
 ```
 
 `$.pinnedtabids` est absent des blobs actuels, mais **absence de clé ≠ absence du
@@ -414,18 +469,37 @@ Wave courante uniquement** — `open` n'exporte que `WAVETERM_TABID` (le tab ré
 comportement de `wsh run` vers un onglet d'une autre fenêtre n'a **pas été testé** :
 le périmètre est un choix prudent, à valider par un test dédié si l'inter-fenêtres
 devient un besoin.
-Conséquences d'implémentation : (a) la CTE ci-dessus doit être **jointe au workspace
-courant** (résolu via `WAVETERM_WORKSPACEID` / le workspace du tab courant), pas
-agrégée sur tous les workspaces ; (b) hors de Wave (`WAVETERM_WORKSPACEID` absent),
+Conséquences d'implémentation : (a) la CTE ci-dessus est **bornée au workspace
+courant** (`:ws` = `WAVETERM_WORKSPACEID` / le workspace du tab courant — v12,
+finding 3721135353) ; (b) hors de Wave (`WAVETERM_WORKSPACEID` absent),
 `--tab` **échoue proprement** avec une erreur explicite — pas de fallback arbitraire
 (le `LIMIT 1` de wave.sh:84-85 ne convient pas ici) ; (c) si `wsh wavepath` échoue,
 `--tab` échoue proprement aussi — il n'hérite **pas** du fallback codé en dur de
 `wave_db_ro` (wave.sh:25-27) vers le snapshot AppSupport périmé. Si le nom ne résout
 que hors de la fenêtre courante → warning + fallback, l'inter-fenêtres est hors
-périmètre. **Pas de contrainte d'unicité sur les noms** :
-en cas de doublon dans la fenêtre courante, premier match + warning listant les
-candidats. Onglet introuvable → warning + fallback sur le comportement actuel
-(onglet courant/vivant). Bénéfice collatéral : les
+périmètre.
+
+**Flux de neutralisation du nom (v12 — finding 3721135358)** : le CLI `sqlite3`
+n'offre pas de binding utilisable ici — les dot-commands (`.parameter set`) sont
+parsées ligne à ligne (un nom contenant un retour à la ligne est intransportable) et
+la sémantique d'interprétation de leur VALEUR est sous-documentée. Le flux retenu est
+l'**échappement de littéral SQL encapsulé dans une fonction unique** `sql_quote()` :
+doubler chaque `'` et envelopper de quotes simples, la requête étant passée en UN
+SEUL argument argv à `sqlite3` (jamais recomposée via echo/heredoc interprétés).
+C'est une neutralisation complète par construction : la grammaire des littéraux
+simple-quotés de SQLite ne connaît AUCUN autre métacaractère (pas d'échappement
+backslash), `%` est inerte sous `=`, et les retours à la ligne sont légaux dans un
+littéral. `:ws` passe par le même `sql_quote()`. La DB reste ouverte `?mode=ro`
+(défense en profondeur). Selftest imposé : noms contenant `'`, `%`, retour à la
+ligne, et une tentative d'injection (`x'; DROP TABLE db_tab;--`) — résolution ou
+échec propre, jamais d'altération ni de requête cassée.
+
+**Pas de contrainte d'unicité sur les noms** : en cas de doublon dans la fenêtre
+courante, premier match **dans l'ordre défini par la requête** (épinglés puis
+`tabids`, à index croissant — v12, finding 3721135363 : `LIMIT 1` sans `ORDER BY`
+n'aurait pas d'ordre défini) + warning listant TOUS les candidats (la requête tourne
+sans LIMIT ; l'élue est la première ligne). Onglet introuvable → warning + fallback
+sur le comportement actuel (onglet courant/vivant). Bénéfice collatéral : les
 agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 
 ## 5. Gestion d'erreurs (récapitulatif)
@@ -438,7 +512,8 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
 | Toutes les sessions déjà réclamées | Étape 3 (scan excluant toute session claimée, puis création) |
 | Session listée = tmux hébergeant claude | Refus d'adoption, warning, fallback |
 | `--tab` introuvable | Warning + fallback onglet courant |
-| Plusieurs onglets portant le nom `--tab` | Premier match **dans la fenêtre courante** + warning listant les candidats ; matches d'autres fenêtres ignorés (hors périmètre v1) |
+| Plusieurs onglets portant le nom `--tab` | Premier match **dans l'ordre du workspace courant** (épinglés puis `tabids` — déterministe, v12) + warning listant tous les candidats ; matches d'autres fenêtres/workspaces ignorés (hors périmètre v1) |
+| Session marquée keep adoptée sans `--keep` | Propriété réduite : `stop` = `release` (keep sticky, v12), jamais de teardown |
 | Claim perdu (course entre deux agents) | Passage atomique à la candidate suivante |
 | `spawn --force` d'un agent | Saute les étapes 1-2 et le scan — création directe ; les claims existants restent au registre |
 | Crash de claude | Cockpits laissés ouverts — bloc Wave attaché ⇒ jamais tués par `gc` (gc.sh:26) : fermeture manuelle puis balayage ; le run suivant du wrapper n'en réutilise aucun (`--force` + pré-claims) |
@@ -482,7 +557,15 @@ agents peuvent aussi cibler un onglet (ex. la discipline « ops sur T5 »).
   vivante re-pré-claimée, morte purgée), **anti-ré-armement prouvé** (B rename
   APRÈS le claim définitif de A → détecté par la vérif de contenu, rename inverse,
   aucune double adoption), **invariants I1-I4 tenus sous course + gc simultanés**
-  (aucun `mv` écrasant observé).
+  (aucun `mv` écrasant observé), **primitives no-clobber v12** (cible `.won`
+  résiduelle de pid recyclé purgée avant consommation ; remplacement d'orphelin sous
+  course sans écrasement ; rollback face à un claim définitif apparu entre-temps →
+  `.won` supprimé, claim intact), **keep sticky v12** (ré-adoption sans `--keep`
+  puis `stop` ⇒ release, jamais teardown ; reprise au scan d'une keep créée-relâchée
+  ⇒ keep hérité). Pour `--tab` : requête bornée au workspace courant (l'homonyme
+  d'un autre workspace ne matche pas), noms hostiles (`'`, `%`, retour à la ligne,
+  tentative d'injection), doublons résolus dans l'ordre défini (déterminisme
+  vérifié) — v12.
 - `doctor` : signaler (informatif) les claims dont la clé n'a plus d'activité
   récente — candidats au `release` oublié d'un sous-agent.
 - **`selftest-wrapper`** : le wrapper lui-même — parsing des groupes `--and`,
