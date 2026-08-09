@@ -182,7 +182,11 @@
 #                              defensive union stays valid without it); duplicates
 #                              elect the pinned one first then array-position order
 #                              even with reversed row-insertion order, warning list
-#                              has all candidates; hostile names (quote, %, real
+#                              has all candidates; tab_count_candidates() (step-1.11.3)
+#                              counts candidates correctly at N=1/2/3 — N=2 is the
+#                              case the old inline `wc -l` on a no-trailing-newline
+#                              string undercounted, leaving the warning silent;
+#                              hostile names (quote, %, real
 #                              newline, `x'; DROP TABLE db_tab;--`) resolve cleanly
 #                              with zero alteration; WAVETERM_WORKSPACEID absent ->
 #                              rc=2 (no arbitrary fallback); not found -> rc=3; `wsh`
@@ -922,7 +926,7 @@ open)
     case "$TAB_RC" in
       0)
         TAB="$TAB_BY_NAME_RESULT"
-        if [ "$(printf '%s' "$TAB_BY_NAME_ALL" | wc -l | tr -d ' ')" -gt 1 ]; then
+        if [ "$(tab_count_candidates "$TAB_BY_NAME_ALL")" -gt 1 ]; then
           echo "⚠️  multiple tabs named '$TAB_NAME' in this workspace — using the first (pinned, then tab order): $(printf '%s' "$TAB_BY_NAME_ALL" | tr '\n' ' ')" >&2
         fi
         ;;

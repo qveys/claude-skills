@@ -3040,7 +3040,7 @@ cmd_selftest_tab() {
   # json_each.key/array position, not sqlite rowid/insertion order.
   local ws1='ws1' ws2='ws2'
   sqlite3 "$db" "INSERT INTO db_workspace (oid, data) VALUES ($(sql_quote "$ws1"), $(sql_quote \
-    '{"tabids":["tabZ","tabY","dup3","dup2","hquote","hpercent","hnewline","hinject"],"pinnedtabids":["dup1"]}'));"
+    '{"tabids":["tabZ","tabY","dup3","dup2","hquote","hpercent","hnewline","hinject","dup2a","dup2b"],"pinnedtabids":["dup1"]}'));"
   # ws2: a second workspace, deliberately WITHOUT a pinnedtabids key at all
   # (absence of the key, not just an empty array — case 5) and holding a
   # tab homonym of ws1's "Alpha" (cross-workspace exclusion, case 2).
@@ -3061,6 +3061,8 @@ cmd_selftest_tab() {
   insert_tab hnewline 'multi\nligne'
   insert_tab hinject "x'; DROP TABLE db_tab;--"
   insert_tab wsb-alpha "Alpha"
+  insert_tab dup2a "Dup2"
+  insert_tab dup2b "Dup2"
 
   local rc
 
@@ -3110,6 +3112,31 @@ cmd_selftest_tab() {
     report_tab_case "3 doublons" 1 "rc=$rc result='$TAB_BY_NAME_RESULT' all='$TAB_BY_NAME_ALL'"
   fi
 
+  # 3b. tab_count_candidates() : fonction pure factorisée (audit step-1.11.3,
+  # É3) — comptage du nombre de candidats dans TAB_BY_NAME_ALL. N=1 (Alpha,
+  # pas de warning attendu côté caller), N=2 ("Dup2", le cas qui échouait sur
+  # `printf '%s' … | wc -l` — compte des TERMINATEURS de ligne sur une chaîne
+  # sans retour final, donc N-1 : 2 candidats -> 1, seuil `-gt 1` muet), N=3
+  # ("Dup", déjà correct par coïncidence avec l'ancien code buggé).
+  rc=0; resolve_tab_by_name "Alpha" "$ro" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(tab_count_candidates "$TAB_BY_NAME_ALL")" -eq 1 ]; then
+    report_tab_case "3b tab_count_candidates: N=1 candidat" 0
+  else
+    report_tab_case "3b tab_count_candidates: N=1 candidat" 1 "rc=$rc all='$TAB_BY_NAME_ALL' got='$(tab_count_candidates "$TAB_BY_NAME_ALL" 2>&1)'"
+  fi
+  rc=0; resolve_tab_by_name "Dup2" "$ro" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(tab_count_candidates "$TAB_BY_NAME_ALL")" -eq 2 ]; then
+    report_tab_case "3b tab_count_candidates: N=2 candidats (cas ex-cassé, wc -l sans \\n final -> N-1)" 0
+  else
+    report_tab_case "3b tab_count_candidates: N=2 candidats" 1 "rc=$rc all='$TAB_BY_NAME_ALL' got='$(tab_count_candidates "$TAB_BY_NAME_ALL" 2>&1)'"
+  fi
+  rc=0; resolve_tab_by_name "Dup" "$ro" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(tab_count_candidates "$TAB_BY_NAME_ALL")" -eq 3 ]; then
+    report_tab_case "3b tab_count_candidates: N=3 candidats" 0
+  else
+    report_tab_case "3b tab_count_candidates: N=3 candidats" 1 "rc=$rc all='$TAB_BY_NAME_ALL' got='$(tab_count_candidates "$TAB_BY_NAME_ALL" 2>&1)'"
+  fi
+
   # 4. noms hostiles : résolution correcte, jamais d'erreur de syntaxe.
   local hostile
   for hostile in "it's a tab:hquote" "100% done:hpercent" "x'; DROP TABLE db_tab;--:hinject"; do
@@ -3130,14 +3157,14 @@ cmd_selftest_tab() {
   else
     report_tab_case "4 nom hostile avec retour à la ligne réel" 1 "rc=$rc result='$TAB_BY_NAME_RESULT'"
   fi
-  # Aucune altération après la tentative d'injection : les 10 lignes de
-  # db_tab sont toutes encore là.
+  # Aucune altération après la tentative d'injection : les 12 lignes de
+  # db_tab sont toutes encore là (10 + dup2a/dup2b ajoutés au cas 3b).
   local cnt
   cnt=$(sqlite3 "$ro" "SELECT count(*) FROM db_tab;" 2>/dev/null || true)
-  if [ "$cnt" = "10" ]; then
-    report_tab_case "4 aucune altération de db_tab après injection (10 lignes intactes)" 0
+  if [ "$cnt" = "12" ]; then
+    report_tab_case "4 aucune altération de db_tab après injection (12 lignes intactes)" 0
   else
-    report_tab_case "4 aucune altération de db_tab après injection" 1 "count=$cnt (want 10)"
+    report_tab_case "4 aucune altération de db_tab après injection" 1 "count=$cnt (want 12)"
   fi
 
   # 6. WAVETERM_WORKSPACEID absent -> rc=2, échec explicite, PAS de fallback

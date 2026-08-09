@@ -111,6 +111,17 @@ ORDER BY workspace_tabs.pinned ASC, workspace_tabs.ord ASC;"
   return 0
 }
 
+# Count the candidates in a resolve_tab_by_name-style newline-separated
+# string ($1 — e.g. TAB_BY_NAME_ALL: N oids, one per line, NO trailing
+# newline since it comes out of a `$(…)` substitution). Factored out (audit
+# step-1.11.3, É3) because `printf '%s' "$1" | wc -l` — counting line
+# TERMINATORS on a string missing its final one — undercounts by one: N
+# candidates -> N-1, so a caller's `-gt 1` warning threshold stayed silent at
+# exactly N=2. `printf '%s\n' "$1"` restores the missing terminator first.
+tab_count_candidates() {
+  printf '%s\n' "$1" | wc -l | tr -d ' '
+}
+
 resolve_live_tab() {
   local ro tab ws sessname tab8
   ro=$(wave_db_ro) || return 1

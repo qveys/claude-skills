@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-09 · **Étape courante : step-1.11.2 terminée, au tour de step-1.11.3**
+màj : 2026-08-09 · **Étape courante : step-1.11.3 terminée, au tour de step-1.12**
 
-NEXT: step-1.11.3
+NEXT: step-1.12
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -46,7 +46,7 @@ NEXT: step-1.11.3
 | 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ✅ 2026-08-09 |
 | 1.11.1 | Balayage de sortie du wrapper restreint aux sessions du run (É1) | Sonnet | ✅ 2026-08-09 |
 | 1.11.2 | Garde busy-pane : mitigation « texte après le prompt » (É2) | Sonnet | ✅ 2026-08-09 |
-| 1.11.3 | `open --tab` : warning doublons off-by-one + test (É3) | Sonnet | ☐ |
+| 1.11.3 | `open --tab` : warning doublons off-by-one + test (É3) | Sonnet | ✅ 2026-08-09 |
 | 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ☐ |
 
 ## Ordre recommandé
@@ -615,3 +615,36 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   après coup, hormis une session de debug manuelle (`selftest-dbg25-manual`)
   oubliée en cours de route et nettoyée explicitement en fin de session.
   1.11.3 (`open --tab` warning doublons off-by-one) prend le relais.
+- 2026-08-09 (step-1.11.3, Sonnet) : **warning « doublons d'onglet » corrigé —
+  off-by-one de `wc -l`.** Bug confirmé exactement comme décrit à l'audit :
+  `open`'s branche `--tab` comptait les candidats via
+  `printf '%s' "$TAB_BY_NAME_ALL" | wc -l` — `TAB_BY_NAME_ALL` sort d'une
+  substitution `$(…)` donc sans retour à la ligne final, et `wc -l` compte des
+  TERMINATEURS de ligne, pas des lignes : N candidats → N−1 comptés. Le seuil
+  `-gt 1` ne se déclenchait donc qu'à partir de N=3 réels ; à N=2 exactement
+  (le cas le plus commun d'un doublon), aucun warning. Comptage factorisé en
+  fonction pure `tab_count_candidates()` (`lib/wave.sh`, juste après
+  `resolve_tab_by_name()`) — `printf '%s\n' "$1" | wc -l` restaure le
+  terminateur manquant avant de compter ; `open` (`wsh-live.sh`) branché
+  dessus à la place de l'appel `wc -l` inline. **RED-first démontré** :
+  fixture `selftest-tab` complétée avec un nom à EXACTEMENT deux doublons
+  (`dup2a`/`dup2b`, nom "Dup2", ajoutés aux `tabids` de `ws1` — 12 lignes
+  `db_tab` désormais, assertion du cas 4 mise à jour de 10 à 12) ; 3 nouveaux
+  cas (bloc 3b) comptant les candidats de `TAB_BY_NAME_ALL` obtenus via un
+  vrai appel `resolve_tab_by_name()` sur la fixture (pas des chaînes
+  littérales) — N=1 (`Alpha`→`tabZ` seul), N=2 (`Dup2`, LE cas ex-cassé),
+  N=3 (`Dup`, déjà correct par coïncidence sur l'ancien code). Avant le
+  correctif : `tab_count_candidates: command not found` (fonction pas encore
+  écrite) → 3 échecs confirmés (`selftest-tab: 3 failure(s)`), preuve que les
+  nouveaux cas exercent bien un chemin qui n'existait pas encore. Après
+  l'ajout de la fonction pure et son branchement dans `open` :
+  `selftest-tab: all cases passed`. Aucune régression sur la sélection de
+  l'élue (case 3, inchangée) ni sur l'ordre pinné/array-position. Non-
+  régression : `selftest-cache` (6/6, direct) et `selftest-guard`
+  (41/41 cas, session tmux jetable `wraptest-guard-*`, ciblage `send-keys`/
+  `capture-pane` **sans** ancrage `=` — piège déjà documenté
+  `docs/gotchas.md` : ces deux commandes rejettent `=` et résolvent par
+  préfixe, contrairement à `kill-session`/`has-session` ; un premier essai
+  ancré `=nom` échouait silencieusement en « can't find pane » alors que la
+  session existait bel et bien). Aucune session tmux ni marqueur résiduel
+  après coup. 1.12 (PR de fin de lot vers `main`) prend le relais.
