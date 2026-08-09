@@ -77,6 +77,14 @@ command -v jq >/dev/null 2>&1 || { echo "jq est requis (brew install jq / apt in
 jq -n 'now | strflocaltime("%Y")' >/dev/null 2>&1 \
   || { echo "jq ≥ 1.6 requis : strflocaltime() est absent de ce jq ($(jq --version 2>/dev/null || echo '?'))" >&2; exit 3; }
 
+# Variante de stat : sur GNU, `stat -f` = --file-system (peut réussir avec une sortie
+# incorrecte), donc un repli `stat -f … || stat -c …` est dangereux. On détecte une fois.
+if stat --version >/dev/null 2>&1; then
+  STAT_FLAVOR=gnu
+else
+  STAT_FLAVOR=bsd
+fi
+
 PROJ_DIR="$HOME/.claude/projects"
 if [ ! -d "$PROJ_DIR" ]; then
   echo "(pas de dossier $PROJ_DIR : aucune session Claude Code sur cette machine)"
@@ -134,9 +142,18 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
               | sub("\\.[0-9]+Z$";"Z")
               | fromdate
               | strflocaltime("%Y-%m-%dT%H:%M")' <<<"$_win30" 2>/dev/null | tail -n 1 || true)
-  [ -n "$ts" ] || ts=$(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$f" 2>/dev/null \
-                    || stat -c '%y' "$f" 2>/dev/null | cut -c1-16 | tr ' ' 'T')
-  size_kb=$(( $(stat -f '%z' "$f" 2>/dev/null || stat -c '%s' "$f") / 1024 ))
+  if [ -z "$ts" ]; then
+    if [ "$STAT_FLAVOR" = bsd ]; then
+      ts=$(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$f")
+    else
+      ts=$(stat -c '%y' "$f" | cut -c1-16 | tr ' ' 'T')
+    fi
+  fi
+  if [ "$STAT_FLAVOR" = bsd ]; then
+    size_kb=$(( $(stat -f '%z' "$f") / 1024 ))
+  else
+    size_kb=$(( $(stat -c '%s' "$f") / 1024 ))
+  fi
   _last1=""
   [ "$n120" -gt 0 ] && _last1="${tail120[$((n120-1))]}"
   ltype=$(jq -r '.type // "?"' <<<"$_last1" 2>/dev/null || echo 'PARSE_ERROR')
@@ -172,12 +189,18 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
   # Forme slice :0 obligatoire : "${tail120[@]}" sur un tableau vide (fichier .jsonl vide)
   # est une « unbound variable » sous set -u en bash 3.2 et tuerait toute la boucle.
   printf -v _win120 '%s\n' "${tail120[@]:0}"
-  fin=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' <<<"$_win120" 2>/dev/null \
-    | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/|/¦/g' || true)
-  # tail -c coupe en OCTETS : peut tomber au milieu d'un caractère UTF-8 multi-octets et laisser
-  # FIN commencer par des octets de continuation (0x80–0xBF), invalides en tête de séquence — on
-  # les élague pour ne jamais démarrer FIN sur un caractère tronqué.
-  fin=$(printf '%s' "$fin" | tail -c 260 | perl -pe 's/^[\x80-\xBF]+//')
+  # Capture le statut de jq (pas de `|| true` qui garderait une sortie partielle) : en cas
+  # d'échec, jeter FIN et marquer PARSE_ERROR pour que l'aval ne juge pas un texte périmé.
+  fin=""
+  if fin_raw=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' <<<"$_win120" 2>/dev/null); then
+    fin=$(printf '%s' "$fin_raw" | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/|/¦/g')
+    # tail -c coupe en OCTETS : peut tomber au milieu d'un caractère UTF-8 multi-octets et laisser
+    # FIN commencer par des octets de continuation (0x80–0xBF), invalides en tête de séquence — on
+    # les élague pour ne jamais démarrer FIN sur un caractère tronqué.
+    fin=$(printf '%s' "$fin" | tail -c 260 | perl -pe 's/^[\x80-\xBF]+//')
+  else
+    ltype="PARSE_ERROR"
+  fi
   [ -n "$fin" ] || fin="(aucun texte assistant en fin de fichier)"
   # Session close sur un message UTILISATEUR resté sans réponse (dernière entrée type=user) :
   # FIN ne montrerait qu'un ancien bilan assistant et masquerait la demande en attente. On
@@ -195,6 +218,13 @@ find "$PROJ_DIR" -maxdepth 2 -name "*.jsonl" -mtime -"$DAYS" | sort | while IFS=
     "$proj" "$id" "$ts" "$size_kb" "$ltype" "$intr" "$tag" "$subject" "$fin")
 
   if [ "$RAW" = 1 ]; then
+    printf '%s\n' "$line"
+    continue
+  fi
+
+  # PARSE_ERROR : ne pas agréger (VIDE/PREWARM/AUTO) — le sentinelle « ne pas juger »
+  # doit rester visible en ligne individuelle pour l'aval (cf. references/verdicts.md).
+  if [ "$ltype" = "PARSE_ERROR" ]; then
     printf '%s\n' "$line"
     continue
   fi

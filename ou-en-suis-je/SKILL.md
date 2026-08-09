@@ -34,28 +34,31 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
 
 2. **Extraction.**
    ```bash
-   scripts/collect.sh --days 7 --exclude <id8>
+   scripts/collect.sh --days 7 --exclude ID8
    ```
+   Remplacer `ID8` par les 8 premiers caractères de l'UUID de la session courante (visible
+   dans le chemin du scratchpad) — ne pas copier de chevrons (`<…>`), le shell les interpréterait
+   comme une redirection.
    Une ligne par session : `PROJET|ID8|DERNIERE_ACTIVITE|TAILLE|TYPE_DERNIERE_ENTREE|intr=N|TAG|SUJET|…FIN`.
    La sortie est **pré-triée** : les reviews CI (`AUTO_SECREVIEW`), les préchauffages
    (`PREWARM`, LaunchAgent) et les sessions vides (ni sujet ni texte assistant) ne sortent plus
    en lignes individuelles — elles sont comptées et regroupées en lignes d'agrégat `# AGG|…` en
    fin de sortie ; seuls les findings sécurité qui « survivent » restent en ligne individuelle
    (à reporter dans la section ⚠️). Options : `--project SUBSTR` (filtrer un projet), `--exclude
-   ID8` (écarter la session courante : son UUID apparaît dans le chemin du scratchpad de
-   session), `--include-sidechains`, `--raw` (désactive le pré-tri : une ligne par session,
-   aucune ligne `# AGG` — utile pour déboguer `collect.sh` lui-même).
+   ID8` (écarter la session courante), `--include-sidechains`, `--raw` (désactive le pré-tri :
+   une ligne par session, aucune ligne `# AGG` — utile pour déboguer `collect.sh` lui-même).
 
 3. **Verdicts.** Lire `references/verdicts.md` et appliquer les règles sur chaque **ligne de
    données restante** (celles qui ne commencent pas par `# AGG|`), dans l'ordre (VIDE → AUTO →
    À_REPRENDRE → ATTEND_QUENTIN → OBSOLÈTE → TERMINÉE). Exception d'extraction : une ligne avec
    `TYPE_DERNIERE_ENTREE=PARSE_ERROR` (transcript illisible) ne reçoit AUCUN verdict — la
    signaler à part dans la section ⚠️ et l'exclure des compteurs, jusqu'à relecture manuelle
-   (`tail -n 120 <fichier> | jq`). Les lignes `# AGG|AUTO_SECREVIEW|…` et
-   `# AGG|VIDE|…` sont déjà pré-agrégées par `collect.sh` : ne pas les rejuger une par une, se
-   recopier telles quelles dans les sections AUTO/vides du rendu avec leurs compteurs
-   (total/conclues/a_examiner/findings_listes ou total/ids) ; `# AGG|PREWARM|…` n'entre dans
-   aucun tableau de sessions.
+   (`tail -n 120 <fichier> | jq`). Les lignes d'agrégat ne se jugent pas une par une — elles
+   alimentent uniquement les compteurs / emplacements fixés au **Rendu** (étape 6) :
+   - `# AGG|AUTO_SECREVIEW|…` → compteurs « Y reviews CI » de la réponse courte + détail
+     total/conclues/a_examiner/findings_listes ; findings survivants (lignes individuelles) → ⚠️ ;
+   - `# AGG|VIDE|…` → compteur « sessions vides » dans la réponse courte (pas de ligne de tableau) ;
+   - `# AGG|PREWARM|…` → ignoré (aucun tableau, aucun compteur de sessions).
    - ≤ ~60 lignes HUMAIN : juger soi-même directement.
    - Au-delà : déléguer par lots à **2 scouts maximum en parallèle**, en collant dans leur prompt
      les règles VERBATIM et leurs lignes brutes (jamais les chemins de fichiers seuls) ; consolider
@@ -83,8 +86,10 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
    # 📋 Où en suis-je ? — <période couverte>
 
    **Réponse courte en gras** (ex. « Non, pas tout : 1 échec, 3 attentes ») + compteurs :
-   N sessions relevées (X humaines, Y reviews CI, Z cockpits), fenêtre et périmètre
-   explicites, session courante exclue.
+   N sessions relevées (X humaines, Y reviews CI dont conclues/a_examiner d'après
+   `# AGG|AUTO_SECREVIEW|…`, V vides d'après `# AGG|VIDE|…`, Z cockpits), fenêtre et
+   périmètre explicites, session courante exclue. Les préchauffages (`# AGG|PREWARM|…`)
+   ne figurent dans aucun compteur de sessions.
 
    Légende : ✅ aboutie · 🟡 partielle / attend Quentin · ⏸️ interrompue · ❌ échec · ⚪ obsolète
 
@@ -95,9 +100,12 @@ Les commandes ci-dessous sont relatives au dossier du skill (annoncé à l'invoc
    « ✅ N terminées — chantiers : mémoire centralisée, wsh-cockpit-optim… » ; ⚪ idem en synthèse)
 
    ## 🖥️ Cockpits autonomes             ← tableau Cockpit | État (tourne / terminé / bloqué sur X)
-   ## ⚠️ À ne pas perdre                 ← findings sécurité survivants, dettes signalées
+   ## ⚠️ À ne pas perdre                 ← findings sécurité survivants (lignes individuelles
+   AUTO_SECREVIEW hors agrégat), `PARSE_ERROR`, dettes signalées
    (ces deux sections couvrent ce qui n'est PAS une session — travail vivant hors transcripts,
-   dettes transversales ; les garder courtes et les OMETTRE entièrement si elles sont vides)
+   dettes transversales ; les garder courtes et les OMETTRE entièrement si elles sont vides.
+   Pas de section dédiée AUTO/VIDE/PREWARM : ces agrégats ne vivent que dans les compteurs
+   de la réponse courte ci-dessus.)
    ## ⚡ À faire maintenant              ← liste numérotée par priorité (consolidation des
       « Reste à faire »), en séparant « je peux le lancer pour toi » de « action à toi »
       (pushes git agrégés en un seul item)
