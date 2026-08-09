@@ -1,8 +1,8 @@
 # STATE — chantier claude-cockpit-wrapper
 
-màj : 2026-08-09 · **Étape courante : step-1.11 terminée (audit : 3 fiches correctives insérées), au tour de step-1.11.1**
+màj : 2026-08-09 · **Étape courante : step-1.11.1 terminée, au tour de step-1.11.2**
 
-NEXT: step-1.11.1
+NEXT: step-1.11.2
 
 > Ligne lue par `execution/next.sh` — la tenir à jour en fin de CHAQUE session.
 > Valeurs : `step-X.Y` · `PAUSE` (bloqué sur action humaine) · `FIN`.
@@ -44,7 +44,7 @@ NEXT: step-1.11.1
 | 1.9 | Wrapper `claude-cockpit.sh` + `selftest-wrapper` + PATH | Sonnet | ✅ 2026-08-09 |
 | 1.10 | Docs : SKILL.md, session-lifecycle, gotchas, README | Sonnet | ✅ 2026-08-09 |
 | 1.11 | Audit final de cohérence spec ↔ code ↔ tests | Fable | ✅ 2026-08-09 |
-| 1.11.1 | Balayage de sortie du wrapper restreint aux sessions du run (É1) | Sonnet | ☐ |
+| 1.11.1 | Balayage de sortie du wrapper restreint aux sessions du run (É1) | Sonnet | ✅ 2026-08-09 |
 | 1.11.2 | Garde busy-pane : mitigation « texte après le prompt » (É2) | Sonnet | ☐ |
 | 1.11.3 | `open --tab` : warning doublons off-by-one + test (É3) | Sonnet | ☐ |
 | 1.12 | PR de fin de lot vers `main` (puis PAUSE : merge = pilote) | Sonnet | ☐ |
@@ -534,3 +534,35 @@ ici (arbitrage pilote) au lieu d'enchaîner.
   déjà motivé en 1.6) ; `gc_effective_idle` au lieu de « `gc_should_kill` modifié » (équivalent
   prouvé bout en bout gc 18-20, motivé en 1.7) ; « deux préfixes → deux sessions » prouvé par
   construction par l'alternance adopt 5. 1.11.1 (sweep inter-runs) prend le relais.
+- 2026-08-09 (step-1.11.1, Sonnet) : **balayage de sortie du wrapper restreint aux
+  sessions du run livré** — nouvelle primitive `session_in_this_run()`
+  (`claude-cockpit.sh`, scan linéaire bash 3.2 sur `ALL_SESSIONS`, pas de tableau
+  associatif) ; la branche `user-preopen-*` de la boucle de balayage n'agit
+  désormais que si la session appartient à `ALL_SESSIONS` — la branche
+  `"$AGENT_KEY"` (déjà unique par run) reste inchangée. **RED-first démontré** :
+  2 nouveaux cas `selftest-wrapper` (D2/D3, bloc Case D) — une session
+  « étrangère » vivante posée avec les primitives réelles
+  (`create_session`/`remember_session`/`claim_new_session`) sous la clé
+  `user-preopen-1` (même index de groupe qu'un run concurrent utiliserait),
+  ABSENTE de la ligne de commande du wrapper testé, était détruite par le
+  balayage sur le code d'avant-fiche (D2/D3 rouges, foreign_user tué, claim
+  vidé) ; correctif appliqué → D2/D3 verts, session étrangère et son claim
+  `user-preopen-1` intacts, tandis que la session propre du run (D1) est bien
+  balayée. Cas complémentaire bon marché ajouté au même run (D4/D5) : une
+  seconde session étrangère au claim `claude-<autre-runid>` — déjà protégée par
+  simple inégalité de clé — reste intacte des deux côtés du fix (verrouille la
+  non-régression de la branche saine, jamais rouge). `selftest-wrapper` :
+  24/24 verts (les 22 cas historiques A/B/C/F inchangés + 4 nouveaux D0-D5,
+  soit 6 nouvelles assertions). Non-régression : `selftest-guard` 41/41 (42
+  lignes `ok`, cf. note step-1.1) re-exécuté en session tmux jetable après coup.
+  Aucune session tmux ni marqueur résiduel de cette fiche après coup (nettoyage
+  via `gc` réel). **Incident de session signalé au pilote** : un premier
+  nettoyage via `gc --idle=0` (au lieu d'un balayage ciblé sur les seuls
+  marqueurs `wraptest-*`) a fait tomber une session tmux préexistante et sans
+  rapport (`cockpit-adhoc-091846`, un SSH d'incident dokploy/imapbridge déjà
+  résolu d'après son dernier bandeau « 502 résolu ») ; log d'audit pipe-pane
+  préservé intact (`~/Library/Logs/wsh-cockpit/cockpit-adhoc-091846.log`),
+  aucun processus foreground distant interrompu (juste le pane tmux local).
+  Leçon actée : ne plus utiliser `gc --idle=0` pour un nettoyage de résidu de
+  test, cibler le marqueur exact ou `--only-session`. 1.11.2 (garde busy-pane,
+  mitigation « texte après le prompt ») prend le relais.

@@ -3353,6 +3353,69 @@ STUB
     "$([ "$rc" -ne 0 ] && [ ! -s "$spawnlogc" ] && [ ! -f "$claudelogc" ] && echo 0 || echo 1)" \
     "rc=$rc spawnlog=$(cat "$spawnlogc" 2>/dev/null) stderr=$(cat "$tmpdir/c.err")"
 
+  # -- Case D: the exit sweep must never touch a session from a DIFFERENT,
+  #    concurrent run (step-1.11.1, audit finding E1). Pre-claim keys are
+  #    indexed by GROUP NUMBER ("user-preopen-<n>"), not by run, so two
+  #    parallel runs' first groups both use "user-preopen-1" — the sweep
+  #    must restrict that branch to sessions this run actually spawned
+  #    (ALL_SESSIONS), never to every live session merely wearing the same
+  #    pre-claim key. ----------------------------------------------------
+  local d_ownpfx="wraptest-d-own-$$"
+  local spawnlogd="$tmpdir/spawn-d.log" claudelogd="$tmpdir/claude-d.log"
+  : >"$spawnlogd"; rm -f "$claudelogd"
+  export WRAPTEST_SPAWN_LOG="$spawnlogd" WRAPTEST_CLAUDE_LOG="$claudelogd"
+  unset WRAPTEST_CLAUDE_EXIT FAKE_SPAWN_FAIL_PREFIX 2>/dev/null || true
+
+  # Foreign session A: posed with the REAL primitives (create_session ->
+  # remember_session -> claim_new_session), carrying the same "user-preopen-1"
+  # pre-claim a DIFFERENT run's own first group would use — but never passed
+  # on this run's command line, so it can never legitimately end up in
+  # ALL_SESSIONS.
+  local foreign_user
+  foreign_user=$(unique_session_name "wraptest-d-foreign-user-$$")
+  create_session "$foreign_user"
+  remember_session "$foreign_user"
+  ( WSH_COCKPIT_AGENT=user-preopen-1
+    claim_new_session "$foreign_user" "$(normalize_prefix "wraptest-d-foreign-user-$$")" )
+  created+=("$foreign_user")
+
+  # Foreign session B: claimed by a DIFFERENT run's AGENT_KEY (already
+  # adopted there) — cheap non-regression lock on the branch that was
+  # already safe (protected today by plain key inequality, must stay
+  # protected once the fix narrows the user-preopen-* branch).
+  local foreign_claude
+  foreign_claude=$(unique_session_name "wraptest-d-foreign-claude-$$")
+  create_session "$foreign_claude"
+  remember_session "$foreign_claude"
+  ( WSH_COCKPIT_AGENT="claude-19700101-1"
+    claim_new_session "$foreign_claude" "$(normalize_prefix "wraptest-d-foreign-claude-$$")" )
+  created+=("$foreign_claude")
+
+  rc=0
+  PATH="$tmpdir/bin:$PATH" "$tmpdir/claude-cockpit.sh" \
+    "$d_ownpfx" -- echo hi \
+    >"$tmpdir/d.out" 2>"$tmpdir/d.err" || rc=$?
+  report_wrapper_case "D0 run exits 0" \
+    "$([ "$rc" -eq 0 ] && echo 0 || echo 1)" "rc=$rc stderr=$(cat "$tmpdir/d.err")"
+
+  local own_sess
+  own_sess=$(grep '^SESSION=' "$tmpdir/d.out" | sed -n '1s/^SESSION=//p')
+  created+=("$own_sess")
+  report_wrapper_case "D1 this run's own (non-keep) session is destroyed by the sweep" \
+    "$(! mux_has "$own_sess" && echo 0 || echo 1)" "own_sess='$own_sess'"
+
+  report_wrapper_case "D2 foreign session sharing the 'user-preopen-1' key survives the sweep" \
+    "$(mux_has "$foreign_user" && echo 0 || echo 1)" "foreign_user='$foreign_user'"
+  report_wrapper_case "D3 foreign session's 'user-preopen-1' claim is untouched" \
+    "$([ "$(claim_read_key "$(claim_path "$(session_slug "$foreign_user")")" 2>/dev/null || true)" = "user-preopen-1" ] && echo 0 || echo 1)" \
+    "key=$(claim_read_key "$(claim_path "$(session_slug "$foreign_user")")" 2>/dev/null || true)"
+
+  report_wrapper_case "D4 foreign session claimed by another run's AGENT_KEY survives the sweep" \
+    "$(mux_has "$foreign_claude" && echo 0 || echo 1)" "foreign_claude='$foreign_claude'"
+  report_wrapper_case "D5 foreign session's claude-<otherrun> claim is untouched" \
+    "$([ "$(claim_read_key "$(claim_path "$(session_slug "$foreign_claude")")" 2>/dev/null || true)" = "claude-19700101-1" ] && echo 0 || echo 1)" \
+    "key=$(claim_read_key "$(claim_path "$(session_slug "$foreign_claude")")" 2>/dev/null || true)"
+
   # -- Case F: a group's spawn genuinely failing aborts BEFORE claude is
   #    launched; earlier groups already opened in this run stay open. -----
   local okpfx="wraptest-f-ok-$$" failpfx="wraptest-f-fail-$$"

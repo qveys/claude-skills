@@ -236,6 +236,20 @@ CLAUDE_RC=0
 env -u WSH_COCKPIT_PREFIX WSH_COCKPIT_AGENT="$AGENT_KEY" WSH_COCKPIT_ADOPT="$ADOPT_LIST" \
   claude ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} || CLAUDE_RC=$?
 
+# True if $1 is one of THIS run's own spawned sessions (ALL_SESSIONS) —
+# guards the user-preopen-* sweep branch below against a same-named pre-claim
+# key from a DIFFERENT, concurrent run (step-1.11.1, audit finding E1): those
+# keys are indexed by group number, not by run, so two parallel runs' first
+# groups both produce "user-preopen-1". bash 3.2 has no associative arrays,
+# hence the linear scan.
+session_in_this_run() {
+  local target="$1" s
+  for s in ${ALL_SESSIONS[@]+"${ALL_SESSIONS[@]}"}; do
+    [ "$s" = "$target" ] && return 0
+  done
+  return 1
+}
+
 # -- Exit sweep: release keep-marked sessions, stop the rest -----------------
 # Enumeration modeled on gc.sh's cmd_gc: live cockpit-* sessions, each
 # checked against its OWN current claim owner (mux_list_sessions ->
@@ -247,14 +261,16 @@ env -u WSH_COCKPIT_PREFIX WSH_COCKPIT_AGENT="$AGENT_KEY" WSH_COCKPIT_ADOPT="$ADO
 # become AGENT_KEY (claude adopted it) — release_session's own
 # WSH_COCKPIT_ADOPT-membership branch (retrograde-to-"released" vs.
 # full-removal-to-ABSENT) only makes sense for the latter, so ADOPT_LIST is
-# only passed on that branch.
+# only passed on that branch. The user-preopen-* branch is further narrowed
+# to sessions THIS run actually spawned: that pre-claim key alone doesn't
+# prove ownership across runs.
 while IFS= read -r s; do
   [ -n "$s" ] || continue
   slug=$(session_slug "$s")
   owner=$(claim_read_key "$(claim_path "$slug")" 2>/dev/null || true)
   case "$owner" in
     "$AGENT_KEY") ;;
-    user-preopen-*) ;;
+    user-preopen-*) session_in_this_run "$s" || continue ;;
     *) continue ;;
   esac
   if keep_is_set "$s"; then
