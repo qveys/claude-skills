@@ -56,7 +56,7 @@ pour que stderr arrive avant le footer.
 | `push <local> <chemin-distant> [session]` / `pull` | Transfert de fichiers avec l'hôte enregistré de la session (moteur : `wsh-push.sh` — jamais de base64 dans le pane). |
 | `remote-init <session> <hôte>` / `local-init` | Après un hop SSH dans le cockpit : bascule le cadrage en mode distant (et retour). |
 | `stop [session]` | Tue la session, ferme le bloc Wave, nettoie l'état — ou la relâche (`release`) au lieu de la tuer si elle est marquée `keep`. |
-| `release <session>` | Relâche une session adoptée (jamais de session par défaut — l'argument est obligatoire) sans la détruire, pour qu'un autre agent puisse la reprendre. |
+| `release <session>` | Relâche une session : adoptée → rétrogradée/ré-adoptable ; créée/legacy → claim retiré (re-scannable). Jamais de session par défaut — argument obligatoire. |
 | `gc [--dry-run] [--idle=S] [--only-session=N]` | Balaye les cockpits orphelins (détachés et inactifs depuis 24 h par défaut ; 24 h minimum aussi pour une session `keep`, quel que soit `--idle`). |
 | `status` / `current` / `doctor` | État des sessions / la session courante / diagnostic de l'environnement. |
 | `web <action>` | Miroir navigateur du cockpit via ttyd (lecture seule par défaut) ; `<action>` : `start`, `stop` ou `status`. |

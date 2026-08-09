@@ -1,6 +1,6 @@
 # Conventions d'exécution — chantier claude-cockpit-wrapper
 
-Source maîtresse : `docs/superpowers/specs/2026-07-27-claude-cockpit-wrapper-design.md` (v11),
+Source maîtresse : `docs/superpowers/specs/2026-07-27-claude-cockpit-wrapper-design.md` (v12),
 amendée par `execution/findings-revue-spec-v11.md` (5 findings de revue, prérequis du plan).
 Les fiches `step-X.Y` n'en copient que le strict nécessaire.
 

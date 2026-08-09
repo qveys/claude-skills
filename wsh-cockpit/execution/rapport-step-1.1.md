@@ -86,7 +86,7 @@ exactement sur ces garanties — confirmées, rien à amender.
 Exécuté depuis un bloc Wave réel (variables d'environnement disponibles :
 `WAVETERM_WORKSPACEID`, `WAVETERM_TABID`, `WAVETERM_BLOCKID`).
 
-- `wsh wavepath data` → `/Users/qveys/.local/share/waveterm` (répertoire ; la DB vivante est
+- `wsh wavepath data` → `<home>/.local/share/waveterm` (répertoire ; la DB vivante est
   `.../db/waveterm.db`) — résolution dynamique confirmée fonctionnelle.
 - `WAVETERM_WORKSPACEID` présent et valide (`5242b696-…`), résout à un workspace réel
   (1 seul workspace, 8 tabs sur cette machine au moment du test).
