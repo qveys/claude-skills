@@ -918,6 +918,52 @@ STUB
       "rc30=$rc30 ok30=$ok30 y_alive=$(mux_has "$SESS8" && echo yes || echo no) y2_alive=$(mux_has "$SESS9" && echo yes || echo no) mode='$mode30' host='$(remote_host_get "$SESS9")' sep='$(remote_helper_path_get "$SESS9" sep)' step='$(remote_helper_path_get "$SESS9" step)' out30='$out30'"
   fi
 
+  # 31-32. P1 (review of 36890078): canonicalisation must be EXACT (full
+  # canonical name) — `display-message -t X` resolves by prefix AND window
+  # names (measured: a window named X inside a NEIGHBOUR session makes
+  # `-t X` report the NEIGHBOUR's session_name), so teardown_session used to
+  # kill the NEIGHBOUR while X survived. Here the neighbour carries a window
+  # literally named X/Y. Kill the exact X via `stop` (31), then the exact Y
+  # via `gc --idle=0 --only-session=Y` (32): X/Y must die, the neighbour must
+  # survive. Assert on real tmux state (mux_has), not on the echoed message.
+  SESS10="cockpit-${HYGPFX}-wx"
+  SESS11="cockpit-${HYGPFX}-wxn"
+  create_session "$SESS10"
+  create_session "$SESS11"
+  tmux new-window -t "$SESS11" -n "$SESS10" 2>/dev/null || true
+  set +e
+  out31=$("$0" stop "$SESS10" 2>&1)
+  rc31=$?
+  set -e
+  ok31=0
+  mux_has "$SESS10" && ok31=1          # X must be DEAD
+  mux_has "$SESS11" || ok31=1          # the neighbour must be ALIVE
+  if [ "$rc31" -eq 0 ] && [ "$ok31" -eq 0 ]; then
+    report_gc_case "31 stop kills exact X despite a window named X in the neighbour; neighbour survives" 0
+  else
+    report_gc_case "31 stop kills exact X despite a window named X in the neighbour; neighbour survives" 1 \
+      "rc31=$rc31 ok31=$ok31 x_alive=$(mux_has "$SESS10" && echo yes || echo no) nb_alive=$(mux_has "$SESS11" && echo yes || echo no) out31='$out31'"
+  fi
+
+  SESS12="cockpit-${HYGPFX}-wy"
+  SESS13="cockpit-${HYGPFX}-wyn"
+  create_session "$SESS12"
+  create_session "$SESS13"
+  tmux new-window -t "$SESS13" -n "$SESS12" 2>/dev/null || true
+  set +e
+  out32=$("$0" gc --idle=0 --only-session="$SESS12" 2>&1)
+  rc32=$?
+  set -e
+  ok32=0
+  mux_has "$SESS12" && ok32=1
+  mux_has "$SESS13" || ok32=1
+  if [ "$rc32" -eq 0 ] && [ "$ok32" -eq 0 ]; then
+    report_gc_case "32 gc --only-session=Y kills exact Y despite a window named Y in the neighbour; neighbour survives" 0
+  else
+    report_gc_case "32 gc --only-session=Y kills exact Y despite a window named Y in the neighbour; neighbour survives" 1 \
+      "rc32=$rc32 ok32=$ok32 y_alive=$(mux_has "$SESS12" && echo yes || echo no) nb_alive=$(mux_has "$SESS13" && echo yes || echo no) out32='$out32'"
+  fi
+
   if [ "$failures" -ne 0 ]; then
     echo "selftest-gc: $failures failure(s)" >&2
     exit 1
