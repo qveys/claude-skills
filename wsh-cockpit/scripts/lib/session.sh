@@ -913,41 +913,66 @@ oneshot_ssh_track() {
 # only if it was the one remembered for the CURRENT agent/prefix — the
 # last-session pointer. Shared by `stop` (explicit, one session) and `gc`
 # (idle sweep, many sessions) so this cleanup logic lives in exactly one
-# place. Returns 0 if a session was actually killed, 1 if there was nothing
-# to kill (already gone), 3 if the pre-kill guard (TEARDOWN_PRE_KILL_GUARD,
-# see below) refused the kill — the session is then KEPT alive.
+# place.
+#
+# ORDER IS GUARD -> KILL -> CLEANUP (issue #23, reviews of b8e77ad/236917a6):
+# every destructive step (claim/prefix/seq/oneshot markers, the six
+# set-option, the ssh ControlMaster exit, web/block teardown, the last-session
+# pointer) runs ONLY AFTER a successful mux_kill. Before the kill there are
+# only READ-ONLY queries (mux_has/mux_session_name canonicalisation, the
+# pre-kill guard). Returns:
+#   0 = session killed (and fully cleaned up)
+#   3 = NOT killed — the pre-kill guard refused (rc!=0, incl. 127) or
+#       mux_kill itself failed — and NOTHING was modified: the session stays
+#       fully functional (claim/prefix, remote mode, host/helpers, ssh/web
+#       all intact). Orphan markers of a dead session are gc_hygiene_pass's
+#       job (lib/gc.sh), not this function's.
 teardown_session() {
-  local sess="$1" sf killed=1 cpath
+  local sess="$1" sf cpath canon
+  # Canonicalise FIRST, read-only: `stop` (wsh-live.sh) hands its raw argument
+  # straight to this function with no mux_has check of its own — so $sess can
+  # be a bare PREFIX, not the exact session name. `mux_has` is anchored ("=",
+  # exact match only), so only when an EXACT session really exists do we
+  # resolve its canonical name (mux_session_name, same round-trip
+  # session_is_own uses, for the rare grouped-session alias) and let every
+  # later step target that exact session — never a prefix-matched neighbour.
+  # (`set-option` rejects "=" and resolves by PREFIX — measured, docs/gotchas.md
+  # I1/I2 — which is why the canonicalisation must happen BEFORE any
+  # set-option, now down in the post-kill cleanup.)
+  if [ "$MUX" = tmux ] && mux_has "$sess"; then
+    canon=$(mux_session_name "$sess" 2>/dev/null || true)
+    [ -n "$canon" ] && sess="$canon"
+  fi
+  # Pre-kill guard hook (issue #23): TEARDOWN_PRE_KILL_GUARD names a function
+  # called with the session name IMMEDIATELY before mux_kill, with NO
+  # intermediate action and BEFORE any destructive step. Empty (default —
+  # `stop`'s explicit semantics) = no guard. Guard rc 0 = proceed with the
+  # kill; any other rc (including 127, guard function missing) = abort here,
+  # session kept, return 3, ZERO state modification. Fail-safe: the guard
+  # itself logs the refusal; a missing guard never kills.
+  if [ -n "${TEARDOWN_PRE_KILL_GUARD:-}" ]; then
+    if ! "$TEARDOWN_PRE_KILL_GUARD" "$sess"; then
+      return 3
+    fi
+  fi
+  if ! mux_kill "$sess"; then
+    return 3   # kill failed (already gone / raced) — nothing was modified
+  fi
+  # ---- cleanup: ONLY after a successful kill ----
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
   rm -f "$(oneshot_ssh_file "$sess")" 2>/dev/null || true
   rm -f "$(claim_path "$(session_slug "$sess")")" 2>/dev/null || true
   rm -f "$(prefix_file "$sess")" 2>/dev/null || true
   tab_cache_invalidate "$sess"
   if [ "$MUX" = tmux ]; then
-    # `stop` (wsh-live.sh) hands its raw argument straight to this function
-    # with no mux_has check of its own — so $sess can be a bare PREFIX, not
-    # the exact session name. `set-option` rejects "=" and resolves by
-    # PREFIX instead (measured — see docs/gotchas.md's I1/I2 gotchas), so
-    # unlike the anchored `mux_kill` below, the six set-option calls used to
-    # run against whatever session $sess happened to prefix-match — wiping
-    # a live NEIGHBOUR's remote-mode options while `mux_kill` correctly (and
-    # silently) refused to kill anything. `mux_has` is anchored ("=", exact
-    # match only), so gate on it FIRST: only when an EXACT session really
-    # exists do we resolve its canonical name (mux_session_name, same
-    # round-trip session_is_own uses, for the rare grouped-session alias)
-    # and let these calls proceed. If nothing matches exactly, leave $sess
-    # untouched and skip the whole block — closes the hole for whatever
-    # tmux target command gets added here next, not just today's six lines.
-    if mux_has "$sess"; then
-      local canon; canon=$(mux_session_name "$sess" 2>/dev/null || true)
-      [ -n "$canon" ] && sess="$canon"
-      tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
-      tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
-      tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
-      tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
-      tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
-      tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
-    fi
+    # sess is the canonical EXACT name (resolved above), so these unset calls
+    # can only ever hit the session we just killed — never a neighbour.
+    tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
+    tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
   fi
   # Close and remove the session's ControlMaster socket, if any (orphaned
   # otherwise — see control_path_for_session). "-O exit" needs a host
@@ -960,25 +985,10 @@ teardown_session() {
   fi
   rm -f "$cpath" 2>/dev/null || true
   web_teardown "$sess"
-  # Pre-kill guard hook (issue #23, review of b8e77ad): TEARDOWN_PRE_KILL_GUARD
-  # names a function called with the session name IMMEDIATELY before mux_kill,
-  # with NO intermediate action — everything above (markers, the six
-  # set-option, the ssh ControlMaster exit, web) takes time, and a client
-  # attaching during that window must not end up killed attached. Empty
-  # (default — `stop`'s explicit semantics) = no guard. Guard rc 0 = proceed
-  # with the kill; any other rc (including 127, guard function missing) =
-  # abort here, session kept, return 3. Fail-safe: the guard itself logs the
-  # refusal; a missing guard never kills.
-  if [ -n "${TEARDOWN_PRE_KILL_GUARD:-}" ]; then
-    if ! "$TEARDOWN_PRE_KILL_GUARD" "$sess"; then
-      return 3
-    fi
-  fi
-  if mux_kill "$sess"; then killed=0; fi
   block_id_close "$sess"
   sf=$(state_file)
   if [ -f "$sf" ] && [ "$(tr -d '[:space:]' <"$sf")" = "$sess" ]; then
     rm -f "$sf" 2>/dev/null || true
   fi
-  return "$killed"
+  return 0
 }

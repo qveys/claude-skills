@@ -380,9 +380,11 @@ cmd_gc() {
   local nm att act killed=0 kept=0 wouldkill=0 eff_idle is_keep fresh_att fresh_rc
   # Installed as teardown_session's pre-kill hook for the whole sweep (bash
   # dynamic scoping: teardown_session sees this local). `stop` never sets it
-  # and keeps its explicit kill semantics. The re-check is repeated IMMEDIATELY
-  # before mux_kill — no intermediate action — closing the window where a
-  # client attaches during teardown's own cleanup (issue #23).
+  # and keeps its explicit kill semantics. teardown_session's order is
+  # guard -> kill -> cleanup: the re-check runs IMMEDIATELY before mux_kill
+  # with no intermediate action (a client attaching during teardown's own
+  # cleanup can no longer be killed attached), and a refused kill leaves
+  # ZERO state modified (issue #23).
   # shellcheck disable=SC2034  # read via ${TEARDOWN_PRE_KILL_GUARD:-} in lib/session.sh (bash dynamic scoping)
   local TEARDOWN_PRE_KILL_GUARD="gc_pre_kill_guard"
   while IFS='|' read -r nm att act; do
@@ -421,17 +423,20 @@ cmd_gc() {
           if [ "$rc" -eq 0 ]; then
             killed=$((killed + 1))
             echo "killed: $nm (idle $((now - act))s >= ${eff_idle}s)"
-          elif [ "$rc" -eq 3 ]; then
-            # pre-kill guard refused the kill (attached/unverifiable right
-            # before mux_kill) — it already logged the "kept:" line.
-            kept=$((kept + 1))
           elif ! mux_has "$nm"; then
-            # teardown_session failed because the session is already gone -- a
+            # teardown_session returned 3 with the session already gone -- a
             # concurrent gc/stop (e.g. spawn's background auto-sweep, or another
             # agent's own gc) won the race. The outcome we wanted still holds, so
             # it counts as killed rather than vanishing from both tallies.
+            # (teardown_session's guard->kill->cleanup order guarantees it
+            # modified nothing on that path.)
             killed=$((killed + 1))
             echo "killed: $nm (already gone -- raced with a concurrent sweep)"
+          elif [ "$rc" -eq 3 ]; then
+            # pre-kill guard refused the kill (attached/unverifiable right
+            # before mux_kill, session still present) — it already logged the
+            # "kept:" line; nothing was modified.
+            kept=$((kept + 1))
           else
             echo "gc: failed to kill '$nm' (still present)" >&2
           fi

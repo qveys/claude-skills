@@ -349,9 +349,11 @@ cmd_selftest_gc() {
     "$0" stop "$SESS" >/dev/null 2>&1 || true
     "$0" stop "$SESS2" >/dev/null 2>&1 || true
     "$0" stop "$SESS3" >/dev/null 2>&1 || true
+    "$0" stop "${SESS4:-}" >/dev/null 2>&1 || true
+    "$0" stop "${SESS5:-}" >/dev/null 2>&1 || true
     rm -f "$STATE_DIR"/*"$HYGPFX"* 2>/dev/null || true
     # GCSTUB_DIR is deliberately NOT local either (same trap-visibility
-    # rationale as SESS): cases 21-22 build a stubbed tmux there.
+    # rationale as SESS): cases 21-26 build a stubbed tmux there.
     [ -n "${GCSTUB_DIR:-}" ] && rm -rf "$GCSTUB_DIR"
   }
   trap live_selftest_gc_cleanup EXIT
@@ -593,8 +595,12 @@ cmd_selftest_gc() {
 #     or no output + rc 1 when STUB_RECHECK_MODE=fail, no output + rc 0 when
 #     STUB_RECHECK_MODE=empty
 #   - bare '#{session_name}' (hygiene pass) -> "$STUB_SESS"
+#   - has-session: with STUB_ATTACH_ON_HASSESSION=1, flips
+#     $GCSTUB_DIR/attached to 1 (case 26: a client attaches during
+#     teardown_session's read-only canonicalisation, i.e. between the
+#     pre-teardown re-check and the pre-kill guard)
 #   - set-option: with STUB_ATTACH_ON_SETOPTION=1, flips $GCSTUB_DIR/attached
-#     to 1 (case 26: a client attaches during teardown_session's cleanup)
+#     to 1 (legacy repro of the b8e77ad order, where cleanup ran pre-kill)
 # display-message only answers '#{session_name}' (teardown_session's
 # canonical-name round-trip in case 22).
 echo "$*" >>"${GCSTUB_DIR:?}/calls.log"
@@ -619,6 +625,11 @@ case "$1" in
     exit 0 ;;
   set-option)
     if [ "${STUB_ATTACH_ON_SETOPTION:-0}" = "1" ]; then
+      printf '1\n' >"${GCSTUB_DIR:?}/attached"
+    fi
+    exit 0 ;;
+  has-session)
+    if [ "${STUB_ATTACH_ON_HASSESSION:-0}" = "1" ]; then
       printf '1\n' >"${GCSTUB_DIR:?}/attached"
     fi
     exit 0 ;;
@@ -729,29 +740,112 @@ STUB
       "rc25new=$rc25new rc25=$rc25 att25='$att25' rc25b=$rc25b att25b='$att25b' (want rc25!=0 empty, rc25b=0 '0')"
   fi
 
-  # 26. P1 (review of b8e77ad): teardown_session's own cleanup (six
-  # set-option, ssh ControlMaster exit, web) runs BEFORE kill-session — a
-  # client attaching during that window must not be killed attached. The stub
-  # flips the attached counter to 1 on the FIRST set-option
-  # (STUB_ATTACH_ON_SETOPTION=1): the pre-teardown re-check still answers 0,
-  # but the pre-kill guard (gc_pre_kill_guard, run by teardown_session
-  # IMMEDIATELY before mux_kill, no intermediate action) answers 1 -> kept,
-  # and the stub must never have seen a kill-session.
+  # 26. P1 (reviews of b8e77ad + 236917a6): teardown_session's order is
+  # guard -> kill -> cleanup. The stub flips the attached counter to 1 on the
+  # first has-session (STUB_ATTACH_ON_HASSESSION=1) — a client attaching during
+  # teardown's read-only canonicalisation, i.e. between cmd_gc's pre-teardown
+  # re-check (still 0) and the pre-kill guard (IMMEDIATELY before mux_kill, no
+  # intermediate action) which then answers 1 -> kept. AND the refusal must
+  # modify NOTHING: no kill-session, no set-option at all, and the
+  # claim/prefix/seq/oneshot markers planted in the isolated state dir are
+  # all still there, byte-identical, afterwards.
+  slug26=$(session_slug "$GCSTUB_SESS")
+  c26="$GCSTUB_DIR/state/adopt-claim-$slug26"; printf 'owner26\n%s\n' "$$" >"$c26"
+  p26="$GCSTUB_DIR/state/prefix-$slug26";       printf 'pfx26\n' >"$p26"
+  s26="$GCSTUB_DIR/state/seq-$slug26";           : >"$s26"
+  o26="$GCSTUB_DIR/state/oneshot-ssh-$slug26";   : >"$o26"
   printf '0\n' >"$GCSTUB_DIR/attached"
-  rm -f "$GCSTUB_DIR/killed.log"
+  rm -f "$GCSTUB_DIR/killed.log" "$GCSTUB_DIR/calls.log"
   set +e
-  out26=$(env STUB_SESS="$GCSTUB_SESS" STUB_ATTACHED=0 STUB_ATTACH_ON_SETOPTION=1 GCSTUB_DIR="$GCSTUB_DIR" \
+  out26=$(env STUB_SESS="$GCSTUB_SESS" STUB_ATTACHED=0 STUB_ATTACH_ON_HASSESSION=1 GCSTUB_DIR="$GCSTUB_DIR" \
     WSH_COCKPIT_STATE_DIR="$GCSTUB_DIR/state" PATH="$GCSTUB_DIR/bin:$PATH" \
     "$SCRIPT_DIR/wsh-live.sh" gc --idle=0 --only-session="$GCSTUB_SESS" 2>&1)
   rc26=$?
   set -e
   rm -f "$GCSTUB_DIR/attached"
+  no_setopt26=0; grep -q '^set-option' "$GCSTUB_DIR/calls.log" 2>/dev/null && no_setopt26=1
+  markers26=1
+  for f26 in "$c26" "$p26" "$s26" "$o26"; do [ -e "$f26" ] || markers26=0; done
+  [ "$(claim_read_key "$c26" 2>/dev/null || true)" = "owner26" ] || markers26=0
+  [ "$(cat "$p26" 2>/dev/null || true)" = "pfx26" ] || markers26=0
   if [ "$rc26" -eq 0 ] && printf '%s\n' "$out26" | grep -Fq "kept: $GCSTUB_SESS" \
-     && [ ! -e "$GCSTUB_DIR/killed.log" ]; then
-    report_gc_case "26 attached during teardown cleanup (first set-option) -> pre-kill guard keeps it, no kill-session" 0
+     && [ ! -e "$GCSTUB_DIR/killed.log" ] && [ "$no_setopt26" -eq 0 ] && [ "$markers26" -eq 1 ]; then
+    report_gc_case "26 attach at teardown + refused kill -> kept, ZERO state change (no kill-session/set-option, markers intact)" 0
   else
-    report_gc_case "26 attached during teardown cleanup (first set-option) -> pre-kill guard keeps it, no kill-session" 1 \
-      "rc26=$rc26 out26='$out26' killed.log=$([ -e "$GCSTUB_DIR/killed.log" ] && cat "$GCSTUB_DIR/killed.log" || echo absent)"
+    report_gc_case "26 attach at teardown + refused kill -> kept, ZERO state change (no kill-session/set-option, markers intact)" 1 \
+      "rc26=$rc26 out26='$out26' killed.log=$([ -e "$GCSTUB_DIR/killed.log" ] && cat "$GCSTUB_DIR/killed.log" || echo absent) no_setopt=$no_setopt26 markers_ok=$markers26 calls=$(tr '\n' ';' <"$GCSTUB_DIR/calls.log" 2>/dev/null)"
+  fi
+  rm -f "$c26" "$p26" "$s26" "$o26"
+
+  # 27. P1 (review of 236917a6), REAL tmux, state compared before/after: when
+  # the pre-kill guard refuses, teardown_session (order guard -> kill ->
+  # cleanup) must leave the session fully functional — alive, claim/prefix
+  # markers intact, remote mode/host/helpers options intact. cmd_gc is
+  # called in-process (same as selftest-guard's case 24); only the pre-kill
+  # guard is overridden to refuse — the pre-teardown re-check still uses the
+  # REAL gc_attached_now (detached session -> 0), so the refusal really comes
+  # from the pre-kill hook. SESS4/SESS5 are NOT local (EXIT trap, like SESS).
+  SESS4="cockpit-${HYGPFX}-guard"
+  create_session "$SESS4"
+  slug27=$(session_slug "$SESS4")
+  mkdir -p "$STATE_DIR"
+  c27="$STATE_DIR/adopt-claim-$slug27"; printf 'owner27\n%s\n' "$$" >"$c27"
+  p27="$STATE_DIR/prefix-$slug27";       printf 'pfx27\n' >"$p27"
+  s27="$STATE_DIR/seq-$slug27";          : >"$s27"
+  o27="$STATE_DIR/oneshot-ssh-$slug27";  : >"$o27"
+  remote_mode_set "$SESS4" 1
+  remote_host_set "$SESS4" "selftest-gc-27-host"
+  remote_helper_path_set "$SESS4" sep "/selftest/gc/27/sep"
+  remote_helper_path_set "$SESS4" step "/selftest/gc/27/step"
+  gc_pre_kill_guard_real=$(declare -f gc_pre_kill_guard)
+  # shellcheck disable=SC2329  # invoked indirectly via TEARDOWN_PRE_KILL_GUARD (lib/gc.sh)
+  gc_pre_kill_guard() { echo "kept: $1 (forced pre-kill refusal, case 27)"; return 1; }
+  set +e
+  out27=$(cmd_gc --idle=0 --only-session="$SESS4" 2>&1)
+  rc27=$?
+  set -e
+  eval "$gc_pre_kill_guard_real"
+  ok27=0
+  mux_has "$SESS4" || ok27=1
+  printf '%s\n' "$out27" | grep -Fq "kept: $SESS4" || ok27=1
+  [ -f "$c27" ] && [ "$(claim_read_key "$c27" 2>/dev/null || true)" = "owner27" ] || ok27=1
+  [ -f "$p27" ] && [ "$(cat "$p27" 2>/dev/null || true)" = "pfx27" ] || ok27=1
+  [ -e "$s27" ] && [ -e "$o27" ] || ok27=1
+  mode27=$( (remote_mode_get "$SESS4") && echo 1 || echo "" )
+  [ "$mode27" = "1" ] || ok27=1
+  [ "$(remote_host_get "$SESS4")" = "selftest-gc-27-host" ] || ok27=1
+  [ "$(remote_helper_path_get "$SESS4" sep)" = "/selftest/gc/27/sep" ] || ok27=1
+  [ "$(remote_helper_path_get "$SESS4" step)" = "/selftest/gc/27/step" ] || ok27=1
+  if [ "$rc27" -eq 0 ] && [ "$ok27" -eq 0 ]; then
+    report_gc_case "27 refused pre-kill -> session alive AND claim/prefix + remote mode/host/helpers intact (zero state change)" 0
+  else
+    report_gc_case "27 refused pre-kill -> session alive AND claim/prefix + remote mode/host/helpers intact (zero state change)" 1 \
+      "rc27=$rc27 ok27=$ok27 alive=$(mux_has "$SESS4" && echo yes || echo no) claim=$([ -f "$c27" ] && echo yes || echo no) prefix=$([ -f "$p27" ] && echo yes || echo no) mode='$mode27' host='$(remote_host_get "$SESS4")' sep='$(remote_helper_path_get "$SESS4" sep)' out27='$out27'"
+  fi
+
+  # 28. positive control for 27: `stop` (no guard installed) still kills AND
+  # fully cleans up — session gone, claim/prefix/seq/oneshot markers gone.
+  SESS5="cockpit-${HYGPFX}-stopctl"
+  create_session "$SESS5"
+  slug28=$(session_slug "$SESS5")
+  c28="$STATE_DIR/adopt-claim-$slug28"; printf 'owner28\n%s\n' "$$" >"$c28"
+  p28="$STATE_DIR/prefix-$slug28";       printf 'pfx28\n' >"$p28"
+  s28="$STATE_DIR/seq-$slug28";          : >"$s28"
+  o28="$STATE_DIR/oneshot-ssh-$slug28";  : >"$o28"
+  remote_mode_set "$SESS5" 1
+  remote_host_set "$SESS5" "selftest-gc-28-host"
+  set +e
+  out28=$("$0" stop "$SESS5" 2>&1)
+  rc28=$?
+  set -e
+  ok28=0
+  mux_has "$SESS5" && ok28=1
+  for f28 in "$c28" "$p28" "$s28" "$o28"; do [ -e "$f28" ] && ok28=1; done
+  if [ "$rc28" -eq 0 ] && printf '%s\n' "$out28" | grep -Fq "killed session '$SESS5'" && [ "$ok28" -eq 0 ]; then
+    report_gc_case "28 stop (no guard) still kills AND fully cleans up (markers gone)" 0
+  else
+    report_gc_case "28 stop (no guard) still kills AND fully cleans up (markers gone)" 1 \
+      "rc28=$rc28 ok28=$ok28 alive=$(mux_has "$SESS5" && echo yes || echo no) out28='$out28' claim=$([ -e "$c28" ] && echo present || echo gone) prefix=$([ -e "$p28" ] && echo present || echo gone)"
   fi
 
   if [ "$failures" -ne 0 ]; then
