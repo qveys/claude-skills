@@ -964,6 +964,35 @@ STUB
       "rc32=$rc32 ok32=$ok32 y_alive=$(mux_has "$SESS12" && echo yes || echo no) nb_alive=$(mux_has "$SESS13" && echo yes || echo no) out32='$out32'"
   fi
 
+  # 33. P1 (review of c89607f9): marker cleanup is SLUG-keyed and session_slug
+  # transliterates anything outside [A-Za-z0-9_.-] to '_', so the ABSENT
+  # '…-sp*' and the LIVE '…-sp?' share ONE slug ('…-sp_'). `stop '…-sp*'` (and a
+  # direct teardown_session on it) must refuse (rc 3) and erase NOTHING: the
+  # live session stays alive with its claim/prefix markers intact. SESS14 is
+  # NOT local (EXIT trap backstop kills every HYGPFX session).
+  SESS14="cockpit-${HYGPFX}-sp?"
+  GLOB33="cockpit-${HYGPFX}-sp*"
+  create_session "$SESS14"
+  slug33=$(session_slug "$SESS14")
+  c33="$STATE_DIR/adopt-claim-$slug33"; printf 'owner33\n%s\n' "$$" >"$c33"
+  p33="$STATE_DIR/prefix-$slug33";       printf 'pfx33\n' >"$p33"
+  set +e
+  rc33=0; teardown_session "$GLOB33" >/dev/null 2>&1 || rc33=$?
+  out33=$("$0" stop "$GLOB33" 2>&1); rc33b=$?
+  set -e
+  ok33=0
+  [ "$slug33" = "$(session_slug "$GLOB33")" ] || ok33=1   # same slug, the trap
+  mux_has "$SESS14" || ok33=1                               # live session alive
+  [ -f "$c33" ] && [ "$(claim_read_key "$c33" 2>/dev/null || true)" = "owner33" ] || ok33=1
+  [ -f "$p33" ] && [ "$(cat "$p33" 2>/dev/null || true)" = "pfx33" ] || ok33=1
+  [ "$rc33" -eq 3 ] || ok33=1                               # direct teardown refused
+  if [ "$ok33" -eq 0 ]; then
+    report_gc_case "33 absent '…-sp*' (same slug as live '…-sp?') -> rc 3, live session + claim/prefix intact" 0
+  else
+    report_gc_case "33 absent '…-sp*' (same slug as live '…-sp?') -> rc 3, live session + claim/prefix intact" 1 \
+      "rc33=$rc33 rc33b=$rc33b ok33=$ok33 slug33='$slug33' slug_glob='$(session_slug "$GLOB33")' alive=$(mux_has "$SESS14" && echo yes || echo no) claim=$([ -f "$c33" ] && echo present || echo gone) prefix=$([ -f "$p33" ] && echo present || echo gone) out33='$out33'"
+  fi
+
   if [ "$failures" -ne 0 ]; then
     echo "selftest-gc: $failures failure(s)" >&2
     exit 1

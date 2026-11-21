@@ -937,8 +937,10 @@ oneshot_ssh_track() {
 #   0 = session was alive and got killed (and fully cleaned up)
 #   1 = no live session with this exact name (already gone / raced) — orphan
 #       markers still cleaned
-#   3 = a LIVE session was protected (guard refused, or kill failed with the
-#       session still present) — ZERO state modification
+#   3 = refused with ZERO state modification: a LIVE session was protected
+#       (guard refused, or kill failed with the session still present), OR
+#       the slug of $sess is produced by another LIVE session (slug collision
+#       — the markers belong to it, nothing erased)
 teardown_session() {
   local sess="$1" sf cpath canon alive=0 killed=1
   if mux_has "$sess"; then
@@ -971,6 +973,28 @@ teardown_session() {
   fi
   # ---- cleanup: markers/socket/web/block/state-file of the (dead or
   # killed) session ----
+  # SLUG-COLLISION GUARD (review of c89607f9): every per-session file cleaned
+  # below is keyed by SLUG (session_slug transliterates anything outside
+  # [A-Za-z0-9_.-] to '_'), so two DIFFERENT session names can share one slug
+  # (e.g. 'cockpit-review-special*' and 'cockpit-review-special?' both slugify
+  # to 'cockpit-review-special_'). If a LIVE session (exact names from
+  # list-sessions, slugified) currently produces the SAME slug as $sess, the
+  # markers belong to that live session: erase NOTHING. Same rule as
+  # gc_hygiene_pass's gc__slug_alive (lib/gc.sh). Returns 3 when nothing was
+  # killed (alive=0 path — refuse outright), 0 when $sess was killed but a
+  # colliding neighbour's markers were left alone.
+  local slug slug_live=0 s
+  slug=$(session_slug "$sess")
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    if [ "$(session_slug "$s")" = "$slug" ]; then slug_live=1; break; fi
+  done <<EOF
+$(mux_list_sessions 2>/dev/null || true)
+EOF
+  if [ "$slug_live" -eq 1 ]; then
+    if [ "$killed" -ne 0 ]; then return 3; fi
+    return 0
+  fi
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
   rm -f "$(oneshot_ssh_file "$sess")" 2>/dev/null || true
   rm -f "$(claim_path "$(session_slug "$sess")")" 2>/dev/null || true
