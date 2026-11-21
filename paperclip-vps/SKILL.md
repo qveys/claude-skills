@@ -6,6 +6,7 @@ description: Debug/administer the Paperclip AI-company server on the VPS — pat
 # Paperclip on the VPS — direct routes
 
 Valeurs d'infra (hôte, IP tailnet, ports, domaines, IDs) : les fournir dans `paperclip-vps/local.env` (gitignoré) ou via les variables d'environnement du même nom que les placeholders ci-dessous (`VPS_HOST`, `TAILNET_IP`, `PROVIDER_HOSTNAME`, `API_PORT`, `DB_PORT`, `GATEWAY_HOST`, `GATEWAY_PORT`, `COMPANY_DOMAIN`, `COMPANY_ID`, …). Ne jamais les écrire dans ce fichier versionné.
+Avant chaque commande, lire `paperclip-vps/local.env` s'il existe. Pour chaque placeholder `<NOM>`, utiliser la valeur de la variable `NOM` définie dans ce fichier ; à défaut, utiliser la variable d'environnement `NOM`. Si aucune valeur n'est trouvée, arrêter et demander la valeur à l'utilisateur au lieu d'exécuter la commande avec le placeholder.
 
 ## Topology
 - Host: `<VPS_HOST>` (tailnet `<TAILNET_IP>`, hostname `<PROVIDER_HOSTNAME>`). SSH: `ssh <VPS_HOST>` (host key already pinned in `known_hosts`; on a fresh machine, verify the host fingerprint out-of-band — provider console or `tailscale ssh` — before first connect; do NOT default to `accept-new`, it trusts whatever key a first-connection MITM presents).
