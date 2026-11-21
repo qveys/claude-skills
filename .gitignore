@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 .superpowers/
 *-workspace/
+# valeurs d'infra locales du skill paperclip-vps
+paperclip-vps/local.env
+
