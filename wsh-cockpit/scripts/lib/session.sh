@@ -907,6 +907,19 @@ oneshot_ssh_track() {
   fi
 }
 
+# Drop the last-session pointer (state_file) if it records EXACTLY $1. Keyed by
+# exact session name, unlike every other per-session file (slug-keyed), so it
+# is safe to clean even when a live neighbour shares $1's slug.
+teardown_state_file_clean() {
+  local sf; sf=$(state_file)
+  # Exact comparison: $(cat) drops only the trailing newline(s) remember_session
+  # wrote. Never strip inner blanks — 'X_a' and 'X_ a' are two sessions with the
+  # same slug (review of d54ca0a9).
+  if [ -f "$sf" ] && [ "$(cat "$sf" 2>/dev/null)" = "$1" ]; then
+    rm -f "$sf" 2>/dev/null || true
+  fi
+}
+
 # Kill a session and clean up everything that belongs to it: the seq-counter
 # file, the sep/step "helpers loaded" tmux options, its ttyd web view (if
 # any), the Wave block `open` last attached (best-effort deleteblock), and —
@@ -942,7 +955,7 @@ oneshot_ssh_track() {
 #       the slug of $sess is produced by another LIVE session (slug collision
 #       — the markers belong to it, nothing erased)
 teardown_session() {
-  local sess="$1" sf cpath canon alive=0 killed=1
+  local sess="$1" cpath canon alive=0 killed=1
   if mux_has "$sess"; then
     alive=1
     if [ "$MUX" = tmux ]; then
@@ -983,6 +996,8 @@ teardown_session() {
   # gc_hygiene_pass's gc__slug_alive (lib/gc.sh). Returns 3 when nothing was
   # killed (alive=0 path — refuse outright), 0 when $sess was killed but a
   # colliding neighbour's markers were left alone.
+  # The exact-name state_file is NOT slug-keyed, so it is still cleaned in that
+  # case (issue #29).
   local slug slug_live=0 s
   slug=$(session_slug "$sess")
   while IFS= read -r s; do
@@ -993,6 +1008,11 @@ $(mux_list_sessions 2>/dev/null || true)
 EOF
   if [ "$slug_live" -eq 1 ]; then
     if [ "$killed" -ne 0 ]; then return 3; fi
+    # $sess WAS killed by us. The state_file (last-session-<key>) is keyed by
+    # EXACT name (content == $sess), not by slug: it can only be $sess's, never
+    # the colliding neighbour's — so it is cleaned even though the slug-keyed
+    # markers are left alone (issue #29).
+    teardown_state_file_clean "$sess"
     return 0
   fi
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
@@ -1023,9 +1043,6 @@ EOF
   rm -f "$cpath" 2>/dev/null || true
   web_teardown "$sess"
   block_id_close "$sess"
-  sf=$(state_file)
-  if [ -f "$sf" ] && [ "$(tr -d '[:space:]' <"$sf")" = "$sess" ]; then
-    rm -f "$sf" 2>/dev/null || true
-  fi
+  teardown_state_file_clean "$sess"
   return "$killed"
 }
