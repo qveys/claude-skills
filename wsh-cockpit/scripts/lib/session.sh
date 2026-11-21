@@ -914,7 +914,8 @@ oneshot_ssh_track() {
 # last-session pointer. Shared by `stop` (explicit, one session) and `gc`
 # (idle sweep, many sessions) so this cleanup logic lives in exactly one
 # place. Returns 0 if a session was actually killed, 1 if there was nothing
-# to kill (already gone).
+# to kill (already gone), 3 if the pre-kill guard (TEARDOWN_PRE_KILL_GUARD,
+# see below) refused the kill — the session is then KEPT alive.
 teardown_session() {
   local sess="$1" sf killed=1 cpath
   rm -f "$(seq_file "$sess")" 2>/dev/null || true
@@ -959,6 +960,20 @@ teardown_session() {
   fi
   rm -f "$cpath" 2>/dev/null || true
   web_teardown "$sess"
+  # Pre-kill guard hook (issue #23, review of b8e77ad): TEARDOWN_PRE_KILL_GUARD
+  # names a function called with the session name IMMEDIATELY before mux_kill,
+  # with NO intermediate action — everything above (markers, the six
+  # set-option, the ssh ControlMaster exit, web) takes time, and a client
+  # attaching during that window must not end up killed attached. Empty
+  # (default — `stop`'s explicit semantics) = no guard. Guard rc 0 = proceed
+  # with the kill; any other rc (including 127, guard function missing) =
+  # abort here, session kept, return 3. Fail-safe: the guard itself logs the
+  # refusal; a missing guard never kills.
+  if [ -n "${TEARDOWN_PRE_KILL_GUARD:-}" ]; then
+    if ! "$TEARDOWN_PRE_KILL_GUARD" "$sess"; then
+      return 3
+    fi
+  fi
   if mux_kill "$sess"; then killed=0; fi
   block_id_close "$sess"
   sf=$(state_file)

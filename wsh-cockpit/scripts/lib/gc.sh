@@ -42,24 +42,48 @@ gc_should_kill() {
 # sweep and is stale by the time the loop reaches a candidate — a client that
 # attached in between must not be killed. Deliberately NOT pure (unlike
 # gc_should_kill above): calling tmux is the whole point.
-# EXACT-name matching only, via list-sessions + awk '$1==n' — never a `-t`
+# Matching by NAME only, via list-sessions + awk '$1==n' — never a `-t`
 # target: tmux resolves `-t` by exact name, then PREFIX, then fnmatch (and a
 # window name of the current session prefixing the target wins over the
 # session name — measured tmux 3.8), so `display-message -t <name>` on a dead
 # name that is a strict prefix of a LIVING neighbour answers with the
 # NEIGHBOUR's attached count, rc 0 — which could get an attached session
-# killed. list-sessions has no target resolution: the name must equal a live
-# session's name exactly, otherwise awk exits 1 (absent -> rc 1 -> kept).
+# killed. list-sessions has no target resolution: the name must match a live
+# session's name, otherwise awk exits 1 (absent -> rc 1 -> kept). The field
+# separator is 0x1F (ASCII unit separator), which tmux REJECTS inside session
+# names ("invalid session name", measured), so the split is unambiguous for
+# ANY valid session name — unlike '|', which a name could legally contain.
 # Prints the count and returns 0 on a clean numeric answer; returns 1
 # (printing nothing) when the query fails, the session is absent, or the
 # answer is non-numeric — callers must read rc 1 as "unverifiable", never as
 # "0 attached".
 gc_attached_now() {
   local a
-  a=$(tmux list-sessions -F '#{session_name}|#{session_attached}' 2>/dev/null \
-      | awk -F'|' -v n="$1" '$1==n{print $2; f=1} END{exit !f}') || return 1
+  a=$(tmux list-sessions -F $'#{session_name}\x1f#{session_attached}' 2>/dev/null \
+      | awk -F $'\x1f' -v n="$1" '$1==n{print $2; f=1} END{exit !f}') || return 1
   case "$a" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$a"
+}
+
+# Pre-kill guard installed by cmd_gc as teardown_session's
+# TEARDOWN_PRE_KILL_GUARD (issue #23, review of b8e77ad): re-runs the FRESH
+# name match IMMEDIATELY before mux_kill — teardown_session's own cleanup
+# (six set-option, ssh ControlMaster exit, web) runs in between and takes
+# time, and a client attaching during that window must not be killed
+# attached. rc 0 = kill OK; rc 1 = keep (this function logs the "kept:" line,
+# teardown_session then returns 3 without killing).
+gc_pre_kill_guard() {  # $1 session name
+  local a rc=0
+  a=$(gc_attached_now "$1") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "kept: $1 (attached re-check unverifiable at pre-kill — not touched)"
+    return 1
+  fi
+  if [ "$a" -gt 0 ]; then
+    echo "kept: $1 (attached $a client(s) at pre-kill re-check — not touched)"
+    return 1
+  fi
+  return 0
 }
 
 # -- keep-floor (spec v12 §3, step-1.7) -----------------------------------
@@ -354,6 +378,13 @@ cmd_gc() {
   fi
 
   local nm att act killed=0 kept=0 wouldkill=0 eff_idle is_keep fresh_att fresh_rc
+  # Installed as teardown_session's pre-kill hook for the whole sweep (bash
+  # dynamic scoping: teardown_session sees this local). `stop` never sets it
+  # and keeps its explicit kill semantics. The re-check is repeated IMMEDIATELY
+  # before mux_kill — no intermediate action — closing the window where a
+  # client attaches during teardown's own cleanup (issue #23).
+  # shellcheck disable=SC2034  # read via ${TEARDOWN_PRE_KILL_GUARD:-} in lib/session.sh (bash dynamic scoping)
+  local TEARDOWN_PRE_KILL_GUARD="gc_pre_kill_guard"
   while IFS='|' read -r nm att act; do
     [ -n "$nm" ] || continue
     is_keep=0
@@ -385,18 +416,25 @@ cmd_gc() {
         elif [ "$fresh_att" -gt 0 ]; then
           kept=$((kept + 1))
           echo "kept: $nm (attached $fresh_att client(s) at re-check, snapshot said $att)"
-        elif teardown_session "$nm"; then
-          killed=$((killed + 1))
-          echo "killed: $nm (idle $((now - act))s >= ${eff_idle}s)"
-        elif ! mux_has "$nm"; then
-          # teardown_session failed because the session is already gone -- a
-          # concurrent gc/stop (e.g. spawn's background auto-sweep, or another
-          # agent's own gc) won the race. The outcome we wanted still holds, so
-          # it counts as killed rather than vanishing from both tallies.
-          killed=$((killed + 1))
-          echo "killed: $nm (already gone -- raced with a concurrent sweep)"
         else
-          echo "gc: failed to kill '$nm' (still present)" >&2
+          rc=0; teardown_session "$nm" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            killed=$((killed + 1))
+            echo "killed: $nm (idle $((now - act))s >= ${eff_idle}s)"
+          elif [ "$rc" -eq 3 ]; then
+            # pre-kill guard refused the kill (attached/unverifiable right
+            # before mux_kill) — it already logged the "kept:" line.
+            kept=$((kept + 1))
+          elif ! mux_has "$nm"; then
+            # teardown_session failed because the session is already gone -- a
+            # concurrent gc/stop (e.g. spawn's background auto-sweep, or another
+            # agent's own gc) won the race. The outcome we wanted still holds, so
+            # it counts as killed rather than vanishing from both tallies.
+            killed=$((killed + 1))
+            echo "killed: $nm (already gone -- raced with a concurrent sweep)"
+          else
+            echo "gc: failed to kill '$nm' (still present)" >&2
+          fi
         fi
       fi
     else

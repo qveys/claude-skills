@@ -570,9 +570,9 @@ cmd_selftest_gc() {
   # binary placed first in PATH for the gc SUBPROCESS only (same stub idiom
   # as selftest-wrapper's $tmpdir/bin stub and case 14's PATH masking). The
   # stub is QUERY-FORM SENSITIVE: gc_attached_now reads its kill-time answer
-  # via `list-sessions -F '#{session_name}|#{session_attached}'`, while the
-  # sweep's snapshot uses a format that also has session_activity — the stub
-  # answers the snapshot with attached=0 and the re-check with
+  # via `list-sessions -F '#{session_name}<0x1F>#{session_attached}'`, while
+  # the sweep's snapshot uses a format that also has session_activity — the
+  # stub answers the snapshot with attached=0 and the re-check with
   # $STUB_ATTACHED (or fails/empties it under $STUB_RECHECK_MODE), and records
   # every kill-session in $GCSTUB_DIR/killed.log. WSH_COCKPIT_STATE_DIR points
   # at an empty tmpdir so the subprocess's unscoped hygiene pass can never
@@ -582,15 +582,19 @@ cmd_selftest_gc() {
   GCSTUB_SESS="cockpit-${HYGPFX}-toctou"
   cat >"$GCSTUB_DIR/bin/tmux" <<'STUB'
 #!/usr/bin/env bash
-# Stub tmux for selftest-gc cases 21-25: logs every call to
+# Stub tmux for selftest-gc cases 21-26: logs every call to
 # $GCSTUB_DIR/calls.log and records any kill-session in $GCSTUB_DIR/killed.log.
 #   - list-sessions whose format has session_activity (the sweep SNAPSHOT)
 #     -> "$STUB_SESS|0|1" (attached=0, activity epoch 1 = maximally idle)
 #   - list-sessions whose format has session_attached only (the kill-time
-#     RE-CHECK read by gc_attached_now) -> "$STUB_SESS|$STUB_ATTACHED",
+#     RE-CHECK read by gc_attached_now, parsed with a 0x1F separator) ->
+#     "$STUB_SESS\x1F<attached>", where <attached> is $GCSTUB_DIR/attached when
+#     that file exists (case 26 flips it mid-teardown), else $STUB_ATTACHED;
 #     or no output + rc 1 when STUB_RECHECK_MODE=fail, no output + rc 0 when
 #     STUB_RECHECK_MODE=empty
 #   - bare '#{session_name}' (hygiene pass) -> "$STUB_SESS"
+#   - set-option: with STUB_ATTACH_ON_SETOPTION=1, flips $GCSTUB_DIR/attached
+#     to 1 (case 26: a client attaches during teardown_session's cleanup)
 # display-message only answers '#{session_name}' (teardown_session's
 # canonical-name round-trip in case 22).
 echo "$*" >>"${GCSTUB_DIR:?}/calls.log"
@@ -603,10 +607,20 @@ case "$1" in
         case "${STUB_RECHECK_MODE:-ok}" in
           fail) exit 1 ;;
           empty) exit 0 ;;
-          *) printf '%s|%s\n' "${STUB_SESS:?}" "${STUB_ATTACHED:-1}" ;;
+          *)
+            if [ -f "${GCSTUB_DIR:?}/attached" ]; then
+              printf '%s\037%s\n' "${STUB_SESS:?}" "$(cat "${GCSTUB_DIR:?}/attached")"
+            else
+              printf '%s\037%s\n' "${STUB_SESS:?}" "${STUB_ATTACHED:-1}"
+            fi ;;
         esac ;;
       *) printf '%s\n' "${STUB_SESS:?}" ;;
     esac
+    exit 0 ;;
+  set-option)
+    if [ "${STUB_ATTACH_ON_SETOPTION:-0}" = "1" ]; then
+      printf '1\n' >"${GCSTUB_DIR:?}/attached"
+    fi
     exit 0 ;;
   display-message)
     fmt="${@: -1}"
@@ -617,7 +631,7 @@ case "$1" in
         printf '%s\n' "${tgt#=}" ;;
     esac
     exit 0 ;;
-  *) exit 0 ;;   # has-session, set-option, ... : the fake session "exists"
+  *) exit 0 ;;   # has-session, ... : the fake session "exists"
 esac
 STUB
   chmod +x "$GCSTUB_DIR/bin/tmux"
@@ -713,6 +727,31 @@ STUB
   else
     report_gc_case "25 dead prefix of a living session does not resolve to it (exact match only)" 1 \
       "rc25new=$rc25new rc25=$rc25 att25='$att25' rc25b=$rc25b att25b='$att25b' (want rc25!=0 empty, rc25b=0 '0')"
+  fi
+
+  # 26. P1 (review of b8e77ad): teardown_session's own cleanup (six
+  # set-option, ssh ControlMaster exit, web) runs BEFORE kill-session — a
+  # client attaching during that window must not be killed attached. The stub
+  # flips the attached counter to 1 on the FIRST set-option
+  # (STUB_ATTACH_ON_SETOPTION=1): the pre-teardown re-check still answers 0,
+  # but the pre-kill guard (gc_pre_kill_guard, run by teardown_session
+  # IMMEDIATELY before mux_kill, no intermediate action) answers 1 -> kept,
+  # and the stub must never have seen a kill-session.
+  printf '0\n' >"$GCSTUB_DIR/attached"
+  rm -f "$GCSTUB_DIR/killed.log"
+  set +e
+  out26=$(env STUB_SESS="$GCSTUB_SESS" STUB_ATTACHED=0 STUB_ATTACH_ON_SETOPTION=1 GCSTUB_DIR="$GCSTUB_DIR" \
+    WSH_COCKPIT_STATE_DIR="$GCSTUB_DIR/state" PATH="$GCSTUB_DIR/bin:$PATH" \
+    "$SCRIPT_DIR/wsh-live.sh" gc --idle=0 --only-session="$GCSTUB_SESS" 2>&1)
+  rc26=$?
+  set -e
+  rm -f "$GCSTUB_DIR/attached"
+  if [ "$rc26" -eq 0 ] && printf '%s\n' "$out26" | grep -Fq "kept: $GCSTUB_SESS" \
+     && [ ! -e "$GCSTUB_DIR/killed.log" ]; then
+    report_gc_case "26 attached during teardown cleanup (first set-option) -> pre-kill guard keeps it, no kill-session" 0
+  else
+    report_gc_case "26 attached during teardown cleanup (first set-option) -> pre-kill guard keeps it, no kill-session" 1 \
+      "rc26=$rc26 out26='$out26' killed.log=$([ -e "$GCSTUB_DIR/killed.log" ] && cat "$GCSTUB_DIR/killed.log" || echo absent)"
   fi
 
   if [ "$failures" -ne 0 ]; then
