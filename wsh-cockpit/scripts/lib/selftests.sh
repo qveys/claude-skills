@@ -350,6 +350,9 @@ cmd_selftest_gc() {
     "$0" stop "$SESS2" >/dev/null 2>&1 || true
     "$0" stop "$SESS3" >/dev/null 2>&1 || true
     rm -f "$STATE_DIR"/*"$HYGPFX"* 2>/dev/null || true
+    # GCSTUB_DIR is deliberately NOT local either (same trap-visibility
+    # rationale as SESS): cases 21-22 build a stubbed tmux there.
+    [ -n "${GCSTUB_DIR:-}" ] && rm -rf "$GCSTUB_DIR"
   }
   trap live_selftest_gc_cleanup EXIT
   create_session "$SESS"   # detached by construction — never attached
@@ -559,6 +562,100 @@ cmd_selftest_gc() {
   set -e
   if mux_has "$SESS3"; then report_gc_case "20 keep session survives a real gc --idle=0 sweep" 0
   else report_gc_case "20 keep session survives a real gc --idle=0 sweep" 1 "keep session was killed despite the sticky marker"; fi
+
+  # 21-22. TOCTOU (issue #23): the sweep's list-sessions snapshot says
+  # "0 attached", but the session attaches BEFORE the kill — the fresh
+  # per-session re-check (gc_attached_now, called right before each
+  # teardown) must spare it. Exercised end-to-end through a stubbed `tmux`
+  # binary placed first in PATH for the gc SUBPROCESS only (same stub idiom
+  # as selftest-wrapper's $tmpdir/bin stub and case 14's PATH masking): the
+  # stub answers the snapshot list-sessions with attached=0 and the
+  # kill-time display-message with $STUB_ATTACHED, and records every
+  # kill-session in $GCSTUB_DIR/killed.log. WSH_COCKPIT_STATE_DIR points at
+  # an empty tmpdir so the subprocess's unscoped hygiene pass can never
+  # touch a real marker (case 14's rationale, one level up).
+  GCSTUB_DIR=$(mktemp -d "${TMPDIR:-/tmp}/wsh-live-gcstub.XXXXXX")
+  mkdir -p "$GCSTUB_DIR/bin" "$GCSTUB_DIR/state"
+  GCSTUB_SESS="cockpit-${HYGPFX}-toctou"
+  cat >"$GCSTUB_DIR/bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+# Stub tmux for selftest-gc cases 21-22: logs every call to
+# $GCSTUB_DIR/calls.log, answers list-sessions with the single fake session
+# $STUB_SESS (snapshot attached=0, activity epoch 1 = maximally idle) and
+# display-message '#{session_attached}' with $STUB_ATTACHED (the kill-time
+# re-check), and records any kill-session in $GCSTUB_DIR/killed.log.
+echo "$*" >>"${GCSTUB_DIR:?}/calls.log"
+case "$1" in
+  kill-session) echo "$*" >>"${GCSTUB_DIR:?}/killed.log"; exit 0 ;;
+  list-sessions)
+    case "$*" in
+      *session_attached*) printf '%s|0|1\n' "${STUB_SESS:?}" ;;
+      *) printf '%s\n' "${STUB_SESS:?}" ;;
+    esac
+    exit 0 ;;
+  display-message)
+    fmt="${@: -1}"
+    case "$fmt" in
+      *session_attached*) printf '%s\n' "${STUB_ATTACHED:-1}" ;;
+      *session_name*)
+        tgt=""; prev=""
+        for a in "$@"; do [ "$prev" = "-t" ] && tgt="$a"; prev="$a"; done
+        printf '%s\n' "${tgt#=}" ;;
+    esac
+    exit 0 ;;
+  *) exit 0 ;;   # has-session, set-option, ... : the fake session "exists"
+esac
+STUB
+  chmod +x "$GCSTUB_DIR/bin/tmux"
+
+  # 21. snapshot attached=0, attached=1 at the kill-time re-check -> kept,
+  # and the stub must never have seen a kill-session.
+  rm -f "$GCSTUB_DIR/killed.log"
+  set +e
+  out21=$(env STUB_SESS="$GCSTUB_SESS" STUB_ATTACHED=1 GCSTUB_DIR="$GCSTUB_DIR" \
+    WSH_COCKPIT_STATE_DIR="$GCSTUB_DIR/state" PATH="$GCSTUB_DIR/bin:$PATH" \
+    "$SCRIPT_DIR/wsh-live.sh" gc --idle=0 --only-session="$GCSTUB_SESS" 2>&1)
+  rc21=$?
+  set -e
+  if [ "$rc21" -eq 0 ] && printf '%s\n' "$out21" | grep -Fq "kept: $GCSTUB_SESS" \
+     && [ ! -e "$GCSTUB_DIR/killed.log" ]; then
+    report_gc_case "21 attached between snapshot and kill is spared (TOCTOU re-check)" 0
+  else
+    report_gc_case "21 attached between snapshot and kill is spared (TOCTOU re-check)" 1 \
+      "rc21=$rc21 out21='$out21' killed.log=$([ -e "$GCSTUB_DIR/killed.log" ] && cat "$GCSTUB_DIR/killed.log" || echo absent)"
+  fi
+
+  # 22. positive control for 21: same stub, but the re-check also says 0 ->
+  # the sweep must still kill (proves 21 isn't "gc never kills anything").
+  rm -f "$GCSTUB_DIR/killed.log"
+  set +e
+  out22=$(env STUB_SESS="$GCSTUB_SESS" STUB_ATTACHED=0 GCSTUB_DIR="$GCSTUB_DIR" \
+    WSH_COCKPIT_STATE_DIR="$GCSTUB_DIR/state" PATH="$GCSTUB_DIR/bin:$PATH" \
+    "$SCRIPT_DIR/wsh-live.sh" gc --idle=0 --only-session="$GCSTUB_SESS" 2>&1)
+  rc22=$?
+  set -e
+  if [ "$rc22" -eq 0 ] && printf '%s\n' "$out22" | grep -Fq "killed: $GCSTUB_SESS" \
+     && [ -e "$GCSTUB_DIR/killed.log" ]; then
+    report_gc_case "22 unattached at snapshot AND at re-check is still killed" 0
+  else
+    report_gc_case "22 unattached at snapshot AND at re-check is still killed" 1 \
+      "rc22=$rc22 out22='$out22' killed.log=$([ -e "$GCSTUB_DIR/killed.log" ] && cat "$GCSTUB_DIR/killed.log" || echo absent)"
+  fi
+
+  # 23. gc_attached_now primitive against REAL tmux: a real detached session
+  # (SESS3, still alive here) answers a clean numeric "0" with rc 0; a
+  # nonexistent target fails with rc 1 — callers must read rc 1 as
+  # "unverifiable", never as "0 attached".
+  set +e
+  att23=$(gc_attached_now "$SESS3"); rc23=$?
+  att23b=$(gc_attached_now "cockpit-${HYGPFX}-nosuch"); rc23b=$?
+  set -e
+  if [ "$rc23" -eq 0 ] && [ "$att23" = "0" ] && [ "$rc23b" -ne 0 ]; then
+    report_gc_case "23 gc_attached_now: real detached session -> '0' rc0, dead target -> rc!=0" 0
+  else
+    report_gc_case "23 gc_attached_now: real detached session -> '0' rc0, dead target -> rc!=0" 1 \
+      "rc23=$rc23 att23='$att23' rc23b=$rc23b att23b='$att23b'"
+  fi
 
   if [ "$failures" -ne 0 ]; then
     echo "selftest-gc: $failures failure(s)" >&2

@@ -37,6 +37,29 @@ gc_should_kill() {
   [ "$age" -ge "$idle" ]
 }
 
+# Fresh attached-client count for ONE session, queried at kill time (issue
+# #23): cmd_gc's list-sessions snapshot is taken once at the top of the
+# sweep and is stale by the time the loop reaches a candidate — a client that
+# attached in between must not be killed. Deliberately NOT pure (unlike
+# gc_should_kill above): calling tmux is the whole point.
+#   $1 session name — an exact name from list-sessions, so tmux's
+#      exact-match-first resolution names the right session. The "=" anchor
+#      is deliberately NOT used here: measured, "=" is honoured by
+#      target-SESSION commands (has-session) but NOT by the target-PANE
+#      display-message, which returns empty with rc=0 instead (same gotcha
+#      as session_is_own in lib/session.sh / docs/gotchas.md) — an anchored
+#      call would answer "unverifiable" for every session and the sweep
+#      would never kill anything.
+# Prints the count and returns 0 on a clean numeric answer; returns 1
+# (printing nothing) when the query fails or answers non-numeric — callers
+# must read rc 1 as "unverifiable", never as "0 attached".
+gc_attached_now() {
+  local a
+  a=$(tmux display-message -p -t "$1" '#{session_attached}' 2>/dev/null) || return 1
+  case "$a" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$a"
+}
+
 # -- keep-floor (spec v12 §3, step-1.7) -----------------------------------
 # A "keep" session (sticky marker posed at creation, fiche 1.9) is protected
 # by AT LEAST 24h of detached-idle time regardless of a shorter --idle the
@@ -328,7 +351,7 @@ cmd_gc() {
     sessions=$(printf '%s\n' "$sessions" | awk -F'|' -v n="$ONLY_SESSION" '$1==n' || true)
   fi
 
-  local nm att act killed=0 kept=0 wouldkill=0 eff_idle is_keep
+  local nm att act killed=0 kept=0 wouldkill=0 eff_idle is_keep fresh_att fresh_rc
   while IFS='|' read -r nm att act; do
     [ -n "$nm" ] || continue
     is_keep=0
@@ -344,18 +367,35 @@ cmd_gc() {
       elif [ "$DRY_RUN" -eq 1 ]; then
         wouldkill=$((wouldkill + 1))
         echo "would-kill: $nm (idle $((now - act))s >= ${eff_idle}s)"
-      elif teardown_session "$nm"; then
-        killed=$((killed + 1))
-        echo "killed: $nm (idle $((now - act))s >= ${eff_idle}s)"
-      elif ! mux_has "$nm"; then
-        # teardown_session failed because the session is already gone -- a
-        # concurrent gc/stop (e.g. spawn's background auto-sweep, or another
-        # agent's own gc) won the race. The outcome we wanted still holds, so
-        # it counts as killed rather than vanishing from both tallies.
-        killed=$((killed + 1))
-        echo "killed: $nm (already gone -- raced with a concurrent sweep)"
       else
-        echo "gc: failed to kill '$nm' (still present)" >&2
+        # TOCTOU re-check (issue #23): $att is from the one-shot snapshot at
+        # the top of this sweep — while the loop was tearing down earlier
+        # candidates, a client may have attached to THIS session. Query its
+        # attached count FRESH, right before the kill: >0, or a failed /
+        # ambiguous query, means keep it and say so like every other kept
+        # candidate (fail-safe: never kill on uncertain state, same rule as
+        # the hygiene pass above).
+        fresh_att=""; fresh_rc=0
+        fresh_att=$(gc_attached_now "$nm") || fresh_rc=$?
+        if [ "$fresh_rc" -ne 0 ]; then
+          kept=$((kept + 1))
+          echo "kept: $nm (attached re-check unverifiable before kill — not touched)"
+        elif [ "$fresh_att" -gt 0 ]; then
+          kept=$((kept + 1))
+          echo "kept: $nm (attached $fresh_att client(s) at re-check, snapshot said $att)"
+        elif teardown_session "$nm"; then
+          killed=$((killed + 1))
+          echo "killed: $nm (idle $((now - act))s >= ${eff_idle}s)"
+        elif ! mux_has "$nm"; then
+          # teardown_session failed because the session is already gone -- a
+          # concurrent gc/stop (e.g. spawn's background auto-sweep, or another
+          # agent's own gc) won the race. The outcome we wanted still holds, so
+          # it counts as killed rather than vanishing from both tallies.
+          killed=$((killed + 1))
+          echo "killed: $nm (already gone -- raced with a concurrent sweep)"
+        else
+          echo "gc: failed to kill '$nm' (still present)" >&2
+        fi
       fi
     else
       kept=$((kept + 1))
