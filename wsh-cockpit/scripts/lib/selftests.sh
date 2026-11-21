@@ -993,6 +993,39 @@ STUB
       "rc33=$rc33 rc33b=$rc33b ok33=$ok33 slug33='$slug33' slug_glob='$(session_slug "$GLOB33")' alive=$(mux_has "$SESS14" && echo yes || echo no) claim=$([ -f "$c33" ] && echo present || echo gone) prefix=$([ -f "$p33" ] && echo present || echo gone) out33='$out33'"
   fi
 
+  # 34. issue #29: A ('…-st*') killed while B ('…-st?', same slug) is live.
+  # Slug-keyed files (claim/prefix/seq/cm-) belong to B and must survive (the
+  # collision guard); the EXACT-name state_file (last-session-<key>, content ==
+  # A) is A's alone and must be removed — it used to survive because the guard
+  # returned before the cleanup. SESS15/SESS16 are NOT local (EXIT trap
+  # backstop kills every HYGPFX session).
+  SESS15="cockpit-${HYGPFX}-st*"
+  SESS16="cockpit-${HYGPFX}-st?"
+  create_session "$SESS15"
+  create_session "$SESS16"
+  slug34=$(session_slug "$SESS15")
+  c34="$STATE_DIR/adopt-claim-$slug34"; printf 'owner34\n%s\n' "$$" >"$c34"
+  p34="$STATE_DIR/prefix-$slug34";       printf 'pfx34\n' >"$p34"
+  s34="$STATE_DIR/seq-$slug34";          : >"$s34"
+  m34="$STATE_DIR/cm-$slug34";           : >"$m34"
+  sf34="$STATE_DIR/last-session-${HYGPFX}key34"; printf '%s\n' "$SESS15" >"$sf34"
+  set +e
+  rc34=0; WSH_COCKPIT_AGENT="${HYGPFX}key34" teardown_session "$SESS15" >/dev/null 2>&1 || rc34=$?
+  set -e
+  ok34=0
+  [ "$slug34" = "$(session_slug "$SESS16")" ] || ok34=1     # same slug, the trap
+  [ "$rc34" -eq 0 ] || ok34=1                                # A killed
+  mux_has "$SESS15" && ok34=1                                # A dead
+  mux_has "$SESS16" || ok34=1                                # B alive
+  [ -e "$sf34" ] && ok34=1                                   # A's state_file gone
+  [ -f "$c34" ] && [ -f "$p34" ] && [ -f "$s34" ] && [ -f "$m34" ] || ok34=1   # B's slug files intact
+  if [ "$ok34" -eq 0 ]; then
+    report_gc_case "34 kill A with live same-slug B: A's state_file removed, B's slug files intact" 0
+  else
+    report_gc_case "34 kill A with live same-slug B: A's state_file removed, B's slug files intact" 1 \
+      "rc34=$rc34 ok34=$ok34 a_alive=$(mux_has "$SESS15" && echo yes || echo no) b_alive=$(mux_has "$SESS16" && echo yes || echo no) state_file=$([ -e "$sf34" ] && echo present || echo gone) claim=$([ -f "$c34" ] && echo present || echo gone) prefix=$([ -f "$p34" ] && echo present || echo gone) seq=$([ -f "$s34" ] && echo present || echo gone) cm=$([ -f "$m34" ] && echo present || echo gone)"
+  fi
+
   if [ "$failures" -ne 0 ]; then
     echo "selftest-gc: $failures failure(s)" >&2
     exit 1
