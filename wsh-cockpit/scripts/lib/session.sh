@@ -912,7 +912,10 @@ oneshot_ssh_track() {
 # is safe to clean even when a live neighbour shares $1's slug.
 teardown_state_file_clean() {
   local sf; sf=$(state_file)
-  if [ -f "$sf" ] && [ "$(tr -d '[:space:]' <"$sf")" = "$1" ]; then
+  # Exact comparison: $(cat) drops only the trailing newline(s) remember_session
+  # wrote. Never strip inner blanks — 'X_a' and 'X_ a' are two sessions with the
+  # same slug (review of d54ca0a9).
+  if [ -f "$sf" ] && [ "$(cat "$sf" 2>/dev/null)" = "$1" ]; then
     rm -f "$sf" 2>/dev/null || true
   fi
 }

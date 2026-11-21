@@ -357,9 +357,13 @@ cmd_selftest_gc() {
     [ -n "${GCSTUB_DIR:-}" ] && rm -rf "$GCSTUB_DIR"
     # Backstop for the throwaway HYGPFX sessions of cases 29-30 (zz/yy
     # pairs): their session options die with them, no markers were made.
-    for s in $(mux_list_sessions 2>/dev/null | grep -F -- "$HYGPFX" || true); do
+    # read -r per line: case 35's session name contains a space.
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
       tmux kill-session -t "=$s" 2>/dev/null || true
-    done
+    done <<EOF_GC_CLEAN
+$(mux_list_sessions 2>/dev/null | grep -F -- "$HYGPFX" || true)
+EOF_GC_CLEAN
   }
   trap live_selftest_gc_cleanup EXIT
   create_session "$SESS"   # detached by construction — never attached
@@ -1024,6 +1028,32 @@ STUB
   else
     report_gc_case "34 kill A with live same-slug B: A's state_file removed, B's slug files intact" 1 \
       "rc34=$rc34 ok34=$ok34 a_alive=$(mux_has "$SESS15" && echo yes || echo no) b_alive=$(mux_has "$SESS16" && echo yes || echo no) state_file=$([ -e "$sf34" ] && echo present || echo gone) claim=$([ -f "$c34" ] && echo present || echo gone) prefix=$([ -f "$p34" ] && echo present || echo gone) seq=$([ -f "$s34" ] && echo present || echo gone) cm=$([ -f "$m34" ] && echo present || echo gone)"
+  fi
+
+  # 35. review of d54ca0a9: the state_file comparison must be EXACT. Stripping
+  # ALL whitespace made 'X_a' equal 'X_ a' (tr -d '[:space:]'), so killing A
+  # ('…-sw_a') erased the pointer to the LIVE B ('…-sw_ a', same slug since
+  # tr -cs squeezes '_ ' to one '_'). Only the trailing newline may be ignored.
+  # SESS17/SESS18 are NOT local (EXIT trap backstop).
+  SESS17="cockpit-${HYGPFX}-sw_a"
+  SESS18="cockpit-${HYGPFX}-sw_ a"
+  create_session "$SESS17"
+  create_session "$SESS18"
+  sf35="$STATE_DIR/last-session-${HYGPFX}key35"; printf '%s\n' "$SESS18" >"$sf35"
+  set +e
+  rc35=0; WSH_COCKPIT_AGENT="${HYGPFX}key35" teardown_session "$SESS17" >/dev/null 2>&1 || rc35=$?
+  set -e
+  ok35=0
+  [ "$(session_slug "$SESS17")" = "$(session_slug "$SESS18")" ] || ok35=1   # same slug, the trap
+  [ "$rc35" -eq 0 ] || ok35=1
+  mux_has "$SESS17" && ok35=1                                # A dead
+  mux_has "$SESS18" || ok35=1                                # B alive
+  [ -f "$sf35" ] && [ "$(cat "$sf35")" = "$SESS18" ] || ok35=1   # B's pointer kept
+  if [ "$ok35" -eq 0 ]; then
+    report_gc_case "35 kill 'X_a' with live 'X_ a': pointer to 'X_ a' kept (exact name match)" 0
+  else
+    report_gc_case "35 kill 'X_a' with live 'X_ a': pointer to 'X_ a' kept (exact name match)" 1 \
+      "rc35=$rc35 ok35=$ok35 a_alive=$(mux_has "$SESS17" && echo yes || echo no) b_alive=$(mux_has "$SESS18" && echo yes || echo no) state_file=$([ -e "$sf35" ] && echo present || echo gone)"
   fi
 
   if [ "$failures" -ne 0 ]; then
