@@ -964,16 +964,17 @@ teardown_session() {
   rm -f "$(claim_path "$(session_slug "$sess")")" 2>/dev/null || true
   rm -f "$(prefix_file "$sess")" 2>/dev/null || true
   tab_cache_invalidate "$sess"
-  if [ "$MUX" = tmux ]; then
-    # sess is the canonical EXACT name (resolved above), so these unset calls
-    # can only ever hit the session we just killed — never a neighbour.
-    tmux set-option -u -t "$sess" "$(sep_helper_option "$sess")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(step_helper_option "$sess")" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_mode_option)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_helper_option sep)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_helper_option step)" >/dev/null 2>&1 || true
-    tmux set-option -u -t "$sess" "$(remote_host_option)" >/dev/null 2>&1 || true
-  fi
+  # NO post-kill `tmux set-option -u` here, on purpose (review of 5fda51be):
+  # @wsh_*_helpers_<sess>, @wsh_remote_mode, @wsh_remote_helper_* and
+  # @wsh_remote_host are SESSION options — they die with the session itself,
+  # so the unset is unnecessary. Worse: `set-option` rejects "=" and resolves
+  # `-t` by PREFIX (measured, same I1/I2 gotcha as docs/gotchas.md), so on the
+  # now-DEAD name the unset returns rc 0 and silently wipes those options on
+  # a LIVING neighbour (killing cockpit-zz erased @wsh_remote_* on cockpit-zz2
+  # — reproduced with `./wsh-live.sh stop cockpit-zz`). And the
+  # guard->kill->cleanup order forbids destructive calls before the kill. If
+  # an unset is ever truly needed, it must target the exact name anchored
+  # ("-t =$name") while the session is still alive — never a dead name.
   # Close and remove the session's ControlMaster socket, if any (orphaned
   # otherwise — see control_path_for_session). "-O exit" needs a host
   # argument syntactically but ignores it once -o ControlPath points at a

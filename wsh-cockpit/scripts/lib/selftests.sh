@@ -355,6 +355,11 @@ cmd_selftest_gc() {
     # GCSTUB_DIR is deliberately NOT local either (same trap-visibility
     # rationale as SESS): cases 21-26 build a stubbed tmux there.
     [ -n "${GCSTUB_DIR:-}" ] && rm -rf "$GCSTUB_DIR"
+    # Backstop for the throwaway HYGPFX sessions of cases 29-30 (zz/yy
+    # pairs): their session options die with them, no markers were made.
+    for s in $(mux_list_sessions 2>/dev/null | grep -F -- "$HYGPFX" || true); do
+      tmux kill-session -t "=$s" 2>/dev/null || true
+    done
   }
   trap live_selftest_gc_cleanup EXIT
   create_session "$SESS"   # detached by construction — never attached
@@ -700,7 +705,9 @@ STUB
   # (rc 0, no matching session line) -> ambiguous -> kept, and the stub must
   # never have seen a kill-session (fail-safe: unverifiable is NOT "0
   # attached" — same rule as case 14's inert hygiene pass).
+  i24=0
   for mode in fail empty; do
+    i24=$((i24 + 1))
     rm -f "$GCSTUB_DIR/killed.log"
     set +e
     out24=$(env STUB_SESS="$GCSTUB_SESS" STUB_ATTACHED=1 STUB_RECHECK_MODE="$mode" GCSTUB_DIR="$GCSTUB_DIR" \
@@ -710,9 +717,9 @@ STUB
     set -e
     if [ "$rc24" -eq 0 ] && printf '%s\n' "$out24" | grep -Fq "kept: $GCSTUB_SESS" \
        && [ ! -e "$GCSTUB_DIR/killed.log" ]; then
-      report_gc_case "24 re-check query '$mode' -> kept, no kill-session (ambiguous = keep)" 0
+      report_gc_case "24.$i24 re-check query '$mode' -> kept, no kill-session (ambiguous = keep)" 0
     else
-      report_gc_case "24 re-check query '$mode' -> kept, no kill-session (ambiguous = keep)" 1 \
+      report_gc_case "24.$i24 re-check query '$mode' -> kept, no kill-session (ambiguous = keep)" 1 \
         "mode=$mode rc24=$rc24 out24='$out24' killed.log=$([ -e "$GCSTUB_DIR/killed.log" ] && cat "$GCSTUB_DIR/killed.log" || echo absent)"
     fi
   done
@@ -846,6 +853,69 @@ STUB
   else
     report_gc_case "28 stop (no guard) still kills AND fully cleans up (markers gone)" 1 \
       "rc28=$rc28 ok28=$ok28 alive=$(mux_has "$SESS5" && echo yes || echo no) out28='$out28' claim=$([ -e "$c28" ] && echo present || echo gone) prefix=$([ -e "$p28" ] && echo present || echo gone)"
+  fi
+
+  # 29-30. P1 (review of 5fda51be): teardown_session must NOT run any
+  # `tmux set-option -u` AFTER mux_kill — on the now-dead name, `set-option`
+  # resolves `-t` by PREFIX (measured: rc 0) and wipes @wsh_remote_mode /
+  # @wsh_remote_host / @wsh_remote_helper_* / @wsh_*_helpers_* of a LIVING
+  # neighbour (killing cockpit-…-zz erased them on cockpit-…-zz2). Those are
+  # session options: they die with the session, so no unset is needed. X2/Y2
+  # (X/Y is a strict prefix of them) are armed with all the options, and the
+  # exact X/Y is killed via `stop` (29) then via `gc` (30) — X2/Y2 must be
+  # alive AND keep every option. SESS6-9 are NOT local (EXIT trap backstop).
+  SESS6="cockpit-${HYGPFX}-zz"
+  SESS7="cockpit-${HYGPFX}-zz2"
+  create_session "$SESS6"
+  create_session "$SESS7"
+  remote_mode_set "$SESS7" 1
+  remote_host_set "$SESS7" "selftest-gc-29-host"
+  remote_helper_path_set "$SESS7" sep "/selftest/gc/29/sep"
+  remote_helper_path_set "$SESS7" step "/selftest/gc/29/step"
+  set +e
+  out29=$("$0" stop "$SESS6" 2>&1)
+  rc29=$?
+  set -e
+  ok29=0
+  mux_has "$SESS6" && ok29=1
+  mux_has "$SESS7" || ok29=1
+  mode29=$( (remote_mode_get "$SESS7") && echo 1 || echo "" )
+  [ "$mode29" = "1" ] || ok29=1
+  [ "$(remote_host_get "$SESS7")" = "selftest-gc-29-host" ] || ok29=1
+  [ "$(remote_helper_path_get "$SESS7" sep)" = "/selftest/gc/29/sep" ] || ok29=1
+  [ "$(remote_helper_path_get "$SESS7" step)" = "/selftest/gc/29/step" ] || ok29=1
+  if [ "$rc29" -eq 0 ] && [ "$ok29" -eq 0 ]; then
+    report_gc_case "29 stop kills exact X, neighbour X2 keeps all its session options" 0
+  else
+    report_gc_case "29 stop kills exact X, neighbour X2 keeps all its session options" 1 \
+      "rc29=$rc29 ok29=$ok29 x_alive=$(mux_has "$SESS6" && echo yes || echo no) x2_alive=$(mux_has "$SESS7" && echo yes || echo no) mode='$mode29' host='$(remote_host_get "$SESS7")' sep='$(remote_helper_path_get "$SESS7" sep)' step='$(remote_helper_path_get "$SESS7" step)' out29='$out29'"
+  fi
+
+  SESS8="cockpit-${HYGPFX}-yy"
+  SESS9="cockpit-${HYGPFX}-yy2"
+  create_session "$SESS8"
+  create_session "$SESS9"
+  remote_mode_set "$SESS9" 1
+  remote_host_set "$SESS9" "selftest-gc-30-host"
+  remote_helper_path_set "$SESS9" sep "/selftest/gc/30/sep"
+  remote_helper_path_set "$SESS9" step "/selftest/gc/30/step"
+  set +e
+  out30=$("$0" gc --idle=0 --only-session="$SESS8" 2>&1)
+  rc30=$?
+  set -e
+  ok30=0
+  mux_has "$SESS8" && ok30=1
+  mux_has "$SESS9" || ok30=1
+  mode30=$( (remote_mode_get "$SESS9") && echo 1 || echo "" )
+  [ "$mode30" = "1" ] || ok30=1
+  [ "$(remote_host_get "$SESS9")" = "selftest-gc-30-host" ] || ok30=1
+  [ "$(remote_helper_path_get "$SESS9" sep)" = "/selftest/gc/30/sep" ] || ok30=1
+  [ "$(remote_helper_path_get "$SESS9" step)" = "/selftest/gc/30/step" ] || ok30=1
+  if [ "$rc30" -eq 0 ] && printf '%s\n' "$out30" | grep -Fq "killed: $SESS8" && [ "$ok30" -eq 0 ]; then
+    report_gc_case "30 gc kills exact Y, neighbour Y2 keeps all its session options" 0
+  else
+    report_gc_case "30 gc kills exact Y, neighbour Y2 keeps all its session options" 1 \
+      "rc30=$rc30 ok30=$ok30 y_alive=$(mux_has "$SESS8" && echo yes || echo no) y2_alive=$(mux_has "$SESS9" && echo yes || echo no) mode='$mode30' host='$(remote_host_get "$SESS9")' sep='$(remote_helper_path_get "$SESS9" sep)' step='$(remote_helper_path_get "$SESS9" step)' out30='$out30'"
   fi
 
   if [ "$failures" -ne 0 ]; then
