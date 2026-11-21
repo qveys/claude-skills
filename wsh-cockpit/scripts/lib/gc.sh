@@ -65,15 +65,75 @@ gc_attached_now() {
   printf '%s\n' "$a"
 }
 
+# Atomic detach-check + kill for ONE exact session (issue #23).
+# gc_attached_now and mux_kill are two tmux clients: a client can attach in
+# the gap and still be killed. One if-shell -F evaluates session_attached and
+# runs kill-session inside the same server command, so nothing else is
+# scheduled between the check and the kill.
+#
+# Target selection, measured tmux 3.8:
+# - `if-shell -t =name` does not expand formats (always the else branch) —
+#   a detached session would never be killed.
+# - `if-shell -t name` is NOT exact: a window of that name in a neighbour
+#   wins, so the attached count can be the neighbour's.
+# - `kill-session` with no -t ignores if-shell's -t and kills another session.
+# The id comes from list-sessions (no -t resolution, same rule as
+# gc_attached_now). if-shell -t "$id" then kills only if THAT id still has
+# this exact name AND session_attached == 0. kill-session itself stays
+# anchored `-t =name`, so a stale id cannot take a neighbour with it.
+# Names outside [A-Za-z0-9_.-] are refused: they would be re-parsed inside
+# the tmux command string.
+#
+# Returns 0 and sets GC_PREKILL_KILLED to the name when THIS call killed it
+# (cmd_gc's mux_kill wrapper then reports success without a second kill).
+# Returns 2 when the session is still there but was not killed (attached).
+# Returns 1 when the session is absent or the answer is unverifiable.
+# Prints nothing — the guard below logs the skip.
+gc_kill_if_detached() {  # $1 session name
+  local s="$1" id fmt out rc=0
+  GC_PREKILL_KILLED=
+  case "$s" in
+    ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+  esac
+  id=$(tmux list-sessions -F $'#{session_id}\x1f#{session_name}' 2>/dev/null \
+      | awk -F $'\x1f' -v n="$s" '$2==n{print $1; f=1} END{exit !f}') || return 1
+  case "$id" in '$'[0-9]*) ;; *) return 1 ;; esac
+  fmt="#{&&:#{==:#{session_attached},0},#{==:#{session_name},${s}}}"
+  out=$(tmux if-shell -F -t "$id" "$fmt" \
+        "kill-session -t =${s}" \
+        "display-message -p GC_KEEP" 2>/dev/null) || rc=$?
+  if [ "$out" = "GC_KEEP" ] && gc_attached_now "$s" >/dev/null; then
+    return 2
+  fi
+  if [ "$rc" -ne 0 ] || [ "$out" = "GC_KEEP" ]; then
+    return 1
+  fi
+  if gc_attached_now "$s" >/dev/null; then return 1; fi
+  GC_PREKILL_KILLED=$s
+  return 0
+}
+
 # Pre-kill guard installed by cmd_gc as teardown_session's
-# TEARDOWN_PRE_KILL_GUARD (issue #23, review of b8e77ad): re-runs the FRESH
-# name match IMMEDIATELY before mux_kill — teardown_session's own cleanup
-# (six set-option, ssh ControlMaster exit, web) runs in between and takes
-# time, and a client attaching during that window must not be killed
-# attached. rc 0 = kill OK; rc 1 = keep (this function logs the "kept:" line,
-# teardown_session then returns 3 without killing).
+# TEARDOWN_PRE_KILL_GUARD (issue #23): runs IMMEDIATELY before mux_kill.
+# On tmux the check and the kill are the single if-shell above — a client
+# attaching during teardown's read-only canonicalisation is spared, and so
+# is one attaching in the old gap between a fresh list-sessions and
+# kill-session. rc 0 = this call already killed the session; rc 1 = keep
+# (this function logs the "kept:" line, teardown_session returns 3 and does
+# not call mux_kill). A non-tmux mux keeps the old read-only re-check.
 gc_pre_kill_guard() {  # $1 session name
   local a rc=0
+  if [ "${MUX:-}" = tmux ]; then
+    gc_kill_if_detached "$1" || rc=$?
+    if [ "$rc" -eq 0 ]; then return 0; fi
+    if [ "$rc" -eq 2 ]; then
+      a=$(gc_attached_now "$1") || a='?'
+      echo "kept: $1 (attached ${a} client(s) at atomic pre-kill — not touched)"
+      return 1
+    fi
+    echo "kept: $1 (attached re-check unverifiable at atomic pre-kill — not touched)"
+    return 1
+  fi
   a=$(gc_attached_now "$1") || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "kept: $1 (attached re-check unverifiable at pre-kill — not touched)"
@@ -84,6 +144,32 @@ gc_pre_kill_guard() {  # $1 session name
     return 1
   fi
   return 0
+}
+
+# cmd_gc kills inside gc_pre_kill_guard (one if-shell). teardown_session still
+# calls mux_kill afterwards and treats a failed kill of a session that is
+# already gone as "raced". The wrapper turns that expected second call into
+# success so the sweep reports a normal kill and still runs cleanup.
+# Installed only for the sweep, then restored — `stop` keeps plain mux_kill.
+gc_mux_kill_wrap_install() {
+  if ! declare -F mux_kill_before_gc >/dev/null 2>&1; then
+    eval "$(declare -f mux_kill | sed '1s/^mux_kill /mux_kill_before_gc /')"
+  fi
+  # shellcheck disable=SC2329  # replaces mux_kill for the sweep; teardown_session calls it
+  mux_kill() {
+    local s="${1#=}"
+    if [ -n "${GC_PREKILL_KILLED:-}" ] && [ "$GC_PREKILL_KILLED" = "$s" ]; then
+      GC_PREKILL_KILLED=
+      return 0
+    fi
+    mux_kill_before_gc "$@"
+  }
+}
+gc_mux_kill_wrap_restore() {
+  if declare -F mux_kill_before_gc >/dev/null 2>&1; then
+    eval "$(declare -f mux_kill_before_gc | sed '1s/^mux_kill_before_gc /mux_kill /')"
+  fi
+  GC_PREKILL_KILLED=
 }
 
 # -- keep-floor (spec v12 §3, step-1.7) -----------------------------------
@@ -381,12 +467,13 @@ cmd_gc() {
   # Installed as teardown_session's pre-kill hook for the whole sweep (bash
   # dynamic scoping: teardown_session sees this local). `stop` never sets it
   # and keeps its explicit kill semantics. teardown_session's order is
-  # guard -> kill -> cleanup: the re-check runs IMMEDIATELY before mux_kill
-  # with no intermediate action (a client attaching during teardown's own
-  # cleanup can no longer be killed attached), and a refused kill leaves
-  # ZERO state modified (issue #23).
+  # guard -> kill -> cleanup. On tmux the guard's if-shell both re-checks
+  # and kills (issue #23): a client attaching during teardown's read-only
+  # canonicalisation, or in the gap after the snapshot re-check below, is
+  # not killed. A refused kill leaves ZERO state modified.
   # shellcheck disable=SC2034  # read via ${TEARDOWN_PRE_KILL_GUARD:-} in lib/session.sh (bash dynamic scoping)
   local TEARDOWN_PRE_KILL_GUARD="gc_pre_kill_guard"
+  gc_mux_kill_wrap_install
   while IFS='|' read -r nm att act; do
     [ -n "$nm" ] || continue
     is_keep=0
@@ -406,10 +493,11 @@ cmd_gc() {
         # TOCTOU re-check (issue #23): $att is from the one-shot snapshot at
         # the top of this sweep — while the loop was tearing down earlier
         # candidates, a client may have attached to THIS session. Query its
-        # attached count FRESH, right before the kill: >0, or a failed /
-        # ambiguous query, means keep it and say so like every other kept
-        # candidate (fail-safe: never kill on uncertain state, same rule as
-        # the hygiene pass above).
+        # attached count FRESH before teardown: >0, or a failed / ambiguous
+        # query, means keep it. The kill itself re-checks again inside one
+        # tmux if-shell (gc_pre_kill_guard) — this read and that kill are
+        # not the same process. Fail-safe: never kill on uncertain state,
+        # same rule as the hygiene pass above.
         fresh_att=""; fresh_rc=0
         fresh_att=$(gc_attached_now "$nm") || fresh_rc=$?
         if [ "$fresh_rc" -ne 0 ]; then
@@ -446,6 +534,7 @@ cmd_gc() {
       kept=$((kept + 1))
     fi
   done < <(printf '%s\n' "$sessions")
+  gc_mux_kill_wrap_restore
 
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "gc: dry-run — ${wouldkill} would be killed, ${kept} kept (idle threshold ${IDLE}s)"
