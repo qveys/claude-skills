@@ -568,35 +568,49 @@ cmd_selftest_gc() {
   # per-session re-check (gc_attached_now, called right before each
   # teardown) must spare it. Exercised end-to-end through a stubbed `tmux`
   # binary placed first in PATH for the gc SUBPROCESS only (same stub idiom
-  # as selftest-wrapper's $tmpdir/bin stub and case 14's PATH masking): the
-  # stub answers the snapshot list-sessions with attached=0 and the
-  # kill-time display-message with $STUB_ATTACHED, and records every
-  # kill-session in $GCSTUB_DIR/killed.log. WSH_COCKPIT_STATE_DIR points at
-  # an empty tmpdir so the subprocess's unscoped hygiene pass can never
+  # as selftest-wrapper's $tmpdir/bin stub and case 14's PATH masking). The
+  # stub is QUERY-FORM SENSITIVE: gc_attached_now reads its kill-time answer
+  # via `list-sessions -F '#{session_name}|#{session_attached}'`, while the
+  # sweep's snapshot uses a format that also has session_activity — the stub
+  # answers the snapshot with attached=0 and the re-check with
+  # $STUB_ATTACHED (or fails/empties it under $STUB_RECHECK_MODE), and records
+  # every kill-session in $GCSTUB_DIR/killed.log. WSH_COCKPIT_STATE_DIR points
+  # at an empty tmpdir so the subprocess's unscoped hygiene pass can never
   # touch a real marker (case 14's rationale, one level up).
   GCSTUB_DIR=$(mktemp -d "${TMPDIR:-/tmp}/wsh-live-gcstub.XXXXXX")
   mkdir -p "$GCSTUB_DIR/bin" "$GCSTUB_DIR/state"
   GCSTUB_SESS="cockpit-${HYGPFX}-toctou"
   cat >"$GCSTUB_DIR/bin/tmux" <<'STUB'
 #!/usr/bin/env bash
-# Stub tmux for selftest-gc cases 21-22: logs every call to
-# $GCSTUB_DIR/calls.log, answers list-sessions with the single fake session
-# $STUB_SESS (snapshot attached=0, activity epoch 1 = maximally idle) and
-# display-message '#{session_attached}' with $STUB_ATTACHED (the kill-time
-# re-check), and records any kill-session in $GCSTUB_DIR/killed.log.
+# Stub tmux for selftest-gc cases 21-25: logs every call to
+# $GCSTUB_DIR/calls.log and records any kill-session in $GCSTUB_DIR/killed.log.
+#   - list-sessions whose format has session_activity (the sweep SNAPSHOT)
+#     -> "$STUB_SESS|0|1" (attached=0, activity epoch 1 = maximally idle)
+#   - list-sessions whose format has session_attached only (the kill-time
+#     RE-CHECK read by gc_attached_now) -> "$STUB_SESS|$STUB_ATTACHED",
+#     or no output + rc 1 when STUB_RECHECK_MODE=fail, no output + rc 0 when
+#     STUB_RECHECK_MODE=empty
+#   - bare '#{session_name}' (hygiene pass) -> "$STUB_SESS"
+# display-message only answers '#{session_name}' (teardown_session's
+# canonical-name round-trip in case 22).
 echo "$*" >>"${GCSTUB_DIR:?}/calls.log"
 case "$1" in
   kill-session) echo "$*" >>"${GCSTUB_DIR:?}/killed.log"; exit 0 ;;
   list-sessions)
     case "$*" in
-      *session_attached*) printf '%s|0|1\n' "${STUB_SESS:?}" ;;
+      *session_activity*) printf '%s|0|1\n' "${STUB_SESS:?}" ;;
+      *session_attached*)
+        case "${STUB_RECHECK_MODE:-ok}" in
+          fail) exit 1 ;;
+          empty) exit 0 ;;
+          *) printf '%s|%s\n' "${STUB_SESS:?}" "${STUB_ATTACHED:-1}" ;;
+        esac ;;
       *) printf '%s\n' "${STUB_SESS:?}" ;;
     esac
     exit 0 ;;
   display-message)
     fmt="${@: -1}"
     case "$fmt" in
-      *session_attached*) printf '%s\n' "${STUB_ATTACHED:-1}" ;;
       *session_name*)
         tgt=""; prev=""
         for a in "$@"; do [ "$prev" = "-t" ] && tgt="$a"; prev="$a"; done
@@ -655,6 +669,50 @@ STUB
   else
     report_gc_case "23 gc_attached_now: real detached session -> '0' rc0, dead target -> rc!=0" 1 \
       "rc23=$rc23 att23='$att23' rc23b=$rc23b att23b='$att23b'"
+  fi
+
+  # 24. the kill-time re-check query FAILS (stub rc!=0) or answers EMPTY
+  # (rc 0, no matching session line) -> ambiguous -> kept, and the stub must
+  # never have seen a kill-session (fail-safe: unverifiable is NOT "0
+  # attached" — same rule as case 14's inert hygiene pass).
+  for mode in fail empty; do
+    rm -f "$GCSTUB_DIR/killed.log"
+    set +e
+    out24=$(env STUB_SESS="$GCSTUB_SESS" STUB_ATTACHED=1 STUB_RECHECK_MODE="$mode" GCSTUB_DIR="$GCSTUB_DIR" \
+      WSH_COCKPIT_STATE_DIR="$GCSTUB_DIR/state" PATH="$GCSTUB_DIR/bin:$PATH" \
+      "$SCRIPT_DIR/wsh-live.sh" gc --idle=0 --only-session="$GCSTUB_SESS" 2>&1)
+    rc24=$?
+    set -e
+    if [ "$rc24" -eq 0 ] && printf '%s\n' "$out24" | grep -Fq "kept: $GCSTUB_SESS" \
+       && [ ! -e "$GCSTUB_DIR/killed.log" ]; then
+      report_gc_case "24 re-check query '$mode' -> kept, no kill-session (ambiguous = keep)" 0
+    else
+      report_gc_case "24 re-check query '$mode' -> kept, no kill-session (ambiguous = keep)" 1 \
+        "mode=$mode rc24=$rc24 out24='$out24' killed.log=$([ -e "$GCSTUB_DIR/killed.log" ] && cat "$GCSTUB_DIR/killed.log" || echo absent)"
+    fi
+  done
+
+  # 25. EXACT-name only (review of da463fa2, measured tmux 3.8): a dead name
+  # that is a strict PREFIX of a LIVING session must NOT resolve to it —
+  # `display-message -t <prefix>` would (tmux's prefix fallback, rc 0) and
+  # read the NEIGHBOUR's attached count, which could get an attached session
+  # killed. With gc_attached_now's list-sessions + awk '$1==n' exact match,
+  # the absent prefix must fail (rc!=0, empty output) while the living
+  # neighbour still answers a clean "0" rc 0.
+  P25="selftestgc$$-pfx"
+  set +e
+  tmux new-session -d -s "${P25}-2" 2>/dev/null
+  rc25new=$?
+  att25=$(gc_attached_now "$P25"); rc25=$?
+  att25b=$(gc_attached_now "${P25}-2"); rc25b=$?
+  set -e
+  tmux kill-session -t "=${P25}-2" 2>/dev/null || true
+  if [ "$rc25new" -eq 0 ] && [ "$rc25" -ne 0 ] && [ -z "$att25" ] \
+     && [ "$rc25b" -eq 0 ] && [ "$att25b" = "0" ]; then
+    report_gc_case "25 dead prefix of a living session does not resolve to it (exact match only)" 0
+  else
+    report_gc_case "25 dead prefix of a living session does not resolve to it (exact match only)" 1 \
+      "rc25new=$rc25new rc25=$rc25 att25='$att25' rc25b=$rc25b att25b='$att25b' (want rc25!=0 empty, rc25b=0 '0')"
   fi
 
   if [ "$failures" -ne 0 ]; then

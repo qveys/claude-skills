@@ -42,20 +42,22 @@ gc_should_kill() {
 # sweep and is stale by the time the loop reaches a candidate — a client that
 # attached in between must not be killed. Deliberately NOT pure (unlike
 # gc_should_kill above): calling tmux is the whole point.
-#   $1 session name — an exact name from list-sessions, so tmux's
-#      exact-match-first resolution names the right session. The "=" anchor
-#      is deliberately NOT used here: measured, "=" is honoured by
-#      target-SESSION commands (has-session) but NOT by the target-PANE
-#      display-message, which returns empty with rc=0 instead (same gotcha
-#      as session_is_own in lib/session.sh / docs/gotchas.md) — an anchored
-#      call would answer "unverifiable" for every session and the sweep
-#      would never kill anything.
+# EXACT-name matching only, via list-sessions + awk '$1==n' — never a `-t`
+# target: tmux resolves `-t` by exact name, then PREFIX, then fnmatch (and a
+# window name of the current session prefixing the target wins over the
+# session name — measured tmux 3.8), so `display-message -t <name>` on a dead
+# name that is a strict prefix of a LIVING neighbour answers with the
+# NEIGHBOUR's attached count, rc 0 — which could get an attached session
+# killed. list-sessions has no target resolution: the name must equal a live
+# session's name exactly, otherwise awk exits 1 (absent -> rc 1 -> kept).
 # Prints the count and returns 0 on a clean numeric answer; returns 1
-# (printing nothing) when the query fails or answers non-numeric — callers
-# must read rc 1 as "unverifiable", never as "0 attached".
+# (printing nothing) when the query fails, the session is absent, or the
+# answer is non-numeric — callers must read rc 1 as "unverifiable", never as
+# "0 attached".
 gc_attached_now() {
   local a
-  a=$(tmux display-message -p -t "$1" '#{session_attached}' 2>/dev/null) || return 1
+  a=$(tmux list-sessions -F '#{session_name}|#{session_attached}' 2>/dev/null \
+      | awk -F'|' -v n="$1" '$1==n{print $2; f=1} END{exit !f}') || return 1
   case "$a" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$a"
 }
