@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 .superpowers/
 *-workspace/
+# valeurs d'infra locales du skill paperclip-vps
+paperclip-vps/local.env
 
 # Config d'IDE (JetBrains)
 .idea/
@@ -12,6 +14,6 @@ __pycache__/
 # Skills tierces clonées ici : chacune est un dépôt git autonome avec son
 # propre remote, donc du ressort de son upstream, pas de ce dépôt-ci.
 # github.com/ksimback/looper
-looper/
+/looper/
 # github.com/bjgreenberg/senior-engineering-partner
-senior-engineering-partner/
+/senior-engineering-partner/
